@@ -1,0 +1,124 @@
+########################
+# Haskell Specific
+########################
+
+# Stack
+.stack-work/
+stack.yaml.lock
+
+# Cabal
+dist/
+dist-newstyle/
+cabal-dev/
+*.cabal
+!template-haskell-project.cabal
+.cabal-sandbox/
+cabal.sandbox.config
+cabal.project.local
+cabal.project.local~
+.HTF/
+.hpc/
+
+# Haskell build artifacts
+*.o
+*.hi
+*.hie
+*.chi
+*.chs.h
+*.dyn_o
+*.dyn_hi
+.hspec-failures
+.ghc.environment.*
+
+########################
+# Python Specific
+########################
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.env/
+.venv/
+env/
+venv/
+
+# Packaging
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+MANIFEST
+
+# Python Dependency tools
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+.installed.cfg
+
+# Python Test & Coverage
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints
+
+########################
+# IDE / Editor Junk
+########################
+.idea/
+*.iml
+.vscode/
+*.swp
+*~
+*.bak
+*.tmp
+*.log
+tags
+
+########################
+# Miscellaneous
+########################
+
+# Distribution
+bin/
+obj/
+tmp/
+temp/
+
+# System / misc
+.DS_Store
+*.patch
+*.orig
+*.dump
+
+# Local databases
+*.db
+*.sqlite
+*.wal
+*.duckdb
+
+# Dependency lock files (optional)
+poetry.lock
+
+# Additional files and directories to ignore (put below)
+docs/api/
+*_output.txt
+.codex
+.claude/
