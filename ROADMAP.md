@@ -11,9 +11,9 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Public API facade module (`Ocelot`) with versioned entry point
 - [x] SM83 register file with 8-bit registers, 16-bit pairs, and Z/N/H/C flag accessors
 - [x] DMG post-boot register state constant
-- [ ] SM83 unprefixed opcode decoder (256 entries) with M-cycle timing
+- [ ] SM83 unprefixed opcode decoder (256 entries) with M-cycle timing — partial: ~30 instruction kinds covering NOP/HALT, LD r,r'/r,d8/rr,d16, LD A,(BC)/(DE)/(HL+/-), INC/DEC, ALU r/d8, JR/JP/CALL/RET, PUSH/POP. Conditional JP/CALL/RET, ADD HL/SP, RLCA/RLA/etc., DAA, LDH and CB-prefix all deferred
 - [ ] SM83 CB-prefix opcode decoder (256 entries) with M-cycle timing
-- [ ] ALU helpers (add/adc/sub/sbc/and/or/xor/cp/inc/dec) with correct flag effects
+- [x] ALU helpers (add/adc/sub/sbc/and/or/xor/cp/inc/dec) with correct flag effects, plus add16 and addSP
 - [ ] Bit/rotate/shift helpers (RLC/RRC/RL/RR/SLA/SRA/SWAP/SRL/BIT/RES/SET)
 - [ ] Interrupt controller (IF/IE, IME, EI/DI semantics, HALT bug, STOP)
 - [ ] Master step loop driving CPU, PPU, APU, timer, and DMA from one clock budget
@@ -29,8 +29,8 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [ ] CGB WRAM banking (`SVBK`, banks 1-7)
 - [ ] CGB VRAM banking (`VBK`)
 - [ ] CGB HDMA: general-purpose and HBlank transfers
-- [ ] Cartridge header parsing (title, CGB flag, MBC type, ROM/RAM size, checksum)
-- [ ] No-MBC cartridges (32 KiB, optional 8 KiB RAM)
+- [x] Cartridge header parsing (title, CGB flag, MBC type, ROM/RAM size, checksum)
+- [x] No-MBC cartridges (32 KiB, optional 8 KiB RAM)
 - [ ] MBC1 with mode select, multicart variant detection
 - [ ] MBC2 (built-in 512x4-bit RAM)
 - [ ] MBC3 with RTC latching and battery-backed time
@@ -99,11 +99,16 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] QuickCheck-based property tests for SM83 register pair and flag invariants
 - [ ] Module-local unit tests for every CPU opcode group
 - [ ] Module-local unit tests for MMU mirroring and MBC banking
-- [ ] Integration test driving the public `Ocelot` facade through one frame
-- [ ] Regression test harness for ROM-backed golden hashes (`test/testroms/`)
+- [ ] Integration test-driving the public `Ocelot` facade through one frame
+- [ ] Regression test harness for ROM-backed golden hashes (`external/gb-test-roms/` for blargg, `test/testroms/` for custom ROMs)
+- [x] Blargg test ROM collection wired in as a git submodule under `external/gb-test-roms`
 - [ ] Blargg cpu_instrs ROM run-to-pass coverage
 - [ ] Blargg instr_timing ROM run-to-pass coverage
 - [ ] Blargg mem_timing ROM run-to-pass coverage
+- [ ] Blargg dmg_sound ROM run-to-pass coverage
+- [ ] Blargg cgb_sound ROM run-to-pass coverage
+- [ ] Blargg oam_bug ROM run-to-pass coverage
+- [ ] Blargg halt_bug, interrupt_time ROM run-to-pass coverage
 - [ ] mooneye-test-suite acceptance category run-to-pass coverage
 - [ ] mooneye-test-suite emulator-only category run-to-pass coverage
 - [ ] Coverage reporting via `hpc-codecov` in CI

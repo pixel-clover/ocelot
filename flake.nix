@@ -37,8 +37,7 @@
               pkgs.pkg-config
             ];
 
-            # Stack picks up this GHC via system-ghc/install-ghc settings in
-            # stack.yaml, so no extra flags are needed at the command line.
+            # Stack picks up this GHC via system-ghc/install-ghc settings in stack.yaml, so no extra flags are needed at the command line.
             shellHook = ''
               echo "Ocelot dev shell: ghc $(ghc --numeric-version), stack $(stack --numeric-version 2>/dev/null || true)"
             '';

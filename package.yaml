@@ -1,22 +1,24 @@
-name:                ocelot
-version:             0.1.0.0
-github:              "pixel-clover/ocelot"
-license:             MIT
-author:              "Hassan Abedi"
-maintainer:          "hassan.abedi@obsidian.systems"
-copyright:           "2026 Hassan Abedi"
+name: ocelot
+version: 0.1.0.0
+github: "pixel-clover/ocelot"
+license: MIT
+author: "Hassan Abedi"
+maintainer: "hassan.abedi@obsidian.systems"
+copyright: "2026 Hassan Abedi"
 
 extra-source-files:
   - README.md
   - LICENSE
 
-synopsis:            A Game Boy and Game Boy Color emulator in Haskell
-category:            Emulator
-description:         Please see the README on GitHub at <https://github.com/pixel-clover/ocelot#readme>
+synopsis: A Game Boy and Game Boy Color emulator in Haskell
+category: Emulator
+description: Please see the README on GitHub at <https://github.com/pixel-clover/ocelot#readme>
 
 dependencies:
   - base >= 4.14 && < 5
+  - bytestring >= 0.11 && < 0.13
   - text >= 1.2 && < 3
+  - vector >= 0.13 && < 0.14
 
 ghc-options:
   - -Wall
@@ -34,8 +36,8 @@ library:
 
 executables:
   ocelot:
-    main:                Main.hs
-    source-dirs:         app
+    main: Main.hs
+    source-dirs: app
     ghc-options:
       - -threaded
       - -rtsopts
@@ -45,8 +47,8 @@ executables:
 
 tests:
   ocelot-test:
-    main:                Spec.hs
-    source-dirs:         test
+    main: Spec.hs
+    source-dirs: test
     ghc-options:
       - -threaded
       - -rtsopts
