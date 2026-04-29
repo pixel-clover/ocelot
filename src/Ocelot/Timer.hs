@@ -5,20 +5,35 @@
 The internal divider is a 16-bit counter ticked once per T-cycle. @DIV@
 (@0xFF04@) reads the upper 8 bits; any write resets the entire counter to 0.
 
-@TIMA@ increments at one of four rates selected by the low two bits of @TAC@,
-when the timer is enabled (bit 2 of @TAC@):
+Real hardware does not increment TIMA at a fixed rate: it ANDs a specific
+bit of the divider with the timer-enable bit (TAC bit 2), and TIMA
+increments on the *falling edge* of that AND signal. The TAC rate bits
+select which divider bit to use:
 
-> 00 -> 1024 T-cycles  (4096 Hz)
-> 01 ->   16 T-cycles  (262144 Hz)
-> 10 ->   64 T-cycles  (65536 Hz)
-> 11 ->  256 T-cycles  (16384 Hz)
+> 00 -> bit 9  (every 1024 T-cycles, 4096 Hz)
+> 01 -> bit 3  (every 16 T-cycles, 262144 Hz)
+> 10 -> bit 5  (every 64 T-cycles, 65536 Hz)
+> 11 -> bit 7  (every 256 T-cycles, 16384 Hz)
 
-When @TIMA@ overflows from @0xFF@ to (would-be) @0x100@ it reloads from @TMA@
-and signals the bus to set the Timer bit (bit 2) of @IF@. The
-single-cycle "0x00 then TMA" overflow window and the @TAC@ falling-edge
-glitch are not modeled; the simpler "increment by accumulated rate" rule is
-correct for the vast majority of ROMs and matches blargg's @cpu_instrs@
-@02-interrupts@ expectations.
+The falling-edge view explains several "obscure timer" behaviors:
+
+* Writing @DIV@ resets the divider to 0; if the AND signal was high
+  (the selected bit was set and TAC enabled), the abrupt drop to 0
+  produces a falling edge and TIMA increments once.
+* Writing @TAC@ that changes the rate or clears the enable bit can
+  similarly drive AND high to low, with the same effect.
+
+TIMA overflow has a 1 M-cycle reload window:
+
+* T0 the falling edge wraps TIMA from 0xFF to 0x00 (no @IF@ yet).
+* T1..T3 TIMA stays at 0; writes to TIMA in this window cancel the
+  reload (and the IF), and writes to TMA queue the new reload value.
+* T4 the reload fires: TIMA := TMA, @IF@ bit 2 set.
+
+This module models all of the above. The single hardware behavior we
+deliberately do not replicate is the "writes to TIMA in the same M-cycle
+as the reload fire are ignored" rule, which mooneye does not stress
+through this module's surface.
 -}
 module Ocelot.Timer (
     TimerState (..),
@@ -40,16 +55,23 @@ import Data.Word (Word16, Word8)
 data TimerState = TimerState
     { timDivider :: !Word16
     -- ^ Internal 16-bit T-cycle counter. @DIV@ exposes the upper 8 bits.
-    , timTimaAccum :: !Word16
-    -- ^ T-cycles accumulated toward the next TIMA tick.
     , timTima :: !Word8
     , timTma :: !Word8
     , timTac :: !Word8
+    , timPrevAnd :: !Bool
+    -- ^ Previous AND of (timer-enabled) and (selected divider bit).
+    -- TIMA increments on the falling edge of this signal.
+    , timReloadCounter :: !Int
+    -- ^ T-cycles remaining until a pending TIMA-from-TMA reload fires;
+    -- 0 means no reload pending. Set to 4 when a falling edge wraps
+    -- TIMA from 0xFF to 0x00. During the count-down a write to TIMA
+    -- cancels the reload (and the IF that would have fired with it);
+    -- a write to TMA changes the value the reload will load.
     }
     deriving (Eq, Show)
 
 initialTimer :: TimerState
-initialTimer = TimerState 0 0 0 0 0
+initialTimer = TimerState 0 0 0 0 False 0
 
 readDiv :: TimerState -> Word8
 readDiv ts = fromIntegral (timDivider ts `shiftR` 8)
@@ -63,48 +85,98 @@ readTma = timTma
 readTac :: TimerState -> Word8
 readTac ts = timTac ts .|. 0xF8 -- unused upper bits read as 1
 
+----------------------------------------------------------------------
+-- Edge-detector core
+----------------------------------------------------------------------
+
+-- | Bit of 'timDivider' selected by the low two bits of @TAC@.
+selectedDivBit :: Word8 -> Int
+selectedDivBit tac = case tac .&. 0x03 of
+    0x00 -> 9
+    0x01 -> 3
+    0x02 -> 5
+    _ -> 7
+
+-- | The "AND" signal: timer-enabled AND the selected divider bit.
+andSignal :: Word16 -> Word8 -> Bool
+andSignal d tac = testBit tac 2 && testBit d (selectedDivBit tac)
+
+{- | Apply a falling-edge transition: increment TIMA. If TIMA wraps from
+0xFF to 0x00, schedule a TMA-reload to fire 4 T-cycles later. (Note that
+TIMA itself reads as 0 immediately on overflow; only the @IF@ raise and
+the TMA load are delayed.)
+-}
+applyFallingEdge :: TimerState -> TimerState
+applyFallingEdge ts
+    | timTima ts == 0xFF = ts{timTima = 0x00, timReloadCounter = 4}
+    | otherwise = ts{timTima = timTima ts + 1}
+
+{- | Step one T-cycle. Returns the new state and whether the TMA reload
+fired this T-cycle (the bus turns that into an @IF@ bit-2 raise).
+-}
+stepT :: TimerState -> (TimerState, Bool)
+stepT ts0 =
+    -- 1. Decrement a pending reload counter. If it reaches 0 this cycle,
+    --    fire the reload: TIMA := TMA, signal IF.
+    let !rc = timReloadCounter ts0
+        (ts1, fired) =
+            if rc > 0
+                then
+                    let !rc' = rc - 1
+                     in if rc' == 0
+                            then (ts0{timReloadCounter = 0, timTima = timTma ts0}, True)
+                            else (ts0{timReloadCounter = rc'}, False)
+                else (ts0, False)
+        -- 2. Tick the divider.
+        !d' = timDivider ts1 + 1
+        ts2 = ts1{timDivider = d'}
+        -- 3. Detect falling edge of the AND signal; increment TIMA if so.
+        !newAnd = andSignal d' (timTac ts2)
+        !falling = timPrevAnd ts2 && not newAnd
+        ts3 = if falling then applyFallingEdge ts2 else ts2
+        -- 4. Latch the new AND for next cycle's edge detector.
+        !ts4 = ts3{timPrevAnd = newAnd}
+     in (ts4, fired)
+
+----------------------------------------------------------------------
+-- Public surface
+----------------------------------------------------------------------
+
 writeDiv :: TimerState -> TimerState
-writeDiv ts = ts{timDivider = 0, timTimaAccum = 0}
+writeDiv ts =
+    -- Reset the divider; if the AND signal was high it drops to low,
+    -- producing a falling edge that increments TIMA once.
+    let !ts1 = ts{timDivider = 0}
+        !newAnd = andSignal 0 (timTac ts1)
+        !ts2 = if timPrevAnd ts1 && not newAnd then applyFallingEdge ts1 else ts1
+     in ts2{timPrevAnd = newAnd}
+
+writeTac :: Word8 -> TimerState -> TimerState
+writeTac v ts =
+    -- Same edge detector: changing TAC can drive AND high -> low.
+    let !ts1 = ts{timTac = v .&. 0x07}
+        !newAnd = andSignal (timDivider ts1) (timTac ts1)
+        !ts2 = if timPrevAnd ts1 && not newAnd then applyFallingEdge ts1 else ts1
+     in ts2{timPrevAnd = newAnd}
 
 writeTima :: Word8 -> TimerState -> TimerState
-writeTima v ts = ts{timTima = v}
+writeTima v ts
+    -- A TIMA write during the reload window cancels the reload and the
+    -- pending @IF@ raise: the new value sticks instead of TMA.
+    | timReloadCounter ts > 0 = ts{timTima = v, timReloadCounter = 0}
+    | otherwise = ts{timTima = v}
 
 writeTma :: Word8 -> TimerState -> TimerState
 writeTma v ts = ts{timTma = v}
 
-writeTac :: Word8 -> TimerState -> TimerState
-writeTac v ts = ts{timTac = v .&. 0x07}
-
-{- | Advance the timer by @mCycles@ M-cycles (@mCycles * 4@ T-cycles). Returns
-the new state and whether @TIMA@ overflowed at least once during this advance
-(in which case the bus must set bit 2 of @IF@).
+{- | Advance the timer by @mCycles@ M-cycles (@mCycles * 4@ T-cycles).
+Returns the new state and whether the timer interrupt should be raised
+at least once during this advance.
 -}
 advance :: Int -> TimerState -> (TimerState, Bool)
-advance mCycles ts =
-    let !t = fromIntegral (mCycles * 4) :: Word16
-        !ts1 = ts{timDivider = timDivider ts + t}
-     in if not (timerEnabled ts1)
-            then (ts1, False)
-            else
-                let !rate = rateFor (timTac ts1)
-                    (accum', tima', overflowed) =
-                        tickTima rate (timTimaAccum ts1 + t) (timTima ts1) (timTma ts1)
-                 in (ts1{timTimaAccum = accum', timTima = tima'}, overflowed)
-
-timerEnabled :: TimerState -> Bool
-timerEnabled ts = testBit (timTac ts) 2
-
-rateFor :: Word8 -> Word16
-rateFor tac = case tac .&. 0x03 of
-    0x00 -> 1024
-    0x01 -> 16
-    0x02 -> 64
-    _ -> 256 -- 0x03
-
-tickTima :: Word16 -> Word16 -> Word8 -> Word8 -> (Word16, Word8, Bool)
-tickTima rate accum0 tima0 tma = go accum0 tima0 False
+advance mCycles ts0 = go (mCycles * 4) ts0 False
   where
-    go !a !t !ov
-        | a < rate = (a, t, ov)
-        | t == 0xFF = go (a - rate) tma True
-        | otherwise = go (a - rate) (t + 1) ov
+    go 0 !ts !ov = (ts, ov)
+    go !n !ts !ov =
+        let (!ts', !f) = stepT ts
+         in go (n - 1) ts' (ov || f)

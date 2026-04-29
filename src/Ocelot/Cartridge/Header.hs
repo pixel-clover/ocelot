@@ -62,6 +62,7 @@ data MbcKind
     | Mbc2
     | Mbc3
     | Mbc5
+    | HuC1
     | UnknownMbc !Word8
     deriving (Eq, Show)
 
@@ -150,6 +151,7 @@ decodeCartridgeType w = case w of
     0x1C -> (Mbc5, noCaps{capRumble = True})
     0x1D -> (Mbc5, noCaps{capRumble = True, capRam = True})
     0x1E -> (Mbc5, noCaps{capRumble = True, capRam = True, capBattery = True})
+    0xFF -> (HuC1, noCaps{capRam = True, capBattery = True})
     other -> (UnknownMbc other, noCaps)
   where
     noCaps = Capabilities False False False False

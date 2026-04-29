@@ -25,7 +25,7 @@ module Ocelot.Joypad (
     loadState,
 ) where
 
-import Control.Monad (when)
+import Control.Monad (unless, when)
 import Data.Bits (shiftL, testBit, (.&.), (.|.))
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Set (Set)
@@ -78,7 +78,7 @@ setButton b !pressed jp = do
         then do
             modifyIORef' (jpButtons jp) (Set.insert b)
             -- Falling edge candidate: button newly pressed AND its row is selected.
-            when (not already) $ do
+            unless already $ do
                 sel <- readIORef (jpRowSelect jp)
                 let action = b == ButtonA || b == ButtonB || b == ButtonSelect || b == ButtonStart
                     actionRow = not (testBit sel 5)

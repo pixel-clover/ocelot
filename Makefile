@@ -13,7 +13,8 @@ DOC_OUT       := docs/haskell
 # Targets
 ################################################################################
 
-.PHONY: all build rebuild run test cov lint format format-check doc clean install-deps release help coverage repl setup-hooks test-hooks
+.PHONY: all build rebuild run test cov lint format format-check doc clean install-deps release help coverage \
+ repl setup-hooks test-hooks mooneye-roms acid2-roms test-roms
 
 .DEFAULT_GOAL := help
 
@@ -87,3 +88,44 @@ setup-hooks: ## Install Git hooks (pre-commit and pre-push)
 test-hooks: ## Run Git hooks on all files manually
 	@echo "Running Git hooks..."
 	@pre-commit run --all-files
+
+# Default mooneye prebuilt ZIP. Override on the command line if a newer one is published, like:
+#   make mooneye-roms MOONEYE_URL=https://gekkio.fi/files/mooneye-test-suite/mts-YYYYMMDD-HHMM-XXXXXXX/mts-YYYYMMDD-HHMM-XXXXXXX.zip
+MOONEYE_URL ?= https://gekkio.fi/files/mooneye-test-suite/mts-20240127-1204-74ae166/mts-20240127-1204-74ae166.zip
+MOONEYE_DIR := test/testroms/mooneye
+
+mooneye-roms: ## Fetch the prebuilt mooneye-test-suite ROMs into `test/testroms/mooneye`
+	@if [ -d $(MOONEYE_DIR) ] && [ -n "$$(ls -A $(MOONEYE_DIR) 2>/dev/null)" ]; then \
+		echo "ROMs already present at $(MOONEYE_DIR). Delete the directory to re-fetch."; \
+		exit 0; \
+	fi
+	@echo "Fetching mooneye ROMs from $(MOONEYE_URL)"
+	@TMP=$$(mktemp -d) && trap "rm -rf $$TMP" EXIT && \
+		curl -fL --progress-bar -o $$TMP/mts.zip "$(MOONEYE_URL)" && \
+		unzip -q $$TMP/mts.zip -d $$TMP && \
+		mkdir -p $(MOONEYE_DIR) && \
+		cp -R $$TMP/mts-*/. $(MOONEYE_DIR)/ && \
+		echo "Done. ROMs in $(MOONEYE_DIR). Run with OCELOT_GOLDEN=1 to exercise them."
+
+DMG_ACID2_URL ?= https://github.com/mattcurrie/dmg-acid2/releases/download/v1.0/dmg-acid2.gb
+CGB_ACID2_URL ?= https://github.com/mattcurrie/cgb-acid2/releases/download/v1.0/cgb-acid2.gbc
+DMG_ACID2_PATH := test/testroms/dmg-acid2.gb
+CGB_ACID2_PATH := test/testroms/cgb-acid2.gbc
+
+acid2-roms: ## Fetch the prebuilt dmg-acid2 and cgb-acid2 ROMs into `test/testroms`
+	@mkdir -p $(dir $(DMG_ACID2_PATH))
+	@if [ ! -f $(DMG_ACID2_PATH) ]; then \
+		echo "Fetching dmg-acid2 from $(DMG_ACID2_URL)"; \
+		curl -fL --progress-bar -o $(DMG_ACID2_PATH) "$(DMG_ACID2_URL)"; \
+	else \
+		echo "Already present: $(DMG_ACID2_PATH)"; \
+	fi
+	@if [ ! -f $(CGB_ACID2_PATH) ]; then \
+		echo "Fetching cgb-acid2 from $(CGB_ACID2_URL)"; \
+		curl -fL --progress-bar -o $(CGB_ACID2_PATH) "$(CGB_ACID2_URL)"; \
+	else \
+		echo "Already present: $(CGB_ACID2_PATH)"; \
+	fi
+
+test-roms: mooneye-roms acid2-roms ## Fetch all third-party test ROMs into `test/testroms`
+	@echo "All test ROMs ready. Run with OCELOT_GOLDEN=1 to exercise them."

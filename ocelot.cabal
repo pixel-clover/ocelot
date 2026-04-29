@@ -1,0 +1,123 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.35.2.
+--
+-- see: https://github.com/sol/hpack
+
+name:           ocelot
+version:        0.1.0.0
+synopsis:       A Game Boy and Game Boy Color emulator in Haskell
+description:    Please see the README on GitHub at <https://github.com/pixel-clover/ocelot#readme>
+category:       Emulator
+homepage:       https://github.com/pixel-clover/ocelot#readme
+bug-reports:    https://github.com/pixel-clover/ocelot/issues
+author:         Hassan Abedi
+maintainer:     hassan.abedi.t+ocelot@gmail.com
+copyright:      2026 Hassan Abedi
+license:        MIT
+license-file:   LICENSE
+build-type:     Simple
+extra-source-files:
+    README.md
+    LICENSE
+
+source-repository head
+  type: git
+  location: https://github.com/pixel-clover/ocelot
+
+library
+  exposed-modules:
+      Ocelot
+      Ocelot.Apu
+      Ocelot.Bus
+      Ocelot.Cartridge
+      Ocelot.Cartridge.Header
+      Ocelot.Cpu.Alu
+      Ocelot.Cpu.Decode
+      Ocelot.Cpu.Execute
+      Ocelot.Cpu.Registers
+      Ocelot.Cpu.State
+      Ocelot.Joypad
+      Ocelot.Machine
+      Ocelot.Ppu
+      Ocelot.Snapshot
+      Ocelot.Snapshot.Binary
+      Ocelot.Testing
+      Ocelot.Timer
+  other-modules:
+      Paths_ocelot
+  hs-source-dirs:
+      src
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
+  build-depends:
+      base >=4.14 && <5
+    , bytestring >=0.11 && <0.13
+    , containers >=0.6 && <0.8
+    , text >=1.2 && <3
+    , time >=1.11 && <1.13
+    , transformers >=0.5 && <0.7
+    , vector ==0.13.*
+  default-language: Haskell2010
+
+executable ocelot
+  main-is: Main.hs
+  other-modules:
+      Frontend.Sdl
+      Paths_ocelot
+  hs-source-dirs:
+      app
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      base >=4.14 && <5
+    , bytestring >=0.11 && <0.13
+    , containers >=0.6 && <0.8
+    , ocelot
+    , optparse-applicative >=0.18 && <0.20
+    , sdl2 ==2.5.*
+    , text >=1.2 && <3
+    , time >=1.11 && <1.13
+    , transformers >=0.5 && <0.7
+    , vector ==0.13.*
+  default-language: Haskell2010
+
+test-suite ocelot-test
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Ocelot.ApuSpec
+      Ocelot.BusSpec
+      Ocelot.Cartridge.HeaderSpec
+      Ocelot.Cartridge.Mbc1Spec
+      Ocelot.Cartridge.Mbc3Spec
+      Ocelot.Cartridge.Mbc5Spec
+      Ocelot.CartridgeSpec
+      Ocelot.CgbSpec
+      Ocelot.Cpu.AluSpec
+      Ocelot.Cpu.DecodeSpec
+      Ocelot.Cpu.ExecuteSpec
+      Ocelot.Cpu.InterruptSpec
+      Ocelot.Cpu.RegistersSpec
+      Ocelot.GoldenSpec
+      Ocelot.IntegrationSpec
+      Ocelot.JoypadSpec
+      Ocelot.PpuSpec
+      Ocelot.SnapshotSpec
+      Ocelot.TimerSpec
+      Paths_ocelot
+  hs-source-dirs:
+      test
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N
+  build-depends:
+      QuickCheck >=2.14 && <3
+    , base >=4.14 && <5
+    , bytestring >=0.11 && <0.13
+    , containers >=0.6 && <0.8
+    , directory ==1.3.*
+    , filepath >=1.4 && <1.6
+    , hspec >=2.7 && <3
+    , ocelot
+    , text >=1.2 && <3
+    , time >=1.11 && <1.13
+    , transformers >=0.5 && <0.7
+    , vector ==0.13.*
+  default-language: Haskell2010

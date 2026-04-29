@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE TupleSections #-}
 
 {- | Game Boy Picture Processing Unit (DMG only).
 
@@ -27,6 +28,7 @@ proper window line counter, the OAM DMA delay (the bus copies instantly).
 module Ocelot.Ppu (
     PpuState (..),
     PpuMode (..),
+    CgbRenderMode (..),
     initialPpu,
     read8,
     write8,
@@ -36,9 +38,11 @@ module Ocelot.Ppu (
     framebufferWidth,
     framebufferHeight,
     setCgbMode,
+    setCgbRenderMode,
+    takePendingStatIrq,
 ) where
 
-import Control.Monad (when)
+import Control.Monad (unless, when)
 import Data.Bits (shiftL, shiftR, testBit, (.&.), (.|.))
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int8)
@@ -59,6 +63,16 @@ data PpuMode
     | ModeDrawing
     deriving (Eq, Show, Enum, Bounded)
 
+{- | How to colorize a rendered scanline. Picked by the bus once at
+startup based on (cart-CGB-flag, hardware-CGB-flag); the PPU reads
+this in its RGB pass.
+-}
+data CgbRenderMode
+    = RenderDmg
+    | RenderCgbCompat
+    | RenderCgbFull
+    deriving (Eq, Show, Enum, Bounded)
+
 data PpuState = PpuState
     { ppuLcdc :: !(IORef Word8)
     , ppuStat :: !(IORef Word8)
@@ -73,6 +87,12 @@ data PpuState = PpuState
     , ppuObp1 :: !(IORef Word8)
     , ppuMode :: !(IORef PpuMode)
     , ppuDot :: !(IORef Int)
+    , ppuWindowLine :: !(IORef Int)
+    -- ^ Internal window-line counter (\"WLY\"). Reset to 0 at the start
+    -- of each frame and on LCD-off; increments by 1 only on lines where
+    -- the window was actually rendered. The window's row in its tilemap
+    -- is this counter, not @ly - wy@, which lets games disable\/move the
+    -- window mid-frame and still get correct row addressing.
     , ppuVram :: !(IOVector Word8)
     -- ^ 16 KiB on hardware (two 8 KiB banks); DMG only ever uses bank 0.
     -- Address 0x8000-0x9FFF reads/writes the bank currently selected by
@@ -90,6 +110,17 @@ data PpuState = PpuState
     , ppuCgbMode :: !(IORef Bool)
     -- ^ Whether the bus is running a CGB cart. Set once at startup
     -- via 'setCgbMode'; rendering reads this to pick the BG path.
+    , ppuRenderMode :: !(IORef CgbRenderMode)
+    -- ^ How to colorize each rendered scanline:
+    --
+    -- * 'RenderDmg' (DMG hardware running a DMG cart): hardcoded
+    --   greenish-DMG shade palette.
+    -- * 'RenderCgbCompat' (CGB hardware running a DMG cart): the
+    --   CGB-compatibility auto-palette pre-loaded into CGB BG palette
+    --   0 and OBJ palettes 0\/1, indexed by the DMG BGP\/OBP0\/OBP1
+    --   shade.
+    -- * 'RenderCgbFull' (CGB cart): full CGB pipeline (BG attribute
+    --   palette + tile bank + flips, OBJ palette via OAM attr bits).
     , ppuVbk :: !(IORef Word8)
     -- ^ CGB VRAM bank select (0xFF4F). Bit 0 selects the active bank;
     -- DMG ignores writes (always reads as 0xFF).
@@ -103,6 +134,16 @@ data PpuState = PpuState
     -- (RGB555 little-endian). Read via 0xFF69, written via 0xFF69.
     , ppuObjPalRam :: !(IOVector Word8)
     -- ^ 64 bytes of OBJ palette memory; read/written via 0xFF6B.
+    , ppuPrevStatLine :: !(IORef Bool)
+    -- ^ Last sampled value of the OR'd STAT interrupt line. The STAT
+    -- IRQ fires only on a low->high transition of this signal, so
+    -- back-to-back enabled sources (e.g. mode 0 followed by mode 2 with
+    -- both bits 3 and 5 set in STAT) raise IF bit 1 only once. See
+    -- mooneye 'stat_irq_blocking'.
+    , ppuPendingStatIrq :: !(IORef Bool)
+    -- ^ Latched whenever a register write (STAT, LYC, LCDC bit 7)
+    -- causes a STAT-line rising edge. The bus reads and clears this
+    -- via 'takePendingStatIrq' after the write, propagating to IF.
     }
 
 initialPpu :: IO PpuState
@@ -120,16 +161,20 @@ initialPpu = do
     obp1 <- newIORef 0xFF
     mode <- newIORef ModeOamScan
     dot <- newIORef 0
+    windowLine <- newIORef 0
     vram <- MV.replicate 0x4000 0
     oam <- MV.replicate 0xA0 0
     fb <- MV.replicate (framebufferWidth * framebufferHeight) 0
     fbRgb <- MV.replicate (framebufferWidth * framebufferHeight * 3) 0
     cgbMode <- newIORef False
+    renderMode <- newIORef RenderDmg
     vbk <- newIORef 0
     bcps <- newIORef 0
     ocps <- newIORef 0
     bgPal <- MV.replicate 0x40 0xFF
     objPal <- MV.replicate 0x40 0xFF
+    prevStatLine <- newIORef False
+    pendingStatIrq <- newIORef False
     pure
         PpuState
             { ppuLcdc = lcdc
@@ -145,16 +190,20 @@ initialPpu = do
             , ppuObp1 = obp1
             , ppuMode = mode
             , ppuDot = dot
+            , ppuWindowLine = windowLine
             , ppuVram = vram
             , ppuOam = oam
             , ppuFb = fb
             , ppuFbRgb = fbRgb
             , ppuCgbMode = cgbMode
+            , ppuRenderMode = renderMode
             , ppuVbk = vbk
             , ppuBcps = bcps
             , ppuOcps = ocps
             , ppuBgPalRam = bgPal
             , ppuObjPalRam = objPal
+            , ppuPrevStatLine = prevStatLine
+            , ppuPendingStatIrq = pendingStatIrq
             }
 
 {- | Take a snapshot of the framebuffer as an immutable Vector. Used by the
@@ -173,10 +222,15 @@ framebufferRgb :: PpuState -> IO (Vector Word8)
 framebufferRgb ps = V.freeze (ppuFbRgb ps)
 
 {- | Tell the PPU whether it's running a CGB cart (called once by the
-bus at startup). Affects BG rendering only.
+bus at startup). Affects BG attribute fetching and the sprite-priority
+rule; the higher-level color routing is controlled by 'setCgbRenderMode'.
 -}
 setCgbMode :: Bool -> PpuState -> IO ()
 setCgbMode b ps = writeIORef (ppuCgbMode ps) b
+
+-- | Pick the colorization path for rendered scanlines.
+setCgbRenderMode :: CgbRenderMode -> PpuState -> IO ()
+setCgbRenderMode m ps = writeIORef (ppuRenderMode ps) m
 
 {- | Standard DMG shade palette mapped to the SDL frontend's
 greenish-DMG colors. Used when converting palette indices to RGB.
@@ -229,7 +283,7 @@ read8 addr ps
     | addr == 0xFF49 = readIORef (ppuObp1 ps)
     | addr == 0xFF4A = readIORef (ppuWy ps)
     | addr == 0xFF4B = readIORef (ppuWx ps)
-    | addr == 0xFF4F = (\x -> x .|. 0xFE) <$> readIORef (ppuVbk ps)
+    | addr == 0xFF4F = (.|. 0xFE) <$> readIORef (ppuVbk ps)
     | addr == 0xFF68 = readIORef (ppuBcps ps)
     | addr == 0xFF69 = do
         ix <- readIORef (ppuBcps ps)
@@ -248,12 +302,15 @@ write8 addr !v ps
     | addr >= 0xFE00 && addr <= 0xFE9F =
         MV.write (ppuOam ps) (fromIntegral (addr - 0xFE00)) v
     | addr == 0xFF40 = handleLcdcWrite v ps
-    | addr == 0xFF41 =
+    | addr == 0xFF41 = do
         modifyIORef' (ppuStat ps) (\s -> (v .&. 0x78) .|. (s .&. 0x07))
+        sampleStatLine ps
     | addr == 0xFF42 = writeIORef (ppuScy ps) v
     | addr == 0xFF43 = writeIORef (ppuScx ps) v
     | addr == 0xFF44 = pure () -- LY is read-only
-    | addr == 0xFF45 = writeIORef (ppuLyc ps) v
+    | addr == 0xFF45 = do
+        writeIORef (ppuLyc ps) v
+        sampleStatLine ps
     | addr == 0xFF47 = writeIORef (ppuBgp ps) v
     | addr == 0xFF48 = writeIORef (ppuObp0 ps) v
     | addr == 0xFF49 = writeIORef (ppuObp1 ps) v
@@ -292,14 +349,18 @@ writePaletteByte ps idxSel ramSel v = do
 
 handleLcdcWrite :: Word8 -> PpuState -> IO ()
 handleLcdcWrite v ps = do
+    !prev <- readIORef (ppuLcdc ps)
     writeIORef (ppuLcdc ps) v
-    -- LCD turning off freezes LY at 0 in Mode 0.
-    if not (testBit v 7)
-        then do
-            writeIORef (ppuLy ps) 0
-            writeIORef (ppuMode ps) ModeHBlank
-            writeIORef (ppuDot ps) 0
-        else pure ()
+    -- LCD turning off freezes LY at 0 in Mode 0 and resets WLY. The STAT
+    -- line is gated low while the LCD is off, so the edge detector also
+    -- resets to avoid a stale rising-edge when the LCD comes back on.
+    unless (testBit v 7) $ do
+        writeIORef (ppuLy ps) 0
+        writeIORef (ppuMode ps) ModeHBlank
+        writeIORef (ppuDot ps) 0
+        writeIORef (ppuWindowLine ps) 0
+        writeIORef (ppuPrevStatLine ps) False
+    sampleStatLine ps
 
 modeBits :: PpuMode -> Word8
 modeBits ModeHBlank = 0
@@ -345,20 +406,27 @@ nextBoundary ModeHBlank = 456
 nextBoundary ModeVBlank = 456
 
 {- | Transition out of the current mode at its boundary. Returns a bitmask:
-bit 0 = VBlank entry, bit 1 = STAT (one of LYC=LY match, mode 0/1/2 entry,
-gated by STAT bits 3-6).
+bit 0 = VBlank entry, bit 1 = STAT (rising edge of the OR'd STAT line),
+bit 2 = HBlank entry (used by the bus to step HDMA, not an interrupt).
+
+Mode and LY are updated first, then the STAT line is sampled and edge-
+detected against 'ppuPrevStatLine'. This correctly handles back-to-back
+enabled sources (e.g. mode 0 -> mode 2 with both STAT bits set): the
+line stays high through the boundary and no second IRQ fires.
 -}
 transition :: PpuMode -> PpuState -> IO Word8
 transition mode ps = case mode of
     ModeOamScan -> do
         writeIORef (ppuMode ps) ModeDrawing
         writeIORef (ppuDot ps) 80
-        pure 0 -- Mode 3 has no STAT source.
+        s <- statEdge ps
+        pure s
     ModeDrawing -> do
         renderLine ps
         writeIORef (ppuMode ps) ModeHBlank
         writeIORef (ppuDot ps) 252
-        statForMode ps 3 -- Mode 0 (HBlank) STAT enable
+        s <- statEdge ps
+        pure (s .|. 0x04) -- Bit 2: HBlank entered (consumed by Bus for HDMA).
     ModeHBlank -> do
         ly <- readIORef (ppuLy ps)
         let ly' = ly + 1
@@ -367,16 +435,13 @@ transition mode ps = case mode of
                 writeIORef (ppuMode ps) ModeVBlank
                 writeIORef (ppuLy ps) 144
                 writeIORef (ppuDot ps) 0
-                stat1 <- statForMode ps 4 -- Mode 1 (VBlank) STAT enable
-                lyc <- statForLyc ps
-                pure (0x01 .|. stat1 .|. lyc)
+                s <- statEdge ps
+                pure (0x01 .|. s)
             else do
                 writeIORef (ppuMode ps) ModeOamScan
                 writeIORef (ppuLy ps) ly'
                 writeIORef (ppuDot ps) 0
-                stat2 <- statForMode ps 5 -- Mode 2 (OAM scan) STAT enable
-                lyc <- statForLyc ps
-                pure (stat2 .|. lyc)
+                statEdge ps
     ModeVBlank -> do
         ly <- readIORef (ppuLy ps)
         let ly' = ly + 1
@@ -385,29 +450,68 @@ transition mode ps = case mode of
                 writeIORef (ppuMode ps) ModeOamScan
                 writeIORef (ppuLy ps) 0
                 writeIORef (ppuDot ps) 0
-                stat2 <- statForMode ps 5
-                lyc <- statForLyc ps
-                pure (stat2 .|. lyc)
+                writeIORef (ppuWindowLine ps) 0 -- New frame resets WLY.
+                statEdge ps
             else do
                 writeIORef (ppuLy ps) ly'
                 writeIORef (ppuDot ps) 0
-                statForLyc ps
+                statEdge ps
 
-{- | If the given STAT register bit is set, return @0x02@ (the IF STAT bit);
-otherwise @0@.
+{- | Compute the OR of all enabled STAT interrupt sources and update the
+edge-detector. Returns @0x02@ on a low->high transition of the OR'd
+line (indicating the bus should set IF bit 1), otherwise @0@.
 -}
-statForMode :: PpuState -> Int -> IO Word8
-statForMode ps b = do
-    stat <- readIORef (ppuStat ps)
-    pure (if testBit stat b then 0x02 else 0)
+statEdge :: PpuState -> IO Word8
+statEdge ps = do
+    new <- computeStatLine ps
+    prev <- readIORef (ppuPrevStatLine ps)
+    writeIORef (ppuPrevStatLine ps) new
+    pure (if new && not prev then 0x02 else 0)
 
--- | If LY matches LYC and STAT bit 6 is set, return @0x02@; otherwise @0@.
-statForLyc :: PpuState -> IO Word8
-statForLyc ps = do
-    ly <- readIORef (ppuLy ps)
-    lyc <- readIORef (ppuLyc ps)
-    stat <- readIORef (ppuStat ps)
-    pure (if ly == lyc && testBit stat 6 then 0x02 else 0)
+{- | Sample the STAT line after a register write (STAT, LYC, or LCDC).
+If the line just went low->high, latch a pending IRQ for the bus to
+consume via 'takePendingStatIrq'. Without this, edges driven by direct
+register writes (e.g. enabling STAT bit 6 while LY already equals LYC)
+would never reach the IF flag, since the only other edge-detection
+path is the per-mode-transition 'statEdge' inside 'transition'.
+-}
+sampleStatLine :: PpuState -> IO ()
+sampleStatLine ps = do
+    edge <- statEdge ps
+    when (edge /= 0) (writeIORef (ppuPendingStatIrq ps) True)
+
+{- | Read and clear the pending-STAT-IRQ flag. Called by the bus right
+after each PPU register write that might have driven a rising edge.
+-}
+takePendingStatIrq :: PpuState -> IO Bool
+takePendingStatIrq ps = do
+    p <- readIORef (ppuPendingStatIrq ps)
+    when p (writeIORef (ppuPendingStatIrq ps) False)
+    pure p
+
+-- | The current value of the OR'd STAT interrupt request line. Held low
+-- while the LCD is off (LCDC bit 7 clear).
+computeStatLine :: PpuState -> IO Bool
+computeStatLine ps = do
+    lcdc <- readIORef (ppuLcdc ps)
+    if not (testBit lcdc 7)
+        then pure False
+        else do
+            mode <- readIORef (ppuMode ps)
+            stat <- readIORef (ppuStat ps)
+            ly <- readIORef (ppuLy ps)
+            lyc <- readIORef (ppuLyc ps)
+            -- The OAM-scan STAT source (bit 5) is also asserted on the
+            -- first scanline of VBlank (LY=144), per the documented DMG
+            -- quirk. Subsequent VBlank lines (145-153) only see bit 4.
+            let modeSrc = case mode of
+                    ModeHBlank -> testBit stat 3
+                    ModeVBlank ->
+                        testBit stat 4 || (ly == 144 && testBit stat 5)
+                    ModeOamScan -> testBit stat 5
+                    ModeDrawing -> False
+                lycSrc = testBit stat 6 && ly == lyc
+            pure (modeSrc || lycSrc)
 
 ----------------------------------------------------------------------
 -- Line renderer (BG + window + sprites)
@@ -426,62 +530,105 @@ renderLine ps = do
         winEnabled = testBit lcdc 5 && bgActive
         spritesEnabled = testBit lcdc 1
     bgp <- readIORef (ppuBgp ps)
+    -- Snapshot WLY for this line so mid-line increments don't leak into
+    -- the same scanline's pixel addressing.
+    wly <- readIORef (ppuWindowLine ps)
+    wy <- fromIntegral <$> readIORef (ppuWy ps)
+    wx <- fromIntegral <$> readIORef (ppuWx ps)
+    let windowOnThisLine = winEnabled && lyI >= wy && wx <= 166
     -- Per-pixel BG info: (color index 0..3, optional CGB attribute byte).
     bgPixels <-
         if not bgActive
             then pure (replicate framebufferWidth (0 :: Word8, Nothing))
             else
                 mapM
-                    (bgOrWindowPixel ps cgb lyI winEnabled)
+                    (bgOrWindowPixel ps cgb lyI winEnabled wly)
                     [0 .. framebufferWidth - 1]
+    -- Increment WLY if the window was actually drawn this line.
+    when windowOnThisLine (writeIORef (ppuWindowLine ps) (wly + 1))
     let bgIdxes = map fst bgPixels
         bgShades = map (paletteApply bgp) bgIdxes
-    finalShades <-
+    finalPixels <-
         if spritesEnabled
-            then overlaySprites ps lyI lcdc bgIdxes bgShades
-            else pure bgShades
+            then overlaySprites ps cgb lyI lcdc bgPixels bgShades
+            else pure (map (,Nothing) bgShades)
     let fbBase = lyI * framebufferWidth
+        finalShades = map fst finalPixels
     mapM_
         (\(i, sh) -> MV.write (ppuFb ps) (fbBase + i) sh)
         (zip [0 ..] finalShades)
     -- Mirror the line into the RGB framebuffer.
-    writeRgbLine ps cgb lyI bgPixels finalShades
+    mode <- readIORef (ppuRenderMode ps)
+    writeRgbLine ps mode lyI bgPixels finalPixels
 
-{- | Write one rendered scanline into 'ppuFbRgb'. In DMG mode the shade
-palette converts each pixel; in CGB mode BG pixels go through the BG
-palette RAM and sprite-overlaid pixels fall back to the DMG sprite
-palette this slice.
+{- | Write one rendered scanline into 'ppuFbRgb'.
+
+Per pixel routing depends on the render mode:
+
+* 'RenderDmg' (DMG hardware on DMG cart): the final shade goes through
+  the hardcoded greenish-DMG palette ('dmgShadeRgb').
+* 'RenderCgbCompat' (CGB hardware on DMG cart): the final shade indexes
+  into CGB BG palette 0 (for BG\/window pixels) or OBJ palette 0\/1
+  (for sprite pixels, picked by OAM attr bit 4). The auto-palette is
+  pre-loaded into palette RAM at startup.
+* 'RenderCgbFull' (CGB cart): BG attribute byte selects palette 0..7
+  in BG palette RAM; OAM attr bits 0..2 select OBJ palette 0..7.
 -}
-writeRgbLine :: PpuState -> Bool -> Int -> [(Word8, Maybe Word8)] -> [Word8] -> IO ()
-writeRgbLine ps cgb lyI bgPixels finalShades = do
+writeRgbLine ::
+    PpuState ->
+    CgbRenderMode ->
+    Int ->
+    [(Word8, Maybe Word8)] ->
+    [(Word8, Maybe (Sprite, Word8))] ->
+    IO ()
+writeRgbLine ps mode lyI bgPixels finalPixels = do
     let baseRgb = lyI * framebufferWidth * 3
-    if not cgb
-        then
+        writePx i (r, g, b) = do
+            let off = baseRgb + i * 3
+            MV.write (ppuFbRgb ps) off r
+            MV.write (ppuFbRgb ps) (off + 1) g
+            MV.write (ppuFbRgb ps) (off + 2) b
+    case mode of
+        RenderDmg ->
             mapM_
-                ( \(i, sh) ->
-                    let (r, g, b) = dmgShadeRgb sh
-                        off = baseRgb + i * 3
-                     in do
-                            MV.write (ppuFbRgb ps) off r
-                            MV.write (ppuFbRgb ps) (off + 1) g
-                            MV.write (ppuFbRgb ps) (off + 2) b
-                )
-                (zip [0 :: Int ..] finalShades)
-        else
+                (\(i, (sh, _)) -> writePx i (dmgShadeRgb sh))
+                (zip [0 :: Int ..] finalPixels)
+        RenderCgbCompat ->
             mapM_
-                ( \(i, (idx, mAttr), sh) -> do
-                    rgb <- case mAttr of
-                        Just attr -> cgbBgRgb ps attr idx
-                        -- Sprite-painted pixel or BG-disabled fallback;
-                        -- use DMG shade for now.
-                        Nothing -> pure (dmgShadeRgb sh)
-                    let (r, g, b) = rgb
-                        off = baseRgb + i * 3
-                    MV.write (ppuFbRgb ps) off r
-                    MV.write (ppuFbRgb ps) (off + 1) g
-                    MV.write (ppuFbRgb ps) (off + 2) b
+                ( \(i, (sh, mHit)) -> do
+                    rgb <- case mHit of
+                        Just (s, _) ->
+                            -- DMG OBJ uses OBP0 (attr bit 4 = 0) or OBP1
+                            -- (attr bit 4 = 1); compat mode routes that to
+                            -- CGB OBJ palette 0 or 1, indexed by the
+                            -- already-applied DMG shade.
+                            let pal = if testBit (spriteAttr s) 4 then 1 else 0
+                             in cgbPalRgb (ppuObjPalRam ps) pal sh
+                        Nothing -> cgbPalRgb (ppuBgPalRam ps) 0 sh
+                    writePx i rgb
                 )
-                (zip3 [0 :: Int ..] bgPixels finalShades)
+                (zip [0 :: Int ..] finalPixels)
+        RenderCgbFull ->
+            mapM_
+                ( \(i, (idx, mAttr), (sh, mHit)) -> do
+                    rgb <- case mHit of
+                        Just (s, sIdx) -> cgbObjRgb ps (spriteAttr s) sIdx
+                        Nothing -> case mAttr of
+                            Just attr -> cgbBgRgb ps attr idx
+                            Nothing -> pure (dmgShadeRgb sh)
+                    writePx i rgb
+                )
+                (zip3 [0 :: Int ..] bgPixels finalPixels)
+
+{- | Look up a CGB palette color from a palette RAM IOVector by
+(palette index 0..7, color index 0..3).
+-}
+cgbPalRgb :: IOVector Word8 -> Int -> Word8 -> IO (Word8, Word8, Word8)
+cgbPalRgb pal palIdx colorIdx = do
+    let off = palIdx * 8 + fromIntegral colorIdx * 2
+    lo <- MV.read pal off
+    hi <- MV.read pal (off + 1)
+    pure (rgb555ToRgb888 lo hi)
 
 -- | Look up a BG pixel's CGB color from its attribute byte and color index.
 cgbBgRgb :: PpuState -> Word8 -> Word8 -> IO (Word8, Word8, Word8)
@@ -492,17 +639,29 @@ cgbBgRgb ps attr colorIdx = do
     hi <- MV.read (ppuBgPalRam ps) (off + 1)
     pure (rgb555ToRgb888 lo hi)
 
+{- | Look up a sprite pixel's CGB color from its OAM attribute byte and
+color index. Bits 0..2 of @attr@ select OBJ palette 0..7.
+-}
+cgbObjRgb :: PpuState -> Word8 -> Word8 -> IO (Word8, Word8, Word8)
+cgbObjRgb ps attr colorIdx = do
+    let pal = fromIntegral (attr .&. 0x07) :: Int
+        off = pal * 8 + fromIntegral colorIdx * 2
+    lo <- MV.read (ppuObjPalRam ps) off
+    hi <- MV.read (ppuObjPalRam ps) (off + 1)
+    pure (rgb555ToRgb888 lo hi)
+
 {- | Compute one BG\/Window pixel: (color index 0..3, optional CGB
 attribute byte). The attribute byte is 'Nothing' in DMG mode and
-'Just' the bank-1 byte in CGB mode.
+'Just' the bank-1 byte in CGB mode. @wly@ is the window-line counter
+captured at the start of this scanline.
 -}
-bgOrWindowPixel :: PpuState -> Bool -> Int -> Bool -> Int -> IO (Word8, Maybe Word8)
-bgOrWindowPixel ps cgb ly winEnabled x = do
+bgOrWindowPixel :: PpuState -> Bool -> Int -> Bool -> Int -> Int -> IO (Word8, Maybe Word8)
+bgOrWindowPixel ps cgb ly winEnabled wly x = do
     wy <- fromIntegral <$> readIORef (ppuWy ps)
     wx <- fromIntegral <$> readIORef (ppuWx ps)
     let inWindow = winEnabled && ly >= wy && (x + 7) >= wx
     if inWindow
-        then tilePixelCgb ps cgb (windowMapBase ps) (x + 7 - wx) (ly - wy)
+        then tilePixelCgb ps cgb (windowMapBase ps) (x + 7 - wx) wly
         else do
             lcdc <- readIORef (ppuLcdc ps)
             scy <- fromIntegral <$> readIORef (ppuScy ps)
@@ -593,61 +752,89 @@ readOamSprites oam =
         )
         [0 .. 39]
 
+{- | Overlay sprites on top of the background. Per pixel returns:
+
+* The shade to write to the palette-index framebuffer.
+* 'Just (sprite, colorIndex)' when a sprite pixel won, so the RGB pass
+  can look up the CGB OBJ palette; 'Nothing' when the BG won.
+
+CGB priority arbitration considers three sources:
+
+* LCDC bit 0: when 0 in CGB mode, the master \"BG\/Window has no
+  priority\" override forces OBJ to win (subject to BG transparency).
+* BG attribute bit 7: per-tile \"BG over OBJ\" flag.
+* OAM attribute bit 7: per-sprite \"behind BG colors 1-3\" flag.
+
+Object wins iff master-priority-off, or BG is transparent, or neither
+of the BG\/OBJ priority bits is set.
+-}
 overlaySprites ::
     PpuState ->
+    Bool ->
     Int ->
     Word8 ->
+    [(Word8, Maybe Word8)] ->
     [Word8] ->
-    [Word8] ->
-    IO [Word8]
-overlaySprites ps ly lcdc bgIdxes bgShades = do
+    IO [(Word8, Maybe (Sprite, Word8))]
+overlaySprites ps cgb ly lcdc bgPixels bgShades = do
     let height = if testBit lcdc 2 then 16 else 8
+        masterOn = testBit lcdc 0
     sprs <- readOamSprites (ppuOam ps)
     let candidates = take 10 (filter (overlaps ly height) sprs)
-        sorted = stableSortByX candidates
+        -- DMG: sort by X so the leftmost sprite has the highest priority.
+        -- CGB: OAM order alone determines priority, so leave them as-is.
+        sorted = if cgb then candidates else stableSortByX candidates
     obp0 <- readIORef (ppuObp0 ps)
     obp1 <- readIORef (ppuObp1 ps)
     mapM
-        (pixelWith ly height sorted obp0 obp1)
-        (zip3 [0 ..] bgIdxes bgShades)
+        (pixelWith masterOn height sorted obp0 obp1)
+        (zip3 [0 ..] bgPixels bgShades)
   where
     overlaps :: Int -> Int -> Sprite -> Bool
     overlaps lyI height s =
         lyI >= spriteY s && lyI < spriteY s + height
 
     pixelWith ::
-        Int ->
+        Bool ->
         Int ->
         [Sprite] ->
         Word8 ->
         Word8 ->
-        (Int, Word8, Word8) ->
-        IO Word8
-    pixelWith lyI height sorted obp0 obp1 (x, bgI, bgS) = do
-        hit <- foreMostHit lyI height sorted x
+        (Int, (Word8, Maybe Word8), Word8) ->
+        IO (Word8, Maybe (Sprite, Word8))
+    pixelWith masterOn height sorted obp0 obp1 (x, (bgI, mAttr), bgS) = do
+        hit <- foreMostHit height sorted x
         case hit of
-            Nothing -> pure bgS
+            Nothing -> pure (bgS, Nothing)
             Just (s, sIdx) ->
-                let priorityBit = testBit (spriteAttr s) 7
+                let objPriority = testBit (spriteAttr s) 7
+                    bgPriority = case mAttr of
+                        Just a | cgb -> testBit a 7
+                        _ -> False
                     bgOpaque = bgI > 0
-                 in if priorityBit && bgOpaque
-                        then pure bgS
-                        else
+                    masterOff = cgb && not masterOn
+                    objWins =
+                        masterOff
+                            || not bgOpaque
+                            || not (objPriority || bgPriority)
+                 in if objWins
+                        then
                             let pal =
                                     if testBit (spriteAttr s) 4
                                         then obp1
                                         else obp0
-                             in pure (paletteApply pal sIdx)
+                             in pure (paletteApply pal sIdx, Just (s, sIdx))
+                        else pure (bgS, Nothing)
 
-    foreMostHit :: Int -> Int -> [Sprite] -> Int -> IO (Maybe (Sprite, Word8))
-    foreMostHit _ _ [] _ = pure Nothing
-    foreMostHit lyI height (s : rest) x
-        | x < spriteX s || x >= spriteX s + 8 = foreMostHit lyI height rest x
+    foreMostHit :: Int -> [Sprite] -> Int -> IO (Maybe (Sprite, Word8))
+    foreMostHit _ [] _ = pure Nothing
+    foreMostHit height (s : rest) x
+        | x < spriteX s || x >= spriteX s + 8 = foreMostHit height rest x
         | otherwise = do
-            mIdx <- spritePixelIdx (ppuVram ps) lyI height s x
+            mIdx <- spritePixelIdx (ppuVram ps) cgb ly height s x
             case mIdx of
                 Just idx | idx /= 0 -> pure (Just (s, idx))
-                _ -> foreMostHit lyI height rest x
+                _ -> foreMostHit height rest x
 
 stableSortByX :: [Sprite] -> [Sprite]
 stableSortByX [] = []
@@ -655,8 +842,8 @@ stableSortByX (x : xs) =
     let (lt, ge) = span (\y -> spriteX y < spriteX x) xs
      in stableSortByX lt ++ [x] ++ stableSortByX ge
 
-spritePixelIdx :: IOVector Word8 -> Int -> Int -> Sprite -> Int -> IO (Maybe Word8)
-spritePixelIdx vram ly height s x
+spritePixelIdx :: IOVector Word8 -> Bool -> Int -> Int -> Sprite -> Int -> IO (Maybe Word8)
+spritePixelIdx vram cgb ly height s x
     | x < spriteX s || x >= spriteX s + 8 = pure Nothing
     | otherwise = do
         let !attr = spriteAttr s
@@ -672,8 +859,10 @@ spritePixelIdx vram ly height s x
                         (fromIntegral (spriteTile s .&. 0xFE) :: Int)
                             + (if yPx >= 8 then 1 else 0)
                     else fromIntegral (spriteTile s) :: Int
+            -- CGB OAM attribute bit 3 selects the VRAM bank for sprite tile data.
+            !tileBank = if cgb && testBit attr 3 then 0x2000 else 0
             !yInTile = yPx .&. 7
-            !rowOff = tileBaseIdx * 16 + yInTile * 2
+            !rowOff = tileBank + tileBaseIdx * 16 + yInTile * 2
         byteLow <- MV.read vram rowOff
         byteHigh <- MV.read vram (rowOff + 1)
         let !bit = 7 - xPx

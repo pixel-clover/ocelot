@@ -10,13 +10,17 @@ stack.yaml.lock
 dist/
 dist-newstyle/
 cabal-dev/
-*.cabal
 .cabal-sandbox/
 cabal.sandbox.config
 cabal.project.local
 cabal.project.local~
 .HTF/
 .hpc/
+
+# We commit the hpack-generated ocelot.cabal so cabal-only consumers
+# (Hackage, plain `cabal build`, IDE tooling) work without running hpack
+# first. package.yaml stays the source of truth; do not hand-edit the
+# .cabal — let `stack build` regenerate it.
 
 # Haskell build artifacts
 *.o
@@ -129,3 +133,9 @@ docs/api/
 .codex
 .claude/
 roms/
+
+# Fetched third-party test ROMs (downloaded by `make test-roms`).
+# Hand-authored regression ROMs under test/testroms/ are still tracked.
+test/testroms/mooneye/
+test/testroms/dmg-acid2.gb
+test/testroms/cgb-acid2.gbc

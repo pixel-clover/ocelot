@@ -3,7 +3,7 @@ version: 0.1.0.0
 github: "pixel-clover/ocelot"
 license: MIT
 author: "Hassan Abedi"
-maintainer: "hassan.abedi@obsidian.systems"
+maintainer: "hassan.abedi.t+ocelot@gmail.com"
 copyright: "2026 Hassan Abedi"
 
 extra-source-files:
@@ -47,6 +47,7 @@ executables:
       - -with-rtsopts=-N
     dependencies:
       - ocelot
+      - optparse-applicative >= 0.18 && < 0.20
       - sdl2 >= 2.5 && < 2.6
 
 tests:
@@ -59,5 +60,7 @@ tests:
       - -with-rtsopts=-N
     dependencies:
       - ocelot
+      - directory >= 1.3 && < 1.4
+      - filepath >= 1.4 && < 1.6
       - hspec >= 2.7 && < 3
       - QuickCheck >= 2.14 && < 3

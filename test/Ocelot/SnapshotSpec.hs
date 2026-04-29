@@ -12,6 +12,7 @@ import Ocelot.Cpu.Registers (Registers (..))
 import Ocelot.Cpu.State (CpuState (..))
 import qualified Ocelot.Joypad as Joypad
 import Ocelot.Machine (Machine (..), machineFromCartridge)
+import qualified Ocelot.Machine
 import qualified Ocelot.Ppu as Ppu
 import qualified Ocelot.Snapshot as Snap
 import Ocelot.Timer (TimerState (..))
@@ -94,22 +95,24 @@ spec = do
                 (Bus.busTimer (machineBus m))
                 TimerState
                     { timDivider = 0xABCD
-                    , timTimaAccum = 0x1234
                     , timTima = 0x55
                     , timTma = 0x66
                     , timTac = 0x07
+                    , timPrevAnd = True
+                    , timReloadCounter = 3
                     }
             blob <- Snap.save m
-            writeIORef (Bus.busTimer (machineBus m)) (TimerState 0 0 0 0 0)
+            writeIORef (Bus.busTimer (machineBus m)) (TimerState 0 0 0 0 False 0)
             _ <- Snap.load blob m
             ts <- readIORef (Bus.busTimer (machineBus m))
             ts
                 `shouldBe` TimerState
                     { timDivider = 0xABCD
-                    , timTimaAccum = 0x1234
                     , timTima = 0x55
                     , timTma = 0x66
                     , timTac = 0x07
+                    , timPrevAnd = True
+                    , timReloadCounter = 3
                     }
 
         it "round-trips PPU regs and VRAM" $ do
@@ -192,6 +195,80 @@ spec = do
             m <- mkMachine
             r <- Snap.load (BS.replicate 64 0) m
             r `shouldBe` Left Snap.BadMagic
+
+        it "round-trips CGB-only state (VBK, palette RAM, WBK, KEY1)" $ do
+            m <- mkMachine
+            let bus = Ocelot.Machine.machineBus m
+                ppu = Bus.busPpu bus
+            -- Stage some non-default values.
+            writeIORef (Ppu.ppuVbk ppu) 0x01
+            writeIORef (Ppu.ppuBcps ppu) 0x82
+            writeIORef (Ppu.ppuOcps ppu) 0x05
+            MV.write (Ppu.ppuBgPalRam ppu) 0 0xAA
+            MV.write (Ppu.ppuBgPalRam ppu) 63 0xCC
+            MV.write (Ppu.ppuObjPalRam ppu) 1 0x55
+            writeIORef (Bus.busWramBank bus) 0x05
+            writeIORef (Bus.busKey1 bus) 0x01
+            blob <- Snap.save m
+            -- Clobber.
+            writeIORef (Ppu.ppuVbk ppu) 0x00
+            writeIORef (Ppu.ppuBcps ppu) 0x00
+            writeIORef (Ppu.ppuOcps ppu) 0x00
+            MV.write (Ppu.ppuBgPalRam ppu) 0 0x00
+            MV.write (Ppu.ppuBgPalRam ppu) 63 0x00
+            MV.write (Ppu.ppuObjPalRam ppu) 1 0x00
+            writeIORef (Bus.busWramBank bus) 0x00
+            writeIORef (Bus.busKey1 bus) 0x00
+            r <- Snap.load blob m
+            r `shouldBe` Right ()
+            vbk <- readIORef (Ppu.ppuVbk ppu)
+            bcps <- readIORef (Ppu.ppuBcps ppu)
+            ocps <- readIORef (Ppu.ppuOcps ppu)
+            bg0 <- MV.read (Ppu.ppuBgPalRam ppu) 0
+            bg63 <- MV.read (Ppu.ppuBgPalRam ppu) 63
+            obj1 <- MV.read (Ppu.ppuObjPalRam ppu) 1
+            wbk <- readIORef (Bus.busWramBank bus)
+            key1 <- readIORef (Bus.busKey1 bus)
+            vbk `shouldBe` 0x01
+            bcps `shouldBe` 0x82
+            ocps `shouldBe` 0x05
+            bg0 `shouldBe` 0xAA
+            bg63 `shouldBe` 0xCC
+            obj1 `shouldBe` 0x55
+            wbk `shouldBe` 0x05
+            key1 `shouldBe` 0x01
+
+        it "round-trips HDMA and double-speed state (v3)" $ do
+            m <- mkMachine
+            let bus = Ocelot.Machine.machineBus m
+            writeIORef (Bus.busHdmaSrc bus) 0xC100
+            writeIORef (Bus.busHdmaDst bus) 0x9300
+            writeIORef (Bus.busHdmaLen bus) 96
+            writeIORef (Bus.busHdmaActive bus) True
+            writeIORef (Bus.busDoubleSpeed bus) True
+            writeIORef (Bus.busDoubleSpeedAcc bus) 1
+            blob <- Snap.save m
+            -- Clobber.
+            writeIORef (Bus.busHdmaSrc bus) 0
+            writeIORef (Bus.busHdmaDst bus) 0
+            writeIORef (Bus.busHdmaLen bus) 0
+            writeIORef (Bus.busHdmaActive bus) False
+            writeIORef (Bus.busDoubleSpeed bus) False
+            writeIORef (Bus.busDoubleSpeedAcc bus) 0
+            r <- Snap.load blob m
+            r `shouldBe` Right ()
+            src <- readIORef (Bus.busHdmaSrc bus)
+            dst <- readIORef (Bus.busHdmaDst bus)
+            len <- readIORef (Bus.busHdmaLen bus)
+            active <- readIORef (Bus.busHdmaActive bus)
+            ds <- readIORef (Bus.busDoubleSpeed bus)
+            dsAcc <- readIORef (Bus.busDoubleSpeedAcc bus)
+            src `shouldBe` 0xC100
+            dst `shouldBe` 0x9300
+            len `shouldBe` 96
+            active `shouldBe` True
+            ds `shouldBe` True
+            dsAcc `shouldBe` 1
 
         it "rejects a blob with an unknown version" $ do
             m <- mkMachine

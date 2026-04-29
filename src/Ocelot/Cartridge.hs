@@ -11,11 +11,12 @@ Internally the cartridge holds its MBC state in an 'IORef' and its RAM in a
 mutable 'IOVector', so reads and writes on a hot ROM are O(1) instead of
 O(N). This is the reason the public API lives in @IO@.
 
-Supported MBC kinds: NoMbc, MBC1, MBC3 (with RTC), and MBC5. Other kinds
-parse but 'loadRom' returns 'UnsupportedMbcKind'. The MBC3 RTC tracks
-host wall-clock time (POSIX seconds) and is persisted across emulator
-restarts via 'extractSave' / 'loadSave', which append a 48-byte
-VBA-M-compatible suffix to the RAM bytes.
+Supported MBC kinds: NoMbc, MBC1, MBC2 (with built-in 512-nibble RAM),
+MBC3 (with RTC), and MBC5. Other kinds parse but 'loadRom' returns
+'UnsupportedMbcKind'. The MBC3 RTC tracks host wall-clock time (POSIX
+seconds) and is persisted across emulator restarts via
+'extractSave' / 'loadSave', which append a 48-byte VBA-M-compatible
+suffix to the RAM bytes.
 -}
 module Ocelot.Cartridge (
     Cartridge,
@@ -40,6 +41,7 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BB
 import qualified Data.ByteString.Lazy as BL
+import Data.Foldable (for_)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.Time.Clock.POSIX (getPOSIXTime)
@@ -64,8 +66,10 @@ data Cartridge = Cartridge
 data MbcImpl
     = NoMbcImpl
     | Mbc1Impl !Mbc1State
+    | Mbc2Impl !Mbc2State
     | Mbc3Impl !Mbc3State
     | Mbc5Impl !Mbc5State
+    | HuC1Impl !HuC1State
     deriving (Eq, Show)
 
 data Mbc1State = Mbc1State
@@ -83,6 +87,20 @@ initialMbc1 =
         , m1RomBankLow = 0x01
         , m1BankHi = 0x00
         , m1Mode = False
+        }
+
+data Mbc2State = Mbc2State
+    { m2RamEnabled :: !Bool
+    , m2RomBank :: !Word8
+    -- ^ 4-bit ROM bank number; 0 wraps to 1.
+    }
+    deriving (Eq, Show)
+
+initialMbc2 :: Mbc2State
+initialMbc2 =
+    Mbc2State
+        { m2RamEnabled = False
+        , m2RomBank = 0x01
         }
 
 data Mbc3State = Mbc3State
@@ -135,6 +153,22 @@ initialMbc3 =
         , m3RtcLatched = zeroRtcRegs
         }
 
+data HuC1State = HuC1State
+    { hcRamEnabled :: !Bool
+    -- ^ Approximation: true when the most recent write to 0x0000-0x1FFF
+    -- selected RAM mode (low nibble != 0xE). False when IR mode was
+    -- selected; we ignore IR entirely and just gate RAM access.
+    , hcRomBank :: !Word8
+    -- ^ 6-bit ROM bank selector at 0x2000-0x3FFF. Unlike MBC1, zero is
+    -- not auto-translated to one.
+    , hcRamBank :: !Word8
+    -- ^ 2-bit RAM bank selector at 0x4000-0x5FFF.
+    }
+    deriving (Eq, Show)
+
+initialHuC1 :: HuC1State
+initialHuC1 = HuC1State{hcRamEnabled = False, hcRomBank = 0x00, hcRamBank = 0x00}
+
 data Mbc5State = Mbc5State
     { m5RamEnabled :: !Bool
     , m5RomBankLow :: !Word8
@@ -161,13 +195,14 @@ cartridgeHeader :: Cartridge -> Header
 cartridgeHeader = cartHeader
 
 {- | Whether the cartridge has battery-backed state worth writing to a
-@.sav@ file: either external RAM, an RTC, or both. Returns 'False' for
-cartridges with no battery flag at all.
+@.sav@ file: external RAM, an RTC, or MBC2's built-in 512-nibble RAM.
+Returns 'False' for cartridges with no battery flag at all.
 -}
 cartridgeHasBattery :: Cartridge -> Bool
 cartridgeHasBattery c =
     let caps = hdrCaps (cartHeader c)
-     in capBattery caps && (capRam caps || capTimer caps)
+        mbc = hdrMbcKind (cartHeader c)
+     in capBattery caps && (capRam caps || capTimer caps || mbc == Mbc2)
 
 {- | Take a snapshot of the cartridge's external RAM as an immutable byte
 string. Used by the frontend to write @.sav@ files on exit.
@@ -212,7 +247,7 @@ loadSave bs c = do
     loadRam ramBytes c
     when (BS.length rest >= rtcSuffixSize) (applyRtcSuffix rest c)
 
-{- | Snapshot the live MBC bank-select state (not the RAM contents — use
+{- | Snapshot the live MBC bank-select state (not the RAM contents; use
 'extractSave' for those). The blob shape is fixed per MBC kind; an MBC
 mismatch on 'loadMbc' is silently ignored (the bank state stays as-is).
 -}
@@ -224,9 +259,7 @@ dumpMbc c = do
 loadMbc :: ByteString -> Cartridge -> IO ()
 loadMbc bs c = do
     cur <- readIORef (cartImpl c)
-    case decodeMbc cur bs of
-        Just impl -> writeIORef (cartImpl c) impl
-        Nothing -> pure ()
+    for_ (decodeMbc cur bs) (writeIORef (cartImpl c))
 
 encodeMbc :: MbcImpl -> BB.Builder
 encodeMbc NoMbcImpl = BB.word8 0x00
@@ -236,6 +269,10 @@ encodeMbc (Mbc1Impl s) =
         <> BB.word8 (m1RomBankLow s)
         <> BB.word8 (m1BankHi s)
         <> BB.word8 (if m1Mode s then 1 else 0)
+encodeMbc (Mbc2Impl s) =
+    BB.word8 0x02
+        <> BB.word8 (if m2RamEnabled s then 1 else 0)
+        <> BB.word8 (m2RomBank s)
 encodeMbc (Mbc3Impl s) =
     BB.word8 0x03
         <> BB.word8 (if m3RamRtcEnabled s then 1 else 0)
@@ -253,6 +290,11 @@ encodeMbc (Mbc5Impl s) =
         <> BB.word8 (m5RomBankLow s)
         <> BB.word8 (m5RomBankHigh s)
         <> BB.word8 (m5RamBank s)
+encodeMbc (HuC1Impl s) =
+    BB.word8 0xFF
+        <> BB.word8 (if hcRamEnabled s then 1 else 0)
+        <> BB.word8 (hcRomBank s)
+        <> BB.word8 (hcRamBank s)
 
 decodeMbc :: MbcImpl -> ByteString -> Maybe MbcImpl
 decodeMbc cur bs
@@ -271,6 +313,17 @@ decodeMbc cur bs
                                     , m1RomBankLow = BS.index p 1
                                     , m1BankHi = BS.index p 2
                                     , m1Mode = BS.index p 3 /= 0
+                                    }
+        (0x02, Mbc2Impl _) ->
+            let p = BS.drop 1 bs
+             in if BS.length p < 2
+                    then Nothing
+                    else
+                        Just $
+                            Mbc2Impl
+                                Mbc2State
+                                    { m2RamEnabled = BS.index p 0 /= 0
+                                    , m2RomBank = BS.index p 1
                                     }
         (0x03, Mbc3Impl _) ->
             let p = BS.drop 1 bs
@@ -308,6 +361,18 @@ decodeMbc cur bs
                                     , m5RomBankHigh = BS.index p 2
                                     , m5RamBank = BS.index p 3
                                     }
+        (0xFF, HuC1Impl _) ->
+            let p = BS.drop 1 bs
+             in if BS.length p < 3
+                    then Nothing
+                    else
+                        Just $
+                            HuC1Impl
+                                HuC1State
+                                    { hcRamEnabled = BS.index p 0 /= 0
+                                    , hcRomBank = BS.index p 1
+                                    , hcRamBank = BS.index p 2
+                                    }
         _ -> Nothing
 
 loadRom :: ByteString -> IO (Either CartridgeError Cartridge)
@@ -318,7 +383,12 @@ loadRom raw =
         pure (hdr, impl) of
         Left err -> pure (Left err)
         Right (hdr, impl0) -> do
-            ram <- MV.replicate (hdrRamBytes hdr) 0xFF
+            -- MBC2 has 512 nibbles of built-in RAM; the header reports zero
+            -- RAM size for those carts, so override the allocation here.
+            let ramBytes = case hdrMbcKind hdr of
+                    Mbc2 -> 512
+                    _ -> hdrRamBytes hdr
+            ram <- MV.replicate ramBytes 0xFF
             impl <- anchorRtc impl0
             ref <- newIORef impl
             pure $
@@ -346,8 +416,10 @@ nowPosix = floor <$> getPOSIXTime
 selectInitialImpl :: MbcKind -> Either CartridgeError MbcImpl
 selectInitialImpl NoMbc = Right NoMbcImpl
 selectInitialImpl Mbc1 = Right (Mbc1Impl initialMbc1)
+selectInitialImpl Mbc2 = Right (Mbc2Impl initialMbc2)
 selectInitialImpl Mbc3 = Right (Mbc3Impl initialMbc3)
 selectInitialImpl Mbc5 = Right (Mbc5Impl initialMbc5)
+selectInitialImpl HuC1 = Right (HuC1Impl initialHuC1)
 selectInitialImpl other = Left (UnsupportedMbcKind other)
 
 read8 :: Word16 -> Cartridge -> IO Word8
@@ -356,8 +428,10 @@ read8 addr c = do
     case impl of
         NoMbcImpl -> noMbcRead addr c
         Mbc1Impl s -> mbc1Read s addr c
+        Mbc2Impl s -> mbc2Read s addr c
         Mbc3Impl s -> mbc3Read s addr c
         Mbc5Impl s -> mbc5Read s addr c
+        HuC1Impl s -> huc1Read s addr c
 
 write8 :: Word16 -> Word8 -> Cartridge -> IO ()
 write8 addr v c = do
@@ -365,8 +439,10 @@ write8 addr v c = do
     case impl of
         NoMbcImpl -> noMbcWrite addr v c
         Mbc1Impl s -> mbc1Write s addr v c
+        Mbc2Impl s -> mbc2Write s addr v c
         Mbc3Impl s -> mbc3Write s addr v c
         Mbc5Impl s -> mbc5Write s addr v c
+        HuC1Impl s -> huc1Write s addr v c
 
 ----------------------------------------------------------------------
 -- NoMbc
@@ -388,9 +464,7 @@ noMbcWrite :: Word16 -> Word8 -> Cartridge -> IO ()
 noMbcWrite addr v c
     | addr >= 0xA000 && addr <= 0xBFFF =
         let i = fromIntegral (addr - 0xA000)
-         in if i < MV.length (cartRam c)
-                then MV.write (cartRam c) i v
-                else pure ()
+         in when (i < MV.length (cartRam c)) (MV.write (cartRam c) i v)
     | otherwise = pure ()
 
 ----------------------------------------------------------------------
@@ -442,9 +516,7 @@ mbc1Write s addr v c
                     then fromIntegral (m1BankHi s) :: Int
                     else 0
             !off = bank * 0x2000 + fromIntegral (addr - 0xA000)
-         in if off < MV.length (cartRam c)
-                then MV.write (cartRam c) off v
-                else pure ()
+         in when (off < MV.length (cartRam c)) (MV.write (cartRam c) off v)
     | otherwise = pure ()
 
 mbc1HighBank :: Mbc1State -> Int
@@ -459,6 +531,46 @@ mbc1HighBank s =
 romIndex :: ByteString -> Int -> Word8
 romIndex rom i =
     if i < BS.length rom then BS.index rom i else 0xFF
+
+----------------------------------------------------------------------
+-- MBC2
+----------------------------------------------------------------------
+
+mbc2Read :: Mbc2State -> Word16 -> Cartridge -> IO Word8
+mbc2Read s addr c
+    | addr <= 0x3FFF = pure (romIndex (cartRom c) (fromIntegral addr))
+    | addr <= 0x7FFF =
+        let !off = fromIntegral (m2RomBank s) * 0x4000 + fromIntegral (addr - 0x4000)
+         in pure (romIndex (cartRom c) off)
+    | addr >= 0xA000 && addr <= 0xBFFF =
+        if not (m2RamEnabled s)
+            then pure 0xFF
+            else do
+                -- MBC2 RAM is 512 nibbles; addresses mirror every 0x200.
+                let i = fromIntegral (addr - 0xA000) `mod` 512
+                v <- MV.read (cartRam c) i
+                pure (0xF0 .|. (v .&. 0x0F))
+    | otherwise = pure 0xFF
+
+{- | MBC2 register writes use bit 8 of the address to disambiguate:
+
+* @0x0000-0x3FFF@ with @addr & 0x100 == 0@: RAM enable (low nibble == 0xA).
+* @0x0000-0x3FFF@ with @addr & 0x100 != 0@: ROM bank select (low 4 bits;
+  zero is treated as one).
+-}
+mbc2Write :: Mbc2State -> Word16 -> Word8 -> Cartridge -> IO ()
+mbc2Write s addr v c
+    | addr <= 0x3FFF =
+        if testBit addr 8
+            then
+                let !bank = v .&. 0x0F
+                    !adj = if bank == 0 then 1 else bank
+                 in writeIORef (cartImpl c) (Mbc2Impl s{m2RomBank = adj})
+            else writeIORef (cartImpl c) (Mbc2Impl s{m2RamEnabled = (v .&. 0x0F) == 0x0A})
+    | addr >= 0xA000 && addr <= 0xBFFF && m2RamEnabled s =
+        let i = fromIntegral (addr - 0xA000) `mod` 512
+         in MV.write (cartRam c) i (v .&. 0x0F)
+    | otherwise = pure ()
 
 ----------------------------------------------------------------------
 -- MBC3
@@ -509,9 +621,7 @@ mbc3Write s addr v c
                 | b < 4 ->
                     let !bank = fromIntegral b :: Int
                         !off = bank * 0x2000 + fromIntegral (addr - 0xA000)
-                     in if off < MV.length (cartRam c)
-                            then MV.write (cartRam c) off v
-                            else pure ()
+                     in when (off < MV.length (cartRam c)) (MV.write (cartRam c) off v)
             b | b >= 0x08 && b <= 0x0C -> do
                 s' <- writeRtcReg b v s
                 writeIORef (cartImpl c) (Mbc3Impl s')
@@ -742,11 +852,46 @@ mbc5Write s addr v c
     | addr >= 0xA000 && addr <= 0xBFFF && m5RamEnabled s =
         let !bank = fromIntegral (m5RamBank s) :: Int
             !off = bank * 0x2000 + fromIntegral (addr - 0xA000)
-         in if off < MV.length (cartRam c)
-                then MV.write (cartRam c) off v
-                else pure ()
+         in when (off < MV.length (cartRam c)) (MV.write (cartRam c) off v)
     | otherwise = pure ()
 
 mbc5HighBank :: Mbc5State -> Int
 mbc5HighBank s =
     (fromIntegral (m5RomBankHigh s) `shiftL` 8) .|. fromIntegral (m5RomBankLow s)
+
+----------------------------------------------------------------------
+-- HuC1
+----------------------------------------------------------------------
+
+huc1Read :: HuC1State -> Word16 -> Cartridge -> IO Word8
+huc1Read s addr c
+    | addr <= 0x3FFF = pure (romIndex (cartRom c) (fromIntegral addr))
+    | addr <= 0x7FFF =
+        let !off = fromIntegral (hcRomBank s) * 0x4000 + fromIntegral (addr - 0x4000)
+         in pure (romIndex (cartRom c) off)
+    | addr >= 0xA000 && addr <= 0xBFFF =
+        if not (hcRamEnabled s)
+            then pure 0xC0 -- Approximation of IR-mode reads (no IR data).
+            else
+                let !bank = fromIntegral (hcRamBank s) :: Int
+                    !off = bank * 0x2000 + fromIntegral (addr - 0xA000)
+                 in if off < MV.length (cartRam c)
+                        then MV.read (cartRam c) off
+                        else pure 0xFF
+    | otherwise = pure 0xFF
+
+huc1Write :: HuC1State -> Word16 -> Word8 -> Cartridge -> IO ()
+huc1Write s addr v c
+    | addr <= 0x1FFF =
+        -- 0x0E selects IR mode; anything else (notably 0x0A) selects RAM.
+        writeIORef (cartImpl c) (HuC1Impl s{hcRamEnabled = (v .&. 0x0F) /= 0x0E})
+    | addr <= 0x3FFF =
+        writeIORef (cartImpl c) (HuC1Impl s{hcRomBank = v .&. 0x3F})
+    | addr <= 0x5FFF =
+        writeIORef (cartImpl c) (HuC1Impl s{hcRamBank = v .&. 0x03})
+    | addr <= 0x7FFF = pure ()
+    | addr >= 0xA000 && addr <= 0xBFFF && hcRamEnabled s =
+        let !bank = fromIntegral (hcRamBank s) :: Int
+            !off = bank * 0x2000 + fromIntegral (addr - 0xA000)
+         in when (off < MV.length (cartRam c)) (MV.write (cartRam c) off v)
+    | otherwise = pure ()

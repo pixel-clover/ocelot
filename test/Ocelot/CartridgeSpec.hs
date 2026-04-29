@@ -30,12 +30,17 @@ spec = do
                 Right c -> hdrMbcKind (cartridgeHeader c) `shouldBe` Mbc1
                 Left e -> expectationFailure (show e)
 
-        it "rejects MBC2 cartridges as UnsupportedMbcKind" $ do
-            r <- loadRom (mkSyntheticRom 0x05 0x00 0x00 "X")
+        it "accepts a HuC1 cartridge" $ do
+            r <- loadRom (mkSyntheticRom 0xFF 0x00 0x02 "HUC1")
             case r of
-                Left (UnsupportedMbcKind Mbc2) -> pure ()
-                Left other -> expectationFailure ("expected MBC2 rejection, got: " ++ show other)
-                Right _ -> expectationFailure "expected MBC2 rejection, got Right"
+                Right c -> hdrMbcKind (cartridgeHeader c) `shouldBe` HuC1
+                Left e -> expectationFailure (show e)
+
+        it "accepts an MBC2 cartridge with built-in 512-nibble RAM" $ do
+            r <- loadRom (mkSyntheticRom 0x05 0x00 0x00 "MBC2")
+            case r of
+                Right c -> hdrMbcKind (cartridgeHeader c) `shouldBe` Mbc2
+                Left e -> expectationFailure (show e)
 
         it "wraps header errors in HeaderParse" $ do
             r <- loadRom (BS.replicate 0x100 0)
@@ -47,7 +52,7 @@ spec = do
     describe "read8 (NoMbc)" $ do
         it "reads the entry-point bytes at 0x0100..0x0103" $ do
             Right c <- loadRom (mkSyntheticRom 0x00 0x00 0x00 "X")
-            vs <- mapM (\a -> read8 a c) [0x0100, 0x0101, 0x0102, 0x0103]
+            vs <- mapM (`read8` c) [0x0100, 0x0101, 0x0102, 0x0103]
             vs `shouldBe` [0x00, 0xC3, 0x50, 0x01]
 
         it "reads the cartridge type byte at 0x0147" $ do
@@ -82,9 +87,33 @@ spec = do
             v <- read8 0xA000 c
             v `shouldBe` 0xFF
 
+    describe "MBC2" $ do
+        it "RAM disable gate: writes ignored when RAM is disabled" $ do
+            Right c <- loadRom (mkSyntheticRom 0x05 0x00 0x00 "MBC2")
+            -- RAM starts disabled; this write should drop.
+            write8 0xA000 0xC3 c
+            -- Now enable and read: low nibble should be the post-init 0xF.
+            write8 0x0000 0x0A c
+            v <- read8 0xA000 c
+            v `shouldBe` 0xFF
+        it "RAM round-trips low nibble; high nibble reads 0xF" $ do
+            Right c <- loadRom (mkSyntheticRom 0x05 0x00 0x00 "MBC2")
+            -- Enable RAM: write 0x0A to addr 0x0000-0x0FFF (bit 8 clear).
+            write8 0x0000 0x0A c
+            write8 0xA000 0xC3 c
+            v <- read8 0xA000 c
+            -- Stored low nibble is 0x3; reads return 0xF<low>.
+            v `shouldBe` 0xF3
+        it "RAM is mirrored every 0x200 bytes across 0xA000-0xBFFF" $ do
+            Right c <- loadRom (mkSyntheticRom 0x05 0x00 0x00 "MBC2")
+            write8 0x0000 0x0A c
+            write8 0xA000 0x05 c
+            v <- read8 0xA200 c
+            v `shouldBe` 0xF5
+
     describe "MBC3 RTC" $ do
         let mkMbc3Rtc = mkSyntheticRom 0x10 0x00 0x02 "MBC3RTC"
-            enableRamRtc c = write8 0x0000 0x0A c
+            enableRamRtc = write8 0x0000 0x0A
             -- Halt the RTC and zero everything so tests don't depend on wall clock.
             zeroAndHalt c = do
                 enableRamRtc c
@@ -103,10 +132,10 @@ spec = do
             write8 0x4000 0x0A c >> write8 0xA000 0x11 c
             write8 0x4000 0x0B c >> write8 0xA000 0x33 c
             latch c
-            sec <- (write8 0x4000 0x08 c >> read8 0xA000 c)
-            mn <- (write8 0x4000 0x09 c >> read8 0xA000 c)
-            hr <- (write8 0x4000 0x0A c >> read8 0xA000 c)
-            dl <- (write8 0x4000 0x0B c >> read8 0xA000 c)
+            sec <- write8 0x4000 0x08 c >> read8 0xA000 c
+            mn <- write8 0x4000 0x09 c >> read8 0xA000 c
+            hr <- write8 0x4000 0x0A c >> read8 0xA000 c
+            dl <- write8 0x4000 0x0B c >> read8 0xA000 c
             sec `shouldBe` 0x2A
             mn `shouldBe` 0x05
             hr `shouldBe` 0x11
@@ -117,9 +146,9 @@ spec = do
             zeroAndHalt c
             write8 0x4000 0x08 c >> write8 0xA000 0x07 c
             latch c
-            v1 <- (write8 0x4000 0x08 c >> read8 0xA000 c)
+            v1 <- write8 0x4000 0x08 c >> read8 0xA000 c
             latch c
-            v2 <- (write8 0x4000 0x08 c >> read8 0xA000 c)
+            v2 <- write8 0x4000 0x08 c >> read8 0xA000 c
             v1 `shouldBe` 0x07
             v2 `shouldBe` 0x07
 
@@ -128,7 +157,7 @@ spec = do
             zeroAndHalt c
             write8 0x4000 0x0C c >> write8 0xA000 0x41 c
             latch c
-            dh <- (write8 0x4000 0x0C c >> read8 0xA000 c)
+            dh <- write8 0x4000 0x0C c >> read8 0xA000 c
             dh `shouldBe` 0x41
 
         it "DH bit 7 (day carry) is sticky until cleared" $ do
@@ -136,10 +165,10 @@ spec = do
             zeroAndHalt c
             write8 0x4000 0x0C c >> write8 0xA000 0xC0 c
             latch c
-            dh1 <- (write8 0x4000 0x0C c >> read8 0xA000 c)
+            dh1 <- write8 0x4000 0x0C c >> read8 0xA000 c
             write8 0x4000 0x0C c >> write8 0xA000 0x40 c
             latch c
-            dh2 <- (write8 0x4000 0x0C c >> read8 0xA000 c)
+            dh2 <- write8 0x4000 0x0C c >> read8 0xA000 c
             dh1 `shouldBe` 0xC0
             dh2 `shouldBe` 0x40
 
@@ -176,8 +205,8 @@ spec = do
             write8 0x4000 0x00 c2
             ramByte <- read8 0xA000 c2
             latch c2
-            mn <- (write8 0x4000 0x09 c2 >> read8 0xA000 c2)
-            dl <- (write8 0x4000 0x0B c2 >> read8 0xA000 c2)
+            mn <- write8 0x4000 0x09 c2 >> read8 0xA000 c2
+            dl <- write8 0x4000 0x0B c2 >> read8 0xA000 c2
             ramByte `shouldBe` 0x77
             mn `shouldBe` 0x12
             dl `shouldBe` 0x05

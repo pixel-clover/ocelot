@@ -36,6 +36,7 @@ module Ocelot.Cpu.Execute (
 import Data.Bits (clearBit, complement, setBit, shiftL, shiftR, testBit, (.&.), (.|.))
 import Data.Int (Int8)
 import Data.Word (Word16, Word8)
+import qualified Ocelot.Bus as Bus
 import qualified Ocelot.Cpu.Alu as Alu
 import Ocelot.Cpu.Decode (
     AluOp (..),
@@ -183,7 +184,21 @@ runFor cap = go 0
 execute :: Instruction -> Machine -> IO MCycles
 execute instr m = case instr of
     Nop -> pure 1
-    Halt -> mapCpu (\c -> c{cpuHalted = True}) m >> pure 1
+    Halt -> do
+        -- HALT bug: when IME=0 and at least one pending interrupt is enabled
+        -- (IF & IE != 0), the CPU does not halt. Real hardware also fails to
+        -- advance PC on the next fetch (executing the following instruction
+        -- twice); we model the simpler "skip the halt" form, which is what
+        -- most ROMs need to avoid stalling.
+        cpu <- getCpu m
+        if not (cpuIme cpu)
+            then do
+                iflag <- Bus.read8 0xFF0F (machineBus m)
+                ie <- Bus.read8 0xFFFF (machineBus m)
+                if (iflag .&. ie .&. 0x1F) /= 0
+                    then pure 1
+                    else mapCpu (\c -> c{cpuHalted = True}) m >> pure 1
+            else mapCpu (\c -> c{cpuHalted = True}) m >> pure 1
     LdRR dst src -> do
         v <- getReg8 src m
         setReg8 dst v m
@@ -310,7 +325,7 @@ execute instr m = case instr of
     AddHlRr rr -> do
         hl <- getReg16 RHL m
         v <- getReg16 rr m
-        zIn <- (\f -> testBit f 7) . regF <$> getCpuRegs m
+        zIn <- (`testBit` 7) . regF <$> getCpuRegs m
         let (r, flags) = Alu.add16 hl v zIn
         setReg16 RHL r m
         setFlagsByte (flagsToByte flags) m
@@ -399,7 +414,14 @@ execute instr m = case instr of
         pure 1
     Di -> mapCpu (\c -> c{cpuIme = False, cpuEiDelay = False}) m >> pure 1
     Ei -> mapCpu (\c -> c{cpuEiDelay = True}) m >> pure 1
-    Stop -> mapCpu (\c -> c{cpuHalted = True}) m >> pure 1
+    Stop -> do
+        -- On a CGB cart with KEY1 bit 0 set, STOP triggers the
+        -- single/double-speed switch instead of halting; otherwise it
+        -- halts as on DMG.
+        switched <- Bus.triggerSpeedSwitch (machineBus m)
+        if switched
+            then pure 1
+            else mapCpu (\c -> c{cpuHalted = True}) m >> pure 1
     Rlc r -> cbRotate Alu.rlc8 r m
     Rrc r -> cbRotate Alu.rrc8 r m
     Rl r -> cbRotateC Alu.rl8 r m

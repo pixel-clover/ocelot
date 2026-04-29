@@ -12,6 +12,7 @@ module Ocelot.Cpu.Registers (
     Flag (..),
     zeroRegisters,
     dmgPostBoot,
+    cgbPostBoot,
     getAF,
     setAF,
     getBC,
@@ -62,6 +63,26 @@ dmgPostBoot =
         , regE = 0xD8
         , regH = 0x01
         , regL = 0x4D
+        , regSP = 0xFFFE
+        , regPC = 0x0100
+        }
+
+{- | Register state immediately after the CGB boot ROM hands off to the
+cartridge at @0x0100@. The key value is @A = 0x11@, which CGB-aware ROMs
+check to decide whether to use the CGB palette pipeline; without this,
+games leave BG\/OBJ palette RAM uninitialized and render all-white.
+-}
+cgbPostBoot :: Registers
+cgbPostBoot =
+    Registers
+        { regA = 0x11
+        , regF = 0x80
+        , regB = 0x00
+        , regC = 0x00
+        , regD = 0xFF
+        , regE = 0x56
+        , regH = 0x00
+        , regL = 0x0D
         , regSP = 0xFFFE
         , regPC = 0x0100
         }

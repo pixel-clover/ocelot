@@ -95,6 +95,26 @@ spec = do
             cpuHalted cpu' `shouldBe` False
             regPC regs `shouldBe` 0x0001
 
+        it "HALT bug: with IME=0 and IF&IE != 0, HALT does not halt" $ do
+            -- Without the bug fix the CPU halts and never resumes (because
+            -- service requires IME). After the fix, HALT in this state is
+            -- a no-op and execution continues with the next instruction.
+            m <- mkProg [0x76, 0x00, 0x00]
+            setIfIe 0x04 0x04 m
+            -- IME is False by default.
+            _ <- runFor 1 m
+            cpu <- getCpu m
+            regs <- getCpuRegs m
+            cpuHalted cpu `shouldBe` False
+            regPC regs `shouldBe` 0x0001
+
+        it "HALT with IME=0 and no pending IRQ still halts normally" $ do
+            m <- mkProg [0x76, 0x00, 0x00]
+            -- IF & IE both zero; IME irrelevant for halting itself.
+            _ <- runFor 1 m
+            cpu <- getCpu m
+            cpuHalted cpu `shouldBe` True
+
     describe "EI delay" $ do
         it "EI does not enable IME until after the next instruction" $ do
             m <- mkProg [0xFB, 0x00, 0x00, 0x76]

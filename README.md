@@ -45,3 +45,8 @@ Ocelot is licensed under the MIT License (see [LICENSE](LICENSE)).
 ### Acknowledgements
 
 * The logo is from [SVG Repo](https://www.svgrepo.com/svg/28849/old-gameboy-console) with some modifications.
+* This project uses material from the following projects and resources:
+    * [Minish](https://github.com/CogitatorTech/minish) framework for property-based testing
+    * [Chilli](https://github.com/CogitatorTech/chilli) framework for CLI parsing and handling
+    * [Rocket 68](https://github.com/habedi/rocket68) for the main CPU (Motorola 68000) emulation
+    * [jgz80](https://github.com/carmiker/jgz80) for the Z80 chip emulation

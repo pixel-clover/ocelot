@@ -30,6 +30,7 @@ module Ocelot.Snapshot (
     load,
 ) where
 
+import Control.Monad (when)
 import Data.Bits (shiftL, (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -60,7 +61,7 @@ magic :: ByteString
 magic = BS.pack [0x4F, 0x43, 0x53, 0x31] -- "OCS1"
 
 currentVersion :: Word32
-currentVersion = 1
+currentVersion = 5
 
 cpuLen, timerLen, joyLen, ppuRegLen :: Int
 cpuLen = 24
@@ -118,10 +119,11 @@ encodeCpu c =
 encodeTimer :: TimerState -> BB.Builder
 encodeTimer ts =
     Snap.putU16 (timDivider ts)
-        <> Snap.putU16 (timTimaAccum ts)
         <> Snap.putU8 (timTima ts)
         <> Snap.putU8 (timTma ts)
         <> Snap.putU8 (timTac ts)
+        <> Snap.putBool (timPrevAnd ts)
+        <> Snap.putU8 (fromIntegral (timReloadCounter ts))
 
 encodeJoypad :: (Word8, Word8, Bool) -> BB.Builder
 encodeJoypad (sel, mask, irq) =
@@ -145,6 +147,14 @@ ppuSnapshot ps = do
     vram <- ioVectorBytes (Ppu.ppuVram ps)
     oam <- ioVectorBytes (Ppu.ppuOam ps)
     fb <- ioVectorBytes (Ppu.ppuFb ps)
+    -- CGB additions (v2): VBK, BCPS, OCPS, BG palette RAM, OBJ palette RAM.
+    vbk <- readIORef (Ppu.ppuVbk ps)
+    bcps <- readIORef (Ppu.ppuBcps ps)
+    ocps <- readIORef (Ppu.ppuOcps ps)
+    bgPal <- ioVectorBytes (Ppu.ppuBgPalRam ps)
+    objPal <- ioVectorBytes (Ppu.ppuObjPalRam ps)
+    -- v4 addition: window-line counter.
+    wly <- readIORef (Ppu.ppuWindowLine ps)
     pure $
         Snap.putU8 lcdc
             <> Snap.putU8 stat
@@ -162,6 +172,14 @@ ppuSnapshot ps = do
             <> Snap.putBlob vram
             <> Snap.putBlob oam
             <> Snap.putBlob fb
+            -- CGB block (v2):
+            <> Snap.putU8 vbk
+            <> Snap.putU8 bcps
+            <> Snap.putU8 ocps
+            <> Snap.putBlob bgPal
+            <> Snap.putBlob objPal
+            -- v4: window-line counter (u32 to leave room for tall frames).
+            <> Snap.putU32 (fromIntegral wly)
 
 busSnapshot :: Bus.Bus -> IO BB.Builder
 busSnapshot b = do
@@ -169,11 +187,29 @@ busSnapshot b = do
     hram <- ioVectorBytes (Bus.busHram b)
     io <- ioVectorBytes (Bus.busIo b)
     ie <- readIORef (Bus.busIe b)
+    -- CGB additions (v2): WRAM bank selector, KEY1.
+    wbk <- readIORef (Bus.busWramBank b)
+    key1 <- readIORef (Bus.busKey1 b)
+    -- v3 additions: in-flight HDMA + double-speed bits.
+    hdmaSrc <- readIORef (Bus.busHdmaSrc b)
+    hdmaDst <- readIORef (Bus.busHdmaDst b)
+    hdmaLen <- readIORef (Bus.busHdmaLen b)
+    hdmaActive <- readIORef (Bus.busHdmaActive b)
+    ds <- readIORef (Bus.busDoubleSpeed b)
+    dsAcc <- readIORef (Bus.busDoubleSpeedAcc b)
     pure $
         Snap.putBlob wram
             <> Snap.putBlob hram
             <> Snap.putBlob io
             <> Snap.putU8 ie
+            <> Snap.putU8 wbk
+            <> Snap.putU8 key1
+            <> Snap.putU16 hdmaSrc
+            <> Snap.putU16 hdmaDst
+            <> Snap.putU32 (fromIntegral hdmaLen)
+            <> Snap.putBool hdmaActive
+            <> Snap.putBool ds
+            <> Snap.putU8 (fromIntegral dsAcc)
 
 ioVectorBytes :: MV.IOVector Word8 -> IO ByteString
 ioVectorBytes v = do
@@ -213,7 +249,22 @@ applySnapshot bs0 m = do
     writeBytesToVector vram (Ppu.ppuVram (Bus.busPpu bus))
     writeBytesToVector oam (Ppu.ppuOam (Bus.busPpu bus))
     writeBytesToVector fb (Ppu.ppuFb (Bus.busPpu bus))
-    let (apuBlob, bs8) = takeBlob bs7
+    -- CGB v2 PPU block: VBK, BCPS, OCPS (3 bytes), then BG/OBJ palette RAM blobs.
+    writeIORef (Ppu.ppuVbk (Bus.busPpu bus)) (BS.index bs7 0)
+    writeIORef (Ppu.ppuBcps (Bus.busPpu bus)) (BS.index bs7 1)
+    writeIORef (Ppu.ppuOcps (Bus.busPpu bus)) (BS.index bs7 2)
+    let bs7a = BS.drop 3 bs7
+        (bgPal, bs7b) = takeBlob bs7a
+        (objPal, bs7c) = takeBlob bs7b
+    writeBytesToVector bgPal (Ppu.ppuBgPalRam (Bus.busPpu bus))
+    writeBytesToVector objPal (Ppu.ppuObjPalRam (Bus.busPpu bus))
+    -- v4: window-line counter (u32).
+    when (BS.length bs7c >= 4) $
+        writeIORef
+            (Ppu.ppuWindowLine (Bus.busPpu bus))
+            (fromIntegral (decodeU32 bs7c))
+    let bs7d = BS.drop 4 bs7c
+        (apuBlob, bs8) = takeBlob bs7d
     Apu.loadState apuBlob (Bus.busApu bus)
     let (wram, bs9) = takeBlob bs8
         (hram, bs10) = takeBlob bs9
@@ -225,7 +276,22 @@ applySnapshot bs0 m = do
         then pure ()
         else writeIORef (Bus.busIe bus) (BS.index bs11 0)
     let bs12 = BS.drop 1 bs11
-        (cartRam, bs13) = takeBlob bs12
+    -- CGB v2 Bus block: WBK, KEY1.
+    when (BS.length bs12 >= 2) $ do
+        writeIORef (Bus.busWramBank bus) (BS.index bs12 0)
+        writeIORef (Bus.busKey1 bus) (BS.index bs12 1)
+    let bs12a = BS.drop 2 bs12
+    -- v3 additions: HDMA src (u16), dst (u16), len (u32), active (u8),
+    -- double-speed (u8), double-speed acc (u8) = 11 bytes.
+    when (BS.length bs12a >= 11) $ do
+        writeIORef (Bus.busHdmaSrc bus) (decodeU16 bs12a)
+        writeIORef (Bus.busHdmaDst bus) (decodeU16 (BS.drop 2 bs12a))
+        writeIORef (Bus.busHdmaLen bus) (fromIntegral (decodeU32 (BS.drop 4 bs12a)))
+        writeIORef (Bus.busHdmaActive bus) (BS.index bs12a 8 /= 0)
+        writeIORef (Bus.busDoubleSpeed bus) (BS.index bs12a 9 /= 0)
+        writeIORef (Bus.busDoubleSpeedAcc bus) (fromIntegral (BS.index bs12a 10))
+    let bs12b = BS.drop 11 bs12a
+        (cartRam, bs13) = takeBlob bs12b
         (cartMbc, _) = takeBlob bs13
     Cart.loadSave cartRam (Bus.busCart bus)
     Cart.loadMbc cartMbc (Bus.busCart bus)
@@ -279,10 +345,11 @@ applyTimer bs bus =
         (Bus.busTimer bus)
         TimerState
             { timDivider = decodeU16 bs
-            , timTimaAccum = decodeU16 (BS.drop 2 bs)
-            , timTima = BS.index bs 4
-            , timTma = BS.index bs 5
-            , timTac = BS.index bs 6
+            , timTima = BS.index bs 2
+            , timTma = BS.index bs 3
+            , timTac = BS.index bs 4
+            , timPrevAnd = BS.index bs 5 /= 0
+            , timReloadCounter = fromIntegral (BS.index bs 6)
             }
 
 applyJoypad :: ByteString -> Bus.Bus -> IO ()

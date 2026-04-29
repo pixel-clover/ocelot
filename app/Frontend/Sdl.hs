@@ -28,6 +28,7 @@ import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar)
 import Control.Exception (IOException, try)
 import Control.Monad (unless, when)
 import qualified Data.ByteString as BS
+import Data.Foldable (toList)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int16)
 import Data.Text (Text)
@@ -41,10 +42,11 @@ import Ocelot.Cartridge (Cartridge)
 import Ocelot.Cpu.Execute (runFor)
 import Ocelot.Joypad (Button (..), JoypadState)
 import qualified Ocelot.Joypad as Joypad
-import Ocelot.Machine (Machine (..), machineFromCartridge)
+import Ocelot.Machine (Machine (..), machineFromCartridgeWithBoot)
 import qualified Ocelot.Ppu as Ppu
 import qualified Ocelot.Snapshot as Snap
 import qualified SDL
+import qualified SDL.Input.GameController as SDLGC
 
 gbWidth, gbHeight :: Int
 gbWidth = 160
@@ -72,6 +74,10 @@ data Hotkeys = Hotkeys
     , hkSaveReq :: !(IORef Bool)
     , hkLoadReq :: !(IORef Bool)
     , hkShotReq :: !(IORef Bool)
+    , hkFrameStepReq :: !(IORef Bool)
+    -- ^ "." while paused: run one frame, then re-pause.
+    , hkResetReq :: !(IORef Bool)
+    -- ^ "R": rebuild the Machine from the cartridge.
     }
 
 newHotkeys :: IO Hotkeys
@@ -83,10 +89,23 @@ newHotkeys =
         <*> newIORef False
         <*> newIORef False
         <*> newIORef False
+        <*> newIORef False
+        <*> newIORef False
 
-play :: FilePath -> Cartridge -> Text -> IO ()
-play romPath cart title = do
-    SDL.initialize [SDL.InitVideo, SDL.InitEvents, SDL.InitAudio]
+play :: FilePath -> Cartridge -> Maybe BS.ByteString -> Text -> IO ()
+play romPath cart bootRom title = do
+    SDL.initialize
+        [ SDL.InitVideo
+        , SDL.InitEvents
+        , SDL.InitAudio
+        , SDL.InitGameController
+        ]
+    -- Open the first connected controller, if any. Disconnect events later
+    -- are not specially handled; SDL still posts ControllerButton events.
+    controllers <- SDLGC.availableControllers
+    _maybeController <- case (toList controllers, ()) of
+        (dev : _, _) -> Just <$> SDLGC.openController dev
+        _ -> pure Nothing
     window <-
         SDL.createWindow
             ("Ocelot - " <> title)
@@ -109,12 +128,13 @@ play romPath cart title = do
     audioBuf <- newMVar []
     audioDev <- openAudio audioBuf
 
-    machine <- machineFromCartridge cart
+    machine0 <- machineFromCartridgeWithBoot bootRom cart
+    machineRef <- newIORef machine0
     hk <- newHotkeys
 
     SDL.setAudioDevicePlaybackState audioDev SDL.Play
 
-    loop romPath hk machine renderer texture audioBuf
+    loop romPath hk machineRef cart bootRom renderer texture audioBuf
 
     SDL.setAudioDevicePlaybackState audioDev SDL.Pause
     SDL.closeAudioDevice audioDev
@@ -165,34 +185,42 @@ writeInt16 buf out = do
                     padded = taken ++ replicate (needed - length taken) 0
                 pure (rest, padded)
             )
-    mapM_ (\(i, s) -> VSM.write out i s) (zip [0 ..] samples)
+    mapM_ (uncurry (VSM.write out)) (zip [0 ..] samples)
 
 loop ::
     FilePath ->
     Hotkeys ->
-    Machine ->
+    IORef Machine ->
+    Cartridge ->
+    Maybe BS.ByteString ->
     SDL.Renderer ->
     SDL.Texture ->
     MVar [Int16] ->
     IO ()
-loop romPath hk machine renderer texture audioBuf = do
+loop romPath hk machineRef cart bootRom renderer texture audioBuf = do
     quit <- readIORef (hkQuit hk)
     unless quit $ do
+        machine <- readIORef machineRef
         events <- SDL.pollEvents
         mapM_ (handleEvent hk (Bus.busJoypad (machineBus machine))) events
 
-        -- One-shot hotkeys: handle save/load/screenshot requests.
-        handlePending romPath hk machine
+        -- One-shot hotkeys: handle save/load/screenshot/reset requests.
+        handlePending romPath hk machineRef cart bootRom
 
+        -- Re-read in case reset swapped the machine.
+        machine' <- readIORef machineRef
         paused <- readIORef (hkPaused hk)
         fast <- readIORef (hkFastFwd hk)
+        stepOnce <- readIORef (hkFrameStepReq hk)
+        when stepOnce (writeIORef (hkFrameStepReq hk) False)
         let frames = if fast then 4 else 1 :: Int
+            shouldRun = not paused || stepOnce
 
-        unless paused $ do
-            mapM_ (\_ -> runFor mCyclesPerFrame machine) [1 .. frames]
+        when shouldRun $ do
+            mapM_ (\_ -> runFor mCyclesPerFrame machine') [1 .. frames]
 
-            samples <- Bus.drainAudioSamples (machineBus machine)
-            when (not (null samples)) $
+            samples <- Bus.drainAudioSamples (machineBus machine')
+            unless (null samples) $
                 modifyMVar_
                     audioBuf
                     ( \existing -> do
@@ -204,7 +232,7 @@ loop romPath hk machine renderer texture audioBuf = do
                         pure trimmed
                     )
 
-        fbRgb <- Ppu.framebufferRgb (Bus.busPpu (machineBus machine))
+        fbRgb <- Ppu.framebufferRgb (Bus.busPpu (machineBus machine'))
         updateTextureRgb texture fbRgb
         SDL.clear renderer
         SDL.copy renderer texture Nothing Nothing
@@ -212,10 +240,17 @@ loop romPath hk machine renderer texture audioBuf = do
 
         -- Pace to 60 FPS unless fast-forwarding.
         unless fast (threadDelay frameUs)
-        loop romPath hk machine renderer texture audioBuf
+        loop romPath hk machineRef cart bootRom renderer texture audioBuf
 
-handlePending :: FilePath -> Hotkeys -> Machine -> IO ()
-handlePending romPath hk machine = do
+handlePending ::
+    FilePath ->
+    Hotkeys ->
+    IORef Machine ->
+    Cartridge ->
+    Maybe BS.ByteString ->
+    IO ()
+handlePending romPath hk machineRef cart bootRom = do
+    machine <- readIORef machineRef
     saveReq <- readIORef (hkSaveReq hk)
     when saveReq $ do
         writeIORef (hkSaveReq hk) False
@@ -247,6 +282,12 @@ handlePending romPath hk machine = do
         case r of
             Right () -> putStrLn ("shot:     wrote " <> path)
             Left e -> putStrLn ("shot:     failed: " <> show e)
+    resetReq <- readIORef (hkResetReq hk)
+    when resetReq $ do
+        writeIORef (hkResetReq hk) False
+        machine' <- machineFromCartridgeWithBoot bootRom cart
+        writeIORef machineRef machine'
+        putStrLn "reset:    machine rebuilt from cartridge"
 
 writePpm :: FilePath -> V.Vector Word8 -> IO ()
 writePpm path fb = do
@@ -261,6 +302,11 @@ writePpm path fb = do
 handleEvent :: Hotkeys -> JoypadState -> SDL.Event -> IO ()
 handleEvent hk jp ev = case SDL.eventPayload ev of
     SDL.QuitEvent -> writeIORef (hkQuit hk) True
+    SDL.ControllerButtonEvent cev ->
+        let pressed = SDL.controllerButtonEventState cev == SDLGC.ControllerButtonPressed
+         in case mapPad (SDL.controllerButtonEventButton cev) of
+                Just btn -> Joypad.setButton btn pressed jp
+                Nothing -> pure ()
     SDL.KeyboardEvent kev -> do
         let pressed = SDL.keyboardEventKeyMotion kev == SDL.Pressed
             scancode = SDL.keysymScancode (SDL.keyboardEventKeysym kev)
@@ -277,6 +323,10 @@ handleEvent hk jp ev = case SDL.eventPayload ev of
                 when (pressed && not isRepeat) (writeIORef (hkLoadReq hk) True)
             SDL.ScancodeF12 ->
                 when (pressed && not isRepeat) (writeIORef (hkShotReq hk) True)
+            SDL.ScancodePeriod ->
+                when (pressed && not isRepeat) (writeIORef (hkFrameStepReq hk) True)
+            SDL.ScancodeR ->
+                when (pressed && not isRepeat) (writeIORef (hkResetReq hk) True)
             _ -> case mapKey scancode of
                 Just btn -> Joypad.setButton btn pressed jp
                 Nothing -> pure ()
@@ -292,6 +342,23 @@ mapKey s = case s of
     SDL.ScancodeDown -> Just ButtonDown
     SDL.ScancodeLeft -> Just ButtonLeft
     SDL.ScancodeRight -> Just ButtonRight
+    _ -> Nothing
+
+{- | Map an SDL game-controller button to a GB joypad button. The
+controller's "A" face button maps to GB A (south = primary action),
+"B" maps to GB B, the menu pair to Start\/Select, and the D-pad to
+the equivalent direction.
+-}
+mapPad :: SDLGC.ControllerButton -> Maybe Button
+mapPad b = case b of
+    SDLGC.ControllerButtonA -> Just ButtonA
+    SDLGC.ControllerButtonB -> Just ButtonB
+    SDLGC.ControllerButtonStart -> Just ButtonStart
+    SDLGC.ControllerButtonBack -> Just ButtonSelect
+    SDLGC.ControllerButtonDpadUp -> Just ButtonUp
+    SDLGC.ControllerButtonDpadDown -> Just ButtonDown
+    SDLGC.ControllerButtonDpadLeft -> Just ButtonLeft
+    SDLGC.ControllerButtonDpadRight -> Just ButtonRight
     _ -> Nothing
 
 {- | Streaming-update path: 'fb' is already in RGB888 with one byte per

@@ -29,6 +29,7 @@ What is /not/ modeled:
 module Ocelot.Apu (
     ApuState,
     initial,
+    setCgbMode,
     read8,
     write8,
     advance,
@@ -38,7 +39,7 @@ module Ocelot.Apu (
     loadState,
 ) where
 
-import Data.Bits (clearBit, complement, setBit, shiftL, shiftR, testBit, xor, (.&.), (.|.))
+import Data.Bits (complement, shiftL, shiftR, testBit, xor, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BB
@@ -71,6 +72,10 @@ data ApuState = ApuState
     , apuSamples :: !(IORef [Int16])
     -- ^ Pending stereo samples interleaved L,R, newest first.
     -- Drained via 'drainSamples'.
+    , apuCgb :: !(IORef Bool)
+    -- ^ True when the host is a CGB. Controls power-off semantics: on
+    -- CGB the length counters are reset on power-off, while on DMG they
+    -- are preserved. Set via 'setCgbMode' at machine construction time.
     }
 
 data ApuInternal = ApuInternal
@@ -82,6 +87,10 @@ data ApuInternal = ApuInternal
     -- when it reaches 'gbTCycleRate' a sample is emitted.
     , apuVolL :: !Word8
     , apuVolR :: !Word8
+    , apuNr50 :: !Word8
+    -- ^ Raw NR50 byte. The volume bits are mirrored into 'apuVolL' /
+    -- 'apuVolR' for the mixer; this field preserves the VIN-to-L\/R
+    -- bits (7 and 3) for round-trip register reads.
     , apuPanning :: !Word8
     , apuCh1 :: !Square
     , apuCh2 :: !Square
@@ -116,6 +125,10 @@ data Square = Square
     , sqSweepTimer :: !Int
     , sqSweepShadow :: !Int
     , sqSweepEnabled :: !Bool
+    , sqSweepNegUsed :: !Bool
+    -- ^ True if at least one sweep calculation has been performed in
+    -- negate mode since the last channel trigger. Clearing the negate
+    -- bit (NR10 bit 3) while this flag is set immediately disables ch1.
     , sqFreqTimer :: !Int
     , sqDutyPos :: !Int
     }
@@ -141,6 +154,7 @@ initialSquare =
         , sqSweepTimer = 0
         , sqSweepShadow = 0
         , sqSweepEnabled = False
+        , sqSweepNegUsed = False
         , sqFreqTimer = 1
         , sqDutyPos = 0
         }
@@ -220,6 +234,7 @@ initialApuInternal =
         , apuSampleAcc = 0
         , apuVolL = 7
         , apuVolR = 7
+        , apuNr50 = 0x77
         , apuPanning = 0xF3
         , apuCh1 = initialSquare
         , apuCh2 = initialSquare
@@ -234,7 +249,13 @@ initial :: IO ApuState
 initial = do
     ref <- newIORef initialApuInternal
     samples <- newIORef []
-    pure (ApuState ref samples)
+    cgb <- newIORef False
+    pure (ApuState ref samples cgb)
+
+-- | Mark whether the host is a CGB. Affects only NR52 power-off behavior
+-- (CGB resets length counters on power-off, DMG preserves them).
+setCgbMode :: Bool -> ApuState -> IO ()
+setCgbMode b apu = writeIORef (apuCgb apu) b
 
 {- | Read all queued samples in chronological order (oldest first) and clear
 the queue.
@@ -269,6 +290,7 @@ encodeApu s =
         <> Snap.putU32 (fromIntegral (apuSampleAcc s))
         <> Snap.putU8 (apuVolL s)
         <> Snap.putU8 (apuVolR s)
+        <> Snap.putU8 (apuNr50 s)
         <> Snap.putU8 (apuPanning s)
         <> Snap.putU8 (apuNr10 s)
         <> Snap.putU8 (apuNr30 s)
@@ -286,6 +308,7 @@ decodeApu = do
     sacc <- fromIntegral <$> Snap.getU32
     volL <- Snap.getU8
     volR <- Snap.getU8
+    nr50 <- Snap.getU8
     pan <- Snap.getU8
     nr10 <- Snap.getU8
     nr30 <- Snap.getU8
@@ -302,6 +325,7 @@ decodeApu = do
             , apuSampleAcc = sacc
             , apuVolL = volL
             , apuVolR = volR
+            , apuNr50 = nr50
             , apuPanning = pan
             , apuCh1 = ch1
             , apuCh2 = ch2
@@ -374,6 +398,7 @@ decodeSquare = do
             , sqSweepTimer = swT
             , sqSweepShadow = swSha
             , sqSweepEnabled = swEn
+            , sqSweepNegUsed = False -- transient: cleared on every trigger
             , sqFreqTimer = fT
             , sqDutyPos = dPos
             }
@@ -493,7 +518,7 @@ readRegister addr s = case addr of
     0xFF19 -> (if sqLengthEn (apuCh2 s) then 0x40 else 0) .|. 0xBF
     0xFF1A -> apuNr30 s .|. 0x7F
     0xFF1B -> 0xFF
-    0xFF1C -> (fromIntegral (wvVolumeShift (apuCh3 s)) `shiftL` 5) .|. 0x9F
+    0xFF1C -> (rawNr32 (wvVolumeShift (apuCh3 s)) `shiftL` 5) .|. 0x9F
     0xFF1D -> 0xFF
     0xFF1E -> (if wvLengthEn (apuCh3 s) then 0x40 else 0) .|. 0xBF
     0xFF1F -> 0xFF
@@ -501,7 +526,9 @@ readRegister addr s = case addr of
     0xFF21 -> noEnvelopeByte (apuCh4 s)
     0xFF22 -> noPolyByte (apuCh4 s)
     0xFF23 -> (if noLengthEn (apuCh4 s) then 0x40 else 0) .|. 0xBF
-    0xFF24 -> (apuVolL s `shiftL` 4) .|. apuVolR s
+    -- NR50: full byte round-trips, including the VIN-to-L/R bits (7 and 3)
+    -- which we don't model audio-wise but still readable per hardware.
+    0xFF24 -> apuNr50 s
     0xFF25 -> apuPanning s
     0xFF26 -> nr52Byte s
     a
@@ -537,15 +564,16 @@ nr52Byte s =
         .|. (if noEnabled (apuCh4 s) then 0x08 else 0)
 
 write8 :: Word16 -> Word8 -> ApuState -> IO ()
-write8 addr !v apu = modifyIORef' (apuRef apu) (writeRegister addr v)
+write8 addr !v apu = do
+    cgb <- readIORef (apuCgb apu)
+    modifyIORef' (apuRef apu) (writeRegister cgb addr v)
 
-writeRegister :: Word16 -> Word8 -> ApuInternal -> ApuInternal
-writeRegister addr v s
-    | addr == 0xFF26 = handleNr52 v s
+writeRegister :: Bool -> Word16 -> Word8 -> ApuInternal -> ApuInternal
+writeRegister cgb addr v s
+    | addr == 0xFF26 = handleNr52 cgb v s
     | addr >= 0xFF30 && addr <= 0xFF3F =
         s{apuWaveRam = apuWaveRam s V.// [(fromIntegral (addr - 0xFF30), v)]}
-    | not (apuPower s) && addr /= 0xFF11 && addr /= 0xFF16 && addr /= 0xFF1B && addr /= 0xFF20 = s
-    -- When powered off, only length-counter writes pass through (DMG).
+    | not (apuPower s) = writeWhilePoweredOff addr v s
     | otherwise = case addr of
         0xFF10 -> writeNr10 v s
         0xFF11 -> writeNr11 v s
@@ -565,28 +593,61 @@ writeRegister addr v s
         0xFF21 -> writeNr42 v s
         0xFF22 -> writeNr43 v s
         0xFF23 -> writeNr44 v s
-        0xFF24 -> s{apuVolR = v .&. 0x07, apuVolL = (v `shiftR` 4) .&. 0x07}
+        0xFF24 ->
+            s
+                { apuNr50 = v
+                , apuVolR = v .&. 0x07
+                , apuVolL = (v `shiftR` 4) .&. 0x07
+                }
         0xFF25 -> s{apuPanning = v}
         _ -> s
 
-handleNr52 :: Word8 -> ApuInternal -> ApuInternal
-handleNr52 v s
-    | testBit v 7 = s{apuPower = True}
+-- DMG allows length-counter writes while the APU is off, but only the
+-- length value (not the duty / DAC bits in the same register). All other
+-- writes are ignored.
+writeWhilePoweredOff :: Word16 -> Word8 -> ApuInternal -> ApuInternal
+writeWhilePoweredOff addr v s = case addr of
+    0xFF11 ->
+        let ch = apuCh1 s
+         in s{apuCh1 = ch{sqLength = 64 - fromIntegral (v .&. 0x3F)}}
+    0xFF16 ->
+        let ch = apuCh2 s
+         in s{apuCh2 = ch{sqLength = 64 - fromIntegral (v .&. 0x3F)}}
+    0xFF1B ->
+        let ch = apuCh3 s
+         in s{apuCh3 = ch{wvLength = 256 - fromIntegral v}}
+    0xFF20 ->
+        let ch = apuCh4 s
+         in s{apuCh4 = ch{noLength = 64 - fromIntegral (v .&. 0x3F)}}
+    _ -> s
+
+handleNr52 :: Bool -> Word8 -> ApuInternal -> ApuInternal
+handleNr52 cgb v s
+    -- Powering on: reset the frame-sequencer step pointer so the next
+    -- step to fire is 0. The 8192-cycle divider ('apuFrameTimer') keeps
+    -- counting through power-off, so it is preserved here.
+    | testBit v 7 = s{apuPower = True, apuFrameStep = 0}
     | otherwise =
-        -- Powering off: clear all registers (channels + mixer); preserve
-        -- wave RAM and length counters per DMG behavior.
-        let !ch1' = (apuCh1 s){sqEnabled = False, sqDacOn = False}
+        -- Powering off: clear channels and the mixer. Wave RAM is
+        -- preserved on both DMG and CGB; length counters are preserved
+        -- on DMG but reset on CGB (the latter is handled by the cgb
+        -- variant of the per-channel clear functions).
+        let !clrSq = if cgb then clearSquareCgb else clearSquare
+            !clrWv = if cgb then clearWaveCgb else clearWave
+            !clrNo = if cgb then clearNoiseCgb else clearNoise
+            !ch1' = (apuCh1 s){sqEnabled = False, sqDacOn = False}
             !ch2' = (apuCh2 s){sqEnabled = False, sqDacOn = False}
             !ch3' = (apuCh3 s){wvEnabled = False, wvDacOn = False}
             !ch4' = (apuCh4 s){noEnabled = False, noDacOn = False}
          in s
                 { apuPower = False
-                , apuCh1 = clearSquare ch1'
-                , apuCh2 = clearSquare ch2'
-                , apuCh3 = clearWave ch3'
-                , apuCh4 = clearNoise ch4'
+                , apuCh1 = clrSq ch1'
+                , apuCh2 = clrSq ch2'
+                , apuCh3 = clrWv ch3'
+                , apuCh4 = clrNo ch4'
                 , apuVolL = 0
                 , apuVolR = 0
+                , apuNr50 = 0
                 , apuPanning = 0
                 , apuNr10 = 0
                 , apuNr30 = 0
@@ -604,10 +665,14 @@ clearSquare sq =
         , sqSweepNegate = False
         , sqSweepShift = 0
         , sqFreq = 0
+        , sqLengthEn = False
         }
 
 clearWave :: Wave -> Wave
-clearWave w = w{wvVolumeShift = 0, wvFreq = 0}
+-- The internal 'wvVolumeShift' mapping is: 4 = mute, 0 = 100%, 1 = 50%, 2 = 25%
+-- (see 'writeNr32'). On power-off the raw NR32 register reads 0 (mute), so
+-- the cleared internal shift is 4.
+clearWave w = w{wvVolumeShift = 4, wvFreq = 0, wvLengthEn = False}
 
 clearNoise :: Noise -> Noise
 clearNoise n =
@@ -619,18 +684,39 @@ clearNoise n =
         , noClockShift = 0
         , noWidthMode7 = False
         , noDivisorCode = 0
+        , noLengthEn = False
         }
+
+-- CGB variants additionally reset the length counter values (DMG
+-- preserves them across power-off).
+clearSquareCgb :: Square -> Square
+clearSquareCgb sq = (clearSquare sq){sqLength = 0}
+
+clearWaveCgb :: Wave -> Wave
+clearWaveCgb w = (clearWave w){wvLength = 0}
+
+clearNoiseCgb :: Noise -> Noise
+clearNoiseCgb n = (clearNoise n){noLength = 0}
 
 writeNr10 :: Word8 -> ApuInternal -> ApuInternal
 writeNr10 v s =
     let ch = apuCh1 s
-        !ch' =
+        !newNegate = testBit v 3
+        !clearedNegate = sqSweepNegate ch && not newNegate
+        !ch1 =
             ch
                 { sqSweepPeriod = fromIntegral ((v `shiftR` 4) .&. 0x07)
-                , sqSweepNegate = testBit v 3
+                , sqSweepNegate = newNegate
                 , sqSweepShift = fromIntegral (v .&. 0x07)
                 }
-     in s{apuCh1 = ch', apuNr10 = v}
+        -- Clearing the negate bit after at least one calculation has
+        -- happened in negate mode (since the last trigger) immediately
+        -- disables the channel.
+        !ch2
+            | clearedNegate && sqSweepNegUsed ch =
+                ch1{sqEnabled = False, sqSweepEnabled = False}
+            | otherwise = ch1
+     in s{apuCh1 = ch2, apuNr10 = v}
 
 writeNr11 :: Word8 -> ApuInternal -> ApuInternal
 writeNr11 v s =
@@ -669,9 +755,15 @@ writeNr14 v s =
         !freq = (sqFreq ch .&. 0xFF) .|. (fromIntegral (v .&. 0x07) `shiftL` 8)
         !lengthEn = testBit v 6
         !trigger = testBit v 7
-        !ch1 = ch{sqFreq = freq, sqLengthEn = lengthEn}
+        !lenJustEn = not (sqLengthEn ch) && lengthEn
+        !firstHalf = frameFirstHalf s
+        !ch0 = ch{sqFreq = freq, sqLengthEn = lengthEn}
+        !ch1 = applyExtraClockSq lenJustEn firstHalf ch0
+        !preTrigLen = sqLength ch1
         !ch2 = if trigger then triggerSquare ch1 True else ch1
-     in s{apuCh1 = ch2}
+        !postClock = trigger && lengthEn && firstHalf && (lenJustEn || preTrigLen == 0)
+        !ch3 = applyExtraClockSq postClock True ch2
+     in s{apuCh1 = ch3}
 
 triggerSquare :: Square -> Bool -> Square
 triggerSquare ch hasSweep =
@@ -692,13 +784,46 @@ triggerSquare ch hasSweep =
                     let !swEn = sqSweepPeriod ch1 /= 0 || sqSweepShift ch1 /= 0
                         !swTimer =
                             if sqSweepPeriod ch1 == 0 then 8 else sqSweepPeriod ch1
-                     in ch1
-                            { sqSweepShadow = sqFreq ch1
-                            , sqSweepTimer = swTimer
-                            , sqSweepEnabled = swEn
-                            }
+                        !ch1a =
+                            ch1
+                                { sqSweepShadow = sqFreq ch1
+                                , sqSweepTimer = swTimer
+                                , sqSweepEnabled = swEn
+                                , sqSweepNegUsed = False
+                                }
+                     in -- On trigger, if shift > 0 the new frequency is
+                        -- calculated and the overflow check is performed
+                        -- (the frequency itself is NOT updated here).
+                        if sqSweepShift ch1a > 0
+                            then
+                                let !ch1b = recordNegUsed ch1a
+                                 in if sweepCalcOverflows ch1b
+                                        then ch1b{sqEnabled = False, sqSweepEnabled = False}
+                                        else ch1b
+                            else ch1a
                 else ch1
      in ch2
+
+-- | Set 'sqSweepNegUsed' to True if the channel is currently in negate mode.
+recordNegUsed :: Square -> Square
+recordNegUsed ch
+    | sqSweepNegate ch = ch{sqSweepNegUsed = True}
+    | otherwise = ch
+
+{- | Compute the next sweep frequency from the shadow register and shift,
+applying negate. Returns the candidate frequency.
+-}
+sweepCalcFreq :: Square -> Int
+sweepCalcFreq ch =
+    let !shadow = sqSweepShadow ch
+        !delta = shadow `shiftR` sqSweepShift ch
+     in if sqSweepNegate ch then shadow - delta else shadow + delta
+
+-- | True if the next sweep calculation overflows (or underflows) 11 bits.
+sweepCalcOverflows :: Square -> Bool
+sweepCalcOverflows ch =
+    let !f = sweepCalcFreq ch
+     in f > 2047 || f < 0
 
 writeNr21 :: Word8 -> ApuInternal -> ApuInternal
 writeNr21 v s =
@@ -735,9 +860,15 @@ writeNr24 v s =
         !freq = (sqFreq ch .&. 0xFF) .|. (fromIntegral (v .&. 0x07) `shiftL` 8)
         !lengthEn = testBit v 6
         !trigger = testBit v 7
-        !ch1 = ch{sqFreq = freq, sqLengthEn = lengthEn}
+        !lenJustEn = not (sqLengthEn ch) && lengthEn
+        !firstHalf = frameFirstHalf s
+        !ch0 = ch{sqFreq = freq, sqLengthEn = lengthEn}
+        !ch1 = applyExtraClockSq lenJustEn firstHalf ch0
+        !preTrigLen = sqLength ch1
         !ch2 = if trigger then triggerSquare ch1 False else ch1
-     in s{apuCh2 = ch2}
+        !postClock = trigger && lengthEn && firstHalf && (lenJustEn || preTrigLen == 0)
+        !ch3 = applyExtraClockSq postClock True ch2
+     in s{apuCh2 = ch3}
 
 writeNr30 :: Word8 -> ApuInternal -> ApuInternal
 writeNr30 v s =
@@ -761,6 +892,16 @@ writeNr32 v s =
             _ -> 2 -- 25%
      in s{apuCh3 = ch{wvVolumeShift = shft}}
 
+{- | Inverse of the NR32 write encoding: turn the internal shift count
+back into the raw 2-bit value the register exposes on read.
+-}
+rawNr32 :: Int -> Word8
+rawNr32 4 = 0
+rawNr32 0 = 1
+rawNr32 1 = 2
+rawNr32 2 = 3
+rawNr32 _ = 1 -- shouldn't happen; treat unknown as 100%
+
 writeNr33 :: Word8 -> ApuInternal -> ApuInternal
 writeNr33 v s =
     let ch = apuCh3 s
@@ -773,7 +914,11 @@ writeNr34 v s =
         !freq = (wvFreq ch .&. 0xFF) .|. (fromIntegral (v .&. 0x07) `shiftL` 8)
         !lengthEn = testBit v 6
         !trigger = testBit v 7
-        !ch1 = ch{wvFreq = freq, wvLengthEn = lengthEn}
+        !lenJustEn = not (wvLengthEn ch) && lengthEn
+        !firstHalf = frameFirstHalf s
+        !ch0 = ch{wvFreq = freq, wvLengthEn = lengthEn}
+        !ch1 = applyExtraClockWave lenJustEn firstHalf ch0
+        !preTrigLen = wvLength ch1
         !ch2 =
             if trigger
                 then
@@ -784,7 +929,9 @@ writeNr34 v s =
                         , wvPos = 0
                         }
                 else ch1
-     in s{apuCh3 = ch2}
+        !postClock = trigger && lengthEn && firstHalf && (lenJustEn || preTrigLen == 0)
+        !ch3 = applyExtraClockWave postClock True ch2
+     in s{apuCh3 = ch3}
 
 writeNr41 :: Word8 -> ApuInternal -> ApuInternal
 writeNr41 v s =
@@ -820,7 +967,11 @@ writeNr44 v s =
     let ch = apuCh4 s
         !lengthEn = testBit v 6
         !trigger = testBit v 7
-        !ch1 = ch{noLengthEn = lengthEn}
+        !lenJustEn = not (noLengthEn ch) && lengthEn
+        !firstHalf = frameFirstHalf s
+        !ch0 = ch{noLengthEn = lengthEn}
+        !ch1 = applyExtraClockNoise lenJustEn firstHalf ch0
+        !preTrigLen = noLength ch1
         !ch2 =
             if trigger
                 then
@@ -834,7 +985,9 @@ writeNr44 v s =
                         , noLfsr = 0x7FFF
                         }
                 else ch1
-     in s{apuCh4 = ch2}
+        !postClock = trigger && lengthEn && firstHalf && (lenJustEn || preTrigLen == 0)
+        !ch3 = applyExtraClockNoise postClock True ch2
+     in s{apuCh4 = ch3}
 
 noiseTimerPeriod :: Noise -> Int
 noiseTimerPeriod n =
@@ -970,6 +1123,44 @@ tickLengthSq sq
          in sq{sqLength = l', sqEnabled = sqEnabled sq && l' > 0}
     | otherwise = sq
 
+{- | Frame-sequencer "first half of length period" predicate: True when the
+next frame-sequencer step is one that does not clock the length counter
+(steps 1, 3, 5, 7). Writing NRx4 with a 0 -> 1 transition on the
+length-enable bit during this window triggers an extra length clock.
+'apuFrameStep' tracks the next step to fire, so first-half = odd.
+-}
+frameFirstHalf :: ApuInternal -> Bool
+frameFirstHalf s = odd (apuFrameStep s)
+
+{- | Extra-length-clock quirk: when length-enable just transitioned 0 -> 1
+in the first half of a length period and the length counter is non-zero,
+the counter is decremented immediately. If the decrement hits zero the
+channel is disabled. This helper is invoked twice per NRx4 write when
+both the trigger bit and the length-enable transition are set: once
+before the trigger reload, and once after, matching DMG's documented
+double-clock behavior.
+-}
+applyExtraClockSq :: Bool -> Bool -> Square -> Square
+applyExtraClockSq lenJustEn firstHalf sq
+    | lenJustEn && firstHalf && sqLength sq > 0 =
+        let !l' = sqLength sq - 1
+         in sq{sqLength = l', sqEnabled = sqEnabled sq && l' > 0}
+    | otherwise = sq
+
+applyExtraClockWave :: Bool -> Bool -> Wave -> Wave
+applyExtraClockWave lenJustEn firstHalf w
+    | lenJustEn && firstHalf && wvLength w > 0 =
+        let !l' = wvLength w - 1
+         in w{wvLength = l', wvEnabled = wvEnabled w && l' > 0}
+    | otherwise = w
+
+applyExtraClockNoise :: Bool -> Bool -> Noise -> Noise
+applyExtraClockNoise lenJustEn firstHalf n
+    | lenJustEn && firstHalf && noLength n > 0 =
+        let !l' = noLength n - 1
+         in n{noLength = l', noEnabled = noEnabled n && l' > 0}
+    | otherwise = n
+
 tickLengthWave :: Wave -> Wave
 tickLengthWave w
     | wvLengthEn w && wvLength w > 0 =
@@ -1033,24 +1224,42 @@ tickSweep s
                 else
                     let !period =
                             if sqSweepPeriod ch == 0 then 8 else sqSweepPeriod ch
-                        !shadow = sqSweepShadow ch
-                        !delta = shadow `shiftR` sqSweepShift ch
-                        !newF =
-                            if sqSweepNegate ch
-                                then shadow - delta
-                                else shadow + delta
+                        !chReload = ch{sqSweepTimer = period}
+                        -- Sweep period 0 reloads the timer but performs no
+                        -- frequency calculation.
                         !ch' =
-                            if newF > 2047 || newF < 0
-                                then ch{sqEnabled = False, sqSweepEnabled = False}
+                            if sqSweepPeriod ch == 0
+                                then chReload
                                 else
-                                    if sqSweepShift ch > 0
-                                        then
-                                            ch
-                                                { sqSweepShadow = newF
-                                                , sqFreq = newF
-                                                , sqSweepTimer = period
-                                                }
-                                        else ch{sqSweepTimer = period}
+                                    let !chN = recordNegUsed chReload
+                                        !newF = sweepCalcFreq chN
+                                     in if newF > 2047 || newF < 0
+                                            then
+                                                chN
+                                                    { sqEnabled = False
+                                                    , sqSweepEnabled = False
+                                                    }
+                                            else
+                                                if sqSweepShift chN > 0
+                                                    then
+                                                        let !chU =
+                                                                chN
+                                                                    { sqSweepShadow = newF
+                                                                    , sqFreq = newF
+                                                                    }
+                                                            !chU2 = recordNegUsed chU
+                                                         in -- After updating, perform a
+                                                            -- second overflow check
+                                                            -- (the calculation is done,
+                                                            -- but its result is discarded).
+                                                            if sweepCalcOverflows chU2
+                                                                then
+                                                                    chU2
+                                                                        { sqEnabled = False
+                                                                        , sqSweepEnabled = False
+                                                                        }
+                                                                else chU2
+                                                    else chN
                      in s{apuCh1 = ch'}
 
 ----------------------------------------------------------------------

@@ -21,10 +21,10 @@ freshOn = do
     pure ps
 
 writeVram :: PpuState -> [(Int, Word8)] -> IO ()
-writeVram ps = mapM_ (\(i, v) -> MV.write (ppuVram ps) i v)
+writeVram ps = mapM_ (uncurry (MV.write (ppuVram ps)))
 
 writeOam :: PpuState -> [(Int, Word8)] -> IO ()
-writeOam ps = mapM_ (\(i, v) -> MV.write (ppuOam ps) i v)
+writeOam ps = mapM_ (uncurry (MV.write (ppuOam ps)))
 
 spec :: Spec
 spec = do
