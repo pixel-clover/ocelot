@@ -35,10 +35,8 @@ you would like to work on or if it has already been resolved.
 
 You can choose either of the following options to set up your development environment:
 
-- **Nix flake (recommended).** Run `nix develop` from the repository root. This drops you into a shell with GHC 9.6.6, Stack, HLS, HLint, and fourmolu
-  pinned to matching versions. `stack.yaml` is configured to use the system GHC, so `stack build` and `stack test` work directly.
-- **Debian-based system without Nix.** Make sure GNU Make is installed, then run `make install-deps` to install Stack and the formatter/linter. Stack
-  will download its own GHC.
+- **Nix/Flake (recommended).** Run `nix develop` from the repository root.
+- **Non-Nix (for Debian-based systems).** Make sure GNU Make is installed, then run `make install-deps` to install the Haskell tools and dependencies.
 
 #### Code Style
 

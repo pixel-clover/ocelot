@@ -22,13 +22,20 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
 
       - name: Setup Haskell
         uses: haskell-actions/setup@v2
@@ -47,17 +54,17 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-stack-
 
-      - name: Install Tools
+      - name: Install tools
         run: stack install hlint fourmolu hpc-codecov
 
-      - name: Build Project
+      - name: Build project
         run: make build
 
-      - name: Run Tests with Coverage
+      - name: Run tests with coverage
         run: |
           stack exec -- hpc-codecov stack:ocelot-test -o codecov.json
 
-      - name: Upload Coverage Reports to Codecov
+      - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

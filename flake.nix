@@ -35,6 +35,8 @@
               pkgs.hpack
               pkgs.zlib
               pkgs.pkg-config
+              # SDL2 for the frontend (which is linked at runtime via sdl2 Haskell package).
+              pkgs.SDL2
             ];
 
             # Stack picks up this GHC via system-ghc/install-ghc settings in stack.yaml, so no extra flags are needed at the command line.

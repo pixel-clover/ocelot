@@ -1,62 +1,64 @@
 {-# LANGUAGE BangPatterns #-}
 
-{- | The top-level 'Machine' record stitches the CPU together with the
-placeholder flat memory. Once subsystem modules (PPU, APU, Timer, Cartridge
-routing) land, those become additional fields on this record and 'readMem' /
-'writeMem' route through 'Ocelot.Bus' instead of going straight to
-'Ocelot.Memory'.
+{- | The top-level 'Machine' record stitches the CPU together with the system
+'Bus'. State is mutable: 'machineCpu' is an 'IORef' holding the pure
+'CpuState' record, and 'machineBus' carries the bus's mutable buffers.
 -}
 module Ocelot.Machine (
     Machine (..),
-    initialMachine,
-    machineWithProgram,
-
-    -- * Memory accessors used by the CPU
+    machineFromCartridge,
     readMem,
     writeMem,
-
-    -- * Register accessors used by the executor
-    mapCpuRegs,
-    mapCpu,
+    advanceBus,
     getCpuRegs,
+    getCpu,
+    putCpu,
+    mapCpu,
+    mapCpuRegs,
 ) where
 
-import Data.ByteString (ByteString)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Word (Word16, Word8)
+import Ocelot.Bus (Bus)
+import qualified Ocelot.Bus as Bus
+import Ocelot.Cartridge (Cartridge)
 import Ocelot.Cpu.Registers (Registers, regPC)
 import Ocelot.Cpu.State (CpuState (..), freshCpu)
-import Ocelot.Memory (Memory)
-import qualified Ocelot.Memory as Memory
 
 data Machine = Machine
-    { machineCpu :: !CpuState
-    , machineMem :: !Memory
+    { machineCpu :: !(IORef CpuState)
+    , machineBus :: !Bus
     }
-    deriving (Eq, Show)
 
-initialMachine :: Machine
-initialMachine = Machine freshCpu Memory.initialMemory
+-- | Construct a Machine from a freshly loaded cartridge with PC=0x0100.
+machineFromCartridge :: Cartridge -> IO Machine
+machineFromCartridge c = do
+    let cpu = freshCpu{cpuRegs = (cpuRegs freshCpu){regPC = 0x0100}}
+    cpuRef <- newIORef cpu
+    bus <- Bus.fromCartridge c
+    pure (Machine cpuRef bus)
 
-{- | Construct a Machine with the given program bytes loaded at @0x0000@ and
-@PC@ pointing at @0x0000@. SP starts at @0xFFFE@ as in 'freshCpu'.
--}
-machineWithProgram :: ByteString -> Machine
-machineWithProgram bs =
-    let cpu = freshCpu{cpuRegs = (cpuRegs freshCpu){regPC = 0x0000}}
-     in Machine cpu (Memory.fromBytes bs)
+readMem :: Word16 -> Machine -> IO Word8
+readMem addr m = Bus.read8 addr (machineBus m)
 
-readMem :: Word16 -> Machine -> Word8
-readMem addr m = Memory.read8 addr (machineMem m)
+writeMem :: Word16 -> Word8 -> Machine -> IO ()
+writeMem addr !v m = Bus.write8 addr v (machineBus m)
 
-writeMem :: Word16 -> Word8 -> Machine -> Machine
-writeMem addr !v m = m{machineMem = Memory.write8 addr v (machineMem m)}
+advanceBus :: Int -> Machine -> IO ()
+advanceBus n m = Bus.advance n (machineBus m)
 
-getCpuRegs :: Machine -> Registers
-getCpuRegs = cpuRegs . machineCpu
+getCpu :: Machine -> IO CpuState
+getCpu m = readIORef (machineCpu m)
 
-mapCpuRegs :: (Registers -> Registers) -> Machine -> Machine
+putCpu :: CpuState -> Machine -> IO ()
+putCpu c m = writeIORef (machineCpu m) c
+
+getCpuRegs :: Machine -> IO Registers
+getCpuRegs m = cpuRegs <$> readIORef (machineCpu m)
+
+mapCpu :: (CpuState -> CpuState) -> Machine -> IO ()
+mapCpu f m = modifyIORef' (machineCpu m) f
+
+mapCpuRegs :: (Registers -> Registers) -> Machine -> IO ()
 mapCpuRegs f m =
-    m{machineCpu = (machineCpu m){cpuRegs = f (cpuRegs (machineCpu m))}}
-
-mapCpu :: (CpuState -> CpuState) -> Machine -> Machine
-mapCpu f m = m{machineCpu = f (machineCpu m)}
+    modifyIORef' (machineCpu m) (\c -> c{cpuRegs = f (cpuRegs c)})

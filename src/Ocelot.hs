@@ -1,11 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | Public facade for the Ocelot Game Boy / Game Boy Color emulator.
+{- | Public facade for the Ocelot emulator.
 
 This module re-exports the deliberate public surface of the library. As
-subsystems land (CPU, MMU, PPU, APU), additional types and operations will be
-exposed here. Internal coordination types (e.g. @PpuState@, @CpuState@) are
-not re-exported.
+subsystems land (CPU, MMU, PPU, and APU), additional types and operations will be exposed here.
+Internal coordination types (e.g. @PpuState@, @CpuState@) are not re-exported.
 -}
 module Ocelot (
     version,
@@ -15,6 +14,11 @@ module Ocelot (
     CartridgeError (..),
     loadRom,
     cartridgeHeader,
+    cartridgeHasBattery,
+    extractRam,
+    loadRam,
+    extractSave,
+    loadSave,
     parseHeader,
     HeaderError (..),
     Header (..),
@@ -25,7 +29,17 @@ module Ocelot (
 ) where
 
 import Data.Text (Text)
-import Ocelot.Cartridge (Cartridge, CartridgeError (..), cartridgeHeader, loadRom)
+import Ocelot.Cartridge (
+    Cartridge,
+    CartridgeError (..),
+    cartridgeHasBattery,
+    cartridgeHeader,
+    extractRam,
+    extractSave,
+    loadRam,
+    loadRom,
+    loadSave,
+ )
 import Ocelot.Cartridge.Header (
     Capabilities (..),
     CgbFlag (..),

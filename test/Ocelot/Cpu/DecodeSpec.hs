@@ -77,8 +77,66 @@ spec = do
         it "0xF1 is POP AF" $
             decode 0xF1 0 0 `shouldBe` Decoded (PopRr SAF) 1
 
+    describe "conditional branches" $ do
+        it "0xC0 is RET NZ" $ decode 0xC0 0 0 `shouldBe` Decoded (RetCC CondNZ) 1
+        it "0xD9 is RETI" $ decode 0xD9 0 0 `shouldBe` Decoded Reti 1
+        it "0xC2 lo hi is JP NZ,nn" $
+            decode 0xC2 0x34 0x12 `shouldBe` Decoded (JpCC CondNZ 0x1234) 3
+        it "0xCC lo hi is CALL Z,nn" $
+            decode 0xCC 0x00 0x80 `shouldBe` Decoded (CallCC CondZ 0x8000) 3
+        it "0xE9 is JP (HL)" $ decode 0xE9 0 0 `shouldBe` Decoded JpHL 1
+
+    describe "high-page and direct addressing" $ do
+        it "0xE0 nn is LDH (n),A" $
+            decode 0xE0 0x44 0 `shouldBe` Decoded (LdhNA 0x44) 2
+        it "0xF0 nn is LDH A,(n)" $
+            decode 0xF0 0x44 0 `shouldBe` Decoded (LdhAN 0x44) 2
+        it "0xE2 is LD (C),A" $ decode 0xE2 0 0 `shouldBe` Decoded LdCA 1
+        it "0xEA lo hi is LD (nn),A" $
+            decode 0xEA 0x00 0xC0 `shouldBe` Decoded (LdNNA 0xC000) 3
+        it "0x08 lo hi is LD (nn),SP" $
+            decode 0x08 0x00 0xD0 `shouldBe` Decoded (LdNNSp 0xD000) 3
+
+    describe "16-bit arithmetic and SP ops" $ do
+        it "0x09 is ADD HL,BC" $ decode 0x09 0 0 `shouldBe` Decoded (AddHlRr RBC) 1
+        it "0xE8 nn is ADD SP,e" $
+            decode 0xE8 0xFE 0 `shouldBe` Decoded (AddSpE (-2)) 2
+        it "0xF8 nn is LD HL,SP+e" $
+            decode 0xF8 0x05 0 `shouldBe` Decoded (LdHlSpE 5) 2
+        it "0xF9 is LD SP,HL" $ decode 0xF9 0 0 `shouldBe` Decoded LdSpHl 1
+
+    describe "A-rotates and miscellaneous" $ do
+        it "0x07 is RLCA" $ decode 0x07 0 0 `shouldBe` Decoded Rlca 1
+        it "0x17 is RLA" $ decode 0x17 0 0 `shouldBe` Decoded Rla 1
+        it "0x27 is DAA" $ decode 0x27 0 0 `shouldBe` Decoded Daa 1
+        it "0x2F is CPL" $ decode 0x2F 0 0 `shouldBe` Decoded Cpl 1
+        it "0x37 is SCF" $ decode 0x37 0 0 `shouldBe` Decoded Scf 1
+        it "0x3F is CCF" $ decode 0x3F 0 0 `shouldBe` Decoded Ccf 1
+        it "0xF3 is DI; 0xFB is EI" $ do
+            decode 0xF3 0 0 `shouldBe` Decoded Di 1
+            decode 0xFB 0 0 `shouldBe` Decoded Ei 1
+
+    describe "RST" $ do
+        it "0xC7 is RST 0x00" $ decode 0xC7 0 0 `shouldBe` Decoded (Rst 0x00) 1
+        it "0xFF is RST 0x38" $ decode 0xFF 0 0 `shouldBe` Decoded (Rst 0x38) 1
+
+    describe "CB-prefix block" $ do
+        it "0xCB 0x00 is RLC B" $ decode 0xCB 0x00 0 `shouldBe` Decoded (Rlc RB) 2
+        it "0xCB 0x06 is RLC (HL)" $
+            decode 0xCB 0x06 0 `shouldBe` Decoded (Rlc RIndHL) 2
+        it "0xCB 0x37 is SWAP A" $
+            decode 0xCB 0x37 0 `shouldBe` Decoded (Swap RA) 2
+        it "0xCB 0x40 is BIT 0,B" $
+            decode 0xCB 0x40 0 `shouldBe` Decoded (BitOp 0 RB) 2
+        it "0xCB 0x7F is BIT 7,A" $
+            decode 0xCB 0x7F 0 `shouldBe` Decoded (BitOp 7 RA) 2
+        it "0xCB 0x86 is RES 0,(HL)" $
+            decode 0xCB 0x86 0 `shouldBe` Decoded (Res 0 RIndHL) 2
+        it "0xCB 0xFF is SET 7,A" $
+            decode 0xCB 0xFF 0 `shouldBe` Decoded (Set 7 RA) 2
+
     describe "Unknown" $ do
-        it "0xCB (CB-prefix) decodes as Unknown for now" $
-            decode 0xCB 0 0 `shouldBe` Decoded (Unknown 0xCB) 1
         it "0xD3 (no instruction) decodes as Unknown" $
             decode 0xD3 0 0 `shouldBe` Decoded (Unknown 0xD3) 1
+        it "0xDD (no instruction) decodes as Unknown" $
+            decode 0xDD 0 0 `shouldBe` Decoded (Unknown 0xDD) 1

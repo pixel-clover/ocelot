@@ -29,8 +29,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Code
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
 
       - name: Setup Haskell
         uses: haskell-actions/setup@v2
@@ -49,11 +52,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-stack-
 
-      - name: Install Tools
+      - name: Install tools
         run: stack install hlint fourmolu
 
-      - name: Run Linter Checks
+      - name: Run linter checks
         run: make lint
 
-      - name: Check Formatting
+      - name: Check formatting
         run: make format-check

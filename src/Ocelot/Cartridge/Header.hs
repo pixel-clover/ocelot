@@ -1,9 +1,8 @@
 {- | Parse the cartridge header at @0x0100..0x014F@.
 
 The header layout is documented in pandocs (<https://gbdev.io/pandocs/The_Cartridge_Header.html>).
-Only fields that influence emulator behavior are decoded here; the Nintendo
-logo bytes are not validated, since the boot ROM check that uses them is not
-yet implemented.
+Only fields that influence emulator behavior are decoded here; the Nintendo logo bytes are not
+validated, since the boot ROM check that uses them is not yet implemented.
 -}
 module Ocelot.Cartridge.Header (
     Header (..),
