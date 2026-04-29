@@ -172,8 +172,9 @@ palette RAM (BG only this slice; sprites are still DMG-style).
 framebufferRgb :: PpuState -> IO (Vector Word8)
 framebufferRgb ps = V.freeze (ppuFbRgb ps)
 
--- | Tell the PPU whether it's running a CGB cart (called once by the
--- bus at startup). Affects BG rendering only.
+{- | Tell the PPU whether it's running a CGB cart (called once by the
+bus at startup). Affects BG rendering only.
+-}
 setCgbMode :: Bool -> PpuState -> IO ()
 setCgbMode b ps = writeIORef (ppuCgbMode ps) b
 

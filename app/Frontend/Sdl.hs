@@ -65,7 +65,6 @@ doesn't accumulate unbounded samples.
 maxBufferedSamples :: Int
 maxBufferedSamples = 9600 -- ~100 ms of stereo samples at 48 kHz
 
-
 data Hotkeys = Hotkeys
     { hkQuit :: !(IORef Bool)
     , hkPaused :: !(IORef Bool)
@@ -295,8 +294,9 @@ mapKey s = case s of
     SDL.ScancodeRight -> Just ButtonRight
     _ -> Nothing
 
--- | Streaming-update path: 'fb' is already in RGB888 with one byte per
--- channel, so the SDL upload is a single 'BS.pack' away.
+{- | Streaming-update path: 'fb' is already in RGB888 with one byte per
+channel, so the SDL upload is a single 'BS.pack' away.
+-}
 updateTextureRgb :: SDL.Texture -> V.Vector Word8 -> IO ()
 updateTextureRgb tex fb = do
     let bs = BS.pack (V.toList fb)

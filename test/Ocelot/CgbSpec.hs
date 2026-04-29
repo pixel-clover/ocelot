@@ -10,11 +10,14 @@ module Ocelot.CgbSpec (spec) where
 
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
+import Data.IORef (writeIORef)
 import qualified Data.Vector.Unboxed as V
+import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word8)
 import qualified Ocelot.Bus as Bus
 import qualified Ocelot.Cartridge as Cartridge
 import Ocelot.Cartridge.Header (expectedHeaderChecksum)
+import qualified Ocelot.Ppu as Ppu
 import Test.Hspec
 
 mkCgbRom :: BS.ByteString
@@ -184,3 +187,94 @@ spec = do
             b <- mkBus mkDmgRom
             v <- Bus.read8 0xFF4D b
             v `shouldBe` 0xFF
+
+    describe "CGB BG rendering" $ do
+        it "draws BG palette 0 colors when the attribute byte selects palette 0" $ do
+            b <- mkBus mkCgbRom
+            let ps = Bus.busPpu b
+            -- Tile 0 row 0: striped (color indices 0,1,0,1,...)
+            -- Bytes: low=0x55, high=0x00 -> bits select color 1 every other px.
+            MV.write (Ppu.ppuVram ps) 0 0x55
+            MV.write (Ppu.ppuVram ps) 1 0x00
+            -- Tilemap entry at 0x9800 = tile 0 (already 0).
+            -- Bank 1 attribute at the same offset = palette 0, no flips, bank 0.
+            MV.write (Ppu.ppuVram ps) (0x2000 + 0x1800) 0x00
+            -- Palette 0 color 0 = pure red (RGB555 = 0x001F), color 1 = pure
+            -- green (RGB555 = 0x03E0). Encoded little-endian.
+            mapM_
+                (\(i, v) -> MV.write (Ppu.ppuBgPalRam ps) i v)
+                [(0, 0x1F), (1, 0x00), (2, 0xE0), (3, 0x03)]
+            -- LCDC: enable LCD + BG; BG tile data unsigned mode; 8x8 sprites.
+            writeIORef (Ppu.ppuLcdc ps) 0x91
+            writeIORef (Ppu.ppuBgp ps) 0xE4
+            writeIORef (Ppu.ppuMode ps) Ppu.ModeOamScan
+            writeIORef (Ppu.ppuDot ps) 0
+            writeIORef (Ppu.ppuLy ps) 0
+            -- Run one full scanline through OAM scan + drawing + HBlank.
+            _ <- Ppu.advance 114 (Bus.busPpu b)
+            rgb <- Ppu.framebufferRgb (Bus.busPpu b)
+            -- Pixel 0 was bit-7 of (low=0x55,high=0x00) = 0; color 0 -> red.
+            (rgb V.! 0, rgb V.! 1, rgb V.! 2) `shouldBe` (0xFF, 0x00, 0x00)
+            -- Pixel 1 bit-6: low=1, high=0 -> color 1 -> green.
+            (rgb V.! 3, rgb V.! 4, rgb V.! 5) `shouldBe` (0x00, 0xFF, 0x00)
+
+        it "DMG cart still produces shade-palette RGB output" $ do
+            b <- mkBus mkDmgRom
+            let ps = Bus.busPpu b
+            MV.write (Ppu.ppuVram ps) 0 0xFF
+            MV.write (Ppu.ppuVram ps) 1 0x00
+            writeIORef (Ppu.ppuLcdc ps) 0x91
+            writeIORef (Ppu.ppuBgp ps) 0xE4
+            writeIORef (Ppu.ppuMode ps) Ppu.ModeOamScan
+            writeIORef (Ppu.ppuDot ps) 0
+            writeIORef (Ppu.ppuLy ps) 0
+            _ <- Ppu.advance 114 (Bus.busPpu b)
+            rgb <- Ppu.framebufferRgb (Bus.busPpu b)
+            -- DMG shade 1 = (0x88, 0xC0, 0x70) per the standard palette.
+            (rgb V.! 0, rgb V.! 1, rgb V.! 2) `shouldBe` (0x88, 0xC0, 0x70)
+
+        it "respects the CGB tile-data bank (attribute bit 3)" $ do
+            b <- mkBus mkCgbRom
+            let ps = Bus.busPpu b
+            -- Bank 0 tile 0: all zeros (color 0 everywhere).
+            -- Bank 1 tile 0: 0xFF/0x00 -> color 1 across the whole row.
+            MV.write (Ppu.ppuVram ps) (0x2000 + 0) 0xFF
+            MV.write (Ppu.ppuVram ps) (0x2000 + 1) 0x00
+            -- Tilemap entry: tile 0; attr selects palette 0, bank 1 (bit 3 set).
+            MV.write (Ppu.ppuVram ps) (0x2000 + 0x1800) 0x08
+            mapM_
+                (\(i, v) -> MV.write (Ppu.ppuBgPalRam ps) i v)
+                [(0, 0x00), (1, 0x00), (2, 0xE0), (3, 0x03)]
+            writeIORef (Ppu.ppuLcdc ps) 0x91
+            writeIORef (Ppu.ppuBgp ps) 0xE4
+            writeIORef (Ppu.ppuMode ps) Ppu.ModeOamScan
+            writeIORef (Ppu.ppuDot ps) 0
+            writeIORef (Ppu.ppuLy ps) 0
+            _ <- Ppu.advance 114 (Bus.busPpu b)
+            rgb <- Ppu.framebufferRgb (Bus.busPpu b)
+            (rgb V.! 0, rgb V.! 1, rgb V.! 2) `shouldBe` (0x00, 0xFF, 0x00)
+
+        it "horizontal-flip attribute reverses pixel order" $ do
+            b <- mkBus mkCgbRom
+            let ps = Bus.busPpu b
+            -- Tile row: low=0x80 (only bit 7 set) -> color 1 only at pixel 0.
+            MV.write (Ppu.ppuVram ps) 0 0x80
+            MV.write (Ppu.ppuVram ps) 1 0x00
+            -- Attribute: palette 0, hflip set (bit 5).
+            MV.write (Ppu.ppuVram ps) (0x2000 + 0x1800) 0x20
+            -- Palette 0: color 0 = white, color 1 = red.
+            mapM_
+                (\(i, v) -> MV.write (Ppu.ppuBgPalRam ps) i v)
+                [(0, 0xFF), (1, 0x7F), (2, 0x1F), (3, 0x00)]
+            writeIORef (Ppu.ppuLcdc ps) 0x91
+            writeIORef (Ppu.ppuBgp ps) 0xE4
+            writeIORef (Ppu.ppuMode ps) Ppu.ModeOamScan
+            writeIORef (Ppu.ppuDot ps) 0
+            writeIORef (Ppu.ppuLy ps) 0
+            _ <- Ppu.advance 114 (Bus.busPpu b)
+            rgb <- Ppu.framebufferRgb (Bus.busPpu b)
+            -- Without hflip the red pixel would be at pixel 0; with hflip
+            -- it should be at pixel 7.
+            let pixelRgb i = (rgb V.! (i * 3), rgb V.! (i * 3 + 1), rgb V.! (i * 3 + 2))
+            pixelRgb 0 `shouldBe` (0xFF, 0xFF, 0xFF)
+            pixelRgb 7 `shouldBe` (0xFF, 0x00, 0x00)

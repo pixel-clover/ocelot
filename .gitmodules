@@ -2,3 +2,11 @@
 	path = external/gb-test-roms
 	url = https://github.com/habedi/gb-test-roms-fork
 	branch = master
+[submodule "external/mooneye-test-suite"]
+	path = external/mooneye-test-suite
+	url = https://github.com/Gekkio/mooneye-test-suite.git
+	branch = main
+[submodule "external/gb-ctr"]
+	path = external/gb-ctr
+	url = https://github.com/Gekkio/gb-ctr.git
+	branch = main
