@@ -11,7 +11,6 @@ dist/
 dist-newstyle/
 cabal-dev/
 *.cabal
-!template-haskell-project.cabal
 .cabal-sandbox/
 cabal.sandbox.config
 cabal.project.local
@@ -93,6 +92,13 @@ htmlcov/
 tags
 
 ########################
+# Nix
+########################
+result
+result-*
+.direnv/
+
+########################
 # Miscellaneous
 ########################
 
@@ -122,3 +128,4 @@ docs/api/
 *_output.txt
 .codex
 .claude/
+roms/

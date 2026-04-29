@@ -5,17 +5,17 @@ Contributions are always welcome and appreciated.
 
 ### How to Contribute
 
-Please check the [issue tracker](https://github.com/habedi/template-haskell-project/issues) to see if there is an issue
+Please check the [issue tracker](https://github.com/pixel-clover/ocelot/issues) to see if there is an issue
 you would like to work on or if it has already been resolved.
 
 #### Reporting Bugs
 
-1. Open an issue on the [issue tracker](https://github.com/habedi/template-haskell-project/issues).
+1. Open an issue on the [issue tracker](https://github.com/pixel-clover/ocelot/issues).
 2. Include information such as steps to reproduce the observed behavior and relevant logs or screenshots.
 
 #### Suggesting Features
 
-1. Open an issue on the [issue tracker](https://github.com/habedi/template-haskell-project/issues).
+1. Open an issue on the [issue tracker](https://github.com/pixel-clover/ocelot/issues).
 2. Provide details about the feature, its purpose, and potential implementation ideas.
 
 ### Submitting Pull Requests
@@ -28,10 +28,17 @@ you would like to work on or if it has already been resolved.
 
 ### Development Workflow
 
+> [!IMPORTANT]
+> If you're using an AI-assisted coding tool like Claude Code or Codex, make sure the AI follows the instructions in the [AGENTS.md](AGENTS.md) file.
+
 #### Prerequisites
 
-Make sure GNU Make is installed on your system.
-Then use the `make install-deps` command to install the development dependencies (like Stack and Fourmolu).
+You can choose either of the following options to set up your development environment:
+
+- **Nix flake (recommended).** Run `nix develop` from the repository root. This drops you into a shell with GHC 9.6.6, Stack, HLS, HLint, and fourmolu
+  pinned to matching versions. `stack.yaml` is configured to use the system GHC, so `stack build` and `stack test` work directly.
+- **Debian-based system without Nix.** Make sure GNU Make is installed, then run `make install-deps` to install Stack and the formatter/linter. Stack
+  will download its own GHC.
 
 #### Code Style
 

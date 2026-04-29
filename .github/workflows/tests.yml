@@ -2,6 +2,8 @@ name: Run Tests
 
 on:
   workflow_dispatch:
+  schedule: # Run every day at midnight (UTC)
+    - cron: '0 0 * * *'
   push:
     branches:
       - main
@@ -53,7 +55,7 @@ jobs:
 
       - name: Run Tests with Coverage
         run: |
-          stack exec -- hpc-codecov stack:template-haskell-project-test -o codecov.json
+          stack exec -- hpc-codecov stack:ocelot-test -o codecov.json
 
       - name: Upload Coverage Reports to Codecov
         uses: codecov/codecov-action@v5

@@ -37,15 +37,10 @@
               pkgs.pkg-config
             ];
 
-            # Tell Stack to use the GHC from this shell rather than downloading
-            # its own (which would not run on NixOS due to the dynamic linker).
+            # Stack picks up this GHC via system-ghc/install-ghc settings in
+            # stack.yaml, so no extra flags are needed at the command line.
             shellHook = ''
-              export STACK_NIX_INTEGRATION=1
-              export STACK_BUILD_FLAGS="--system-ghc --no-install-ghc"
-              alias sb='stack build $STACK_BUILD_FLAGS'
-              alias st='stack test  $STACK_BUILD_FLAGS'
-              echo "ocelot dev shell: ghc $(ghc --numeric-version), stack $(stack --numeric-version 2>/dev/null || true)"
-              echo "Run stack with: stack build --system-ghc --no-install-ghc"
+              echo "Ocelot dev shell: ghc $(ghc --numeric-version), stack $(stack --numeric-version 2>/dev/null || true)"
             '';
           };
         });

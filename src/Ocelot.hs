@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | Public facade for the ocelot Game Boy / Game Boy Color emulator.
+{- | Public facade for the Ocelot Game Boy / Game Boy Color emulator.
 
 This module is intentionally thin while the project is bootstrapping. As
 subsystems land (CPU, MMU, PPU, APU, cartridge), the deliberate public
@@ -15,4 +15,4 @@ import Data.Text (Text)
 
 -- | Human-readable version string for the emulator library.
 version :: Text
-version = "ocelot 0.1.0.0"
+version = "Ocelot 0.1.0.0"

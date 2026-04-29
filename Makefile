@@ -13,7 +13,7 @@ DOC_OUT       := docs/haskell
 # Targets
 ################################################################################
 
-.PHONY: all build rebuild run test cov lint format doc clean install-deps release help coverage repl setup-hooks test-hooks
+.PHONY: all build rebuild run test cov lint format format-check doc clean install-deps release help coverage repl setup-hooks test-hooks
 
 .DEFAULT_GOAL := help
 
@@ -57,7 +57,7 @@ format-check: ## Check formatting without modifying files
 	@echo "Checking Haskell formatting..."
 	$(STACK) exec -- fourmolu --mode check $(SRC_DIR) $(APP_DIR) $(TEST_DIR)
 
-doc: ## Generate documentation using for the project
+doc: ## Generate Haddock documentation for the project
 	@echo "Generating documentation to $(DOC_OUT)..."
 	$(STACK) haddock --no-haddock-deps
 	@mkdir -p $(DOC_OUT)

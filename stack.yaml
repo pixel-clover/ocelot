@@ -4,3 +4,6 @@ packages:
   - .
 
 extra-deps: []
+
+system-ghc: true
+install-ghc: false

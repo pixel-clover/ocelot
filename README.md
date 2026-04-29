@@ -1,65 +1,58 @@
-## Haskell Project Template
+## Ocelot
 
-<div align="center">
-  <picture>
-    <img alt="Haskell Logo" src="docs/assets/logo/haskell.svg" height="35%" width="35%">
-  </picture>
-</div>
-<br>
-
-[![Tests](https://img.shields.io/github/actions/workflow/status/habedi/template-haskell-project/tests.yml?label=tests&style=flat&labelColor=282c34&logo=github)](https://github.com/habedi/template-haskell-project/actions/workflows/tests.yml)
-[![Lints](https://img.shields.io/github/actions/workflow/status/habedi/template-haskell-project/lints.yml?label=lints&style=flat&labelColor=282c34&logo=github)](https://github.com/habedi/template-haskell-project/actions/workflows/lints.yml)
-[![Code Coverage](https://img.shields.io/codecov/c/github/habedi/template-haskell-project?label=coverage&style=flat&labelColor=282c34&logo=codecov)](https://codecov.io/gh/habedi/template-haskell-project)
+[![Tests](https://img.shields.io/github/actions/workflow/status/pixel-clover/ocelot/tests.yml?label=tests&style=flat&labelColor=282c34&logo=github)](https://github.com/pixel-clover/ocelot/actions/workflows/tests.yml)
+[![Lints](https://img.shields.io/github/actions/workflow/status/pixel-clover/ocelot/lints.yml?label=lints&style=flat&labelColor=282c34&logo=github)](https://github.com/pixel-clover/ocelot/actions/workflows/lints.yml)
+[![Code Coverage](https://img.shields.io/codecov/c/github/pixel-clover/ocelot?label=coverage&style=flat&labelColor=282c34&logo=codecov)](https://codecov.io/gh/pixel-clover/ocelot)
 [![Docs](https://img.shields.io/badge/docs-latest-007ec6?label=docs&style=flat&labelColor=282c34&logo=readthedocs)](docs)
-[![License](https://img.shields.io/badge/license-MIT-007ec6?label=license&style=flat&labelColor=282c34&logo=open-source-initiative)](https://github.com/habedi/template-haskell-project/blob/main/LICENSE)
-[![Release](https://img.shields.io/github/release/habedi/template-haskell-project.svg?label=release&style=flat&labelColor=282c34&logo=github)](https://github.com/habedi/template-haskell-project/releases/latest)
+[![License](https://img.shields.io/badge/license-MIT-007ec6?label=license&style=flat&labelColor=282c34&logo=open-source-initiative)](https://github.com/pixel-clover/ocelot/blob/main/LICENSE)
+[![Release](https://img.shields.io/github/release/pixel-clover/ocelot.svg?label=release&style=flat&labelColor=282c34&logo=github)](https://github.com/pixel-clover/ocelot/releases/latest)
 
-This is a template for Haskell projects.
-It provides a minimalistic project structure with pre-configured GitHub Actions, Makefile, and a few useful
-configuration files.
-I share it here in case it might be useful to others.
+Ocelot is a Game Boy (DMG) and Game Boy Color (CGB) emulator written in Haskell.
+It is also the author's vehicle for learning idiomatic Haskell, so the codebase favors clear, type-driven designs over clever ones.
 
-### Features
-
-- Minimalistic project structure using Stack and hpack
-- Pre-configured GitHub Actions for linting (HLint) and testing (Hspec)
-- Makefile for managing the development workflow and tasks like code formatting, testing, linting, etc.
-- GitHub badges for tests, code quality and coverage, documentation, etc.
-- [Code of Conduct](CODE_OF_CONDUCT.md) and [Contributing Guidelines](CONTRIBUTING.md)
+The project is in an early bootstrapping stage. The SM83 register file is in place; the CPU decoder, MMU, PPU, APU, and cartridge subsystems are still
+to come. See [AGENTS.md](AGENTS.md) for the target architecture and [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow.
 
 ### Getting Started
 
-Check out the [Makefile](Makefile) for available commands to manage the development workflow of the project.
+There are two supported ways to set up the development environment.
+
+#### With Nix (Recommended)
+
+A `flake.nix` provides a dev shell with GHC 9.6.6, Stack, HLS, HLint, and fourmolu pinned to matching versions.
 
 ```shell
-# Install Stack and development dependencies (for Debian-based systems)
+nix develop
+stack build
+stack test
+```
+
+`stack.yaml` sets `system-ghc: true` and `install-ghc: false`, so Stack uses the GHC from the flake rather than downloading its own.
+
+#### With Apt and Stack
+
+```shell
+# Install Stack and development dependencies (for Debian-based systems).
 make install-deps
-```
 
-```shell
-# See all available commands and their descriptions
+# See all available commands and their descriptions.
 make help
-```
 
-```shell
-# Build the project
+# Build, test, lint, format-check.
 make build
-```
-
-```shell
-# Run the application
-make run
-```
-
-```shell
-# Run tests
 make test
+make lint
+make format-check
 ```
+
+### Running
+
+`stack run -- <path-to-rom>` once ROM loading lands. For now the executable is a stub that prints a usage line.
 
 ### Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for details on how to make a contribution.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### License
 
-This project is licensed under the MIT License ([LICENSE](LICENSE) or https://opensource.org/licenses/MIT)
+This project is licensed under the MIT License (see [LICENSE](LICENSE)).
