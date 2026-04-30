@@ -17,17 +17,20 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] ALU helpers (add/adc/sub/sbc/and/or/xor/cp/inc/dec) with correct flag effects, plus add16 and addSP
 - [x] Interrupt controller (IF/IE, IME, EI/DI delay, HALT wait-for-interrupt)
 - [x] Master step loop services pending interrupts before fetch and ticks during HALT
-- [x] Master step loop driving CPU, PPU, APU, timer, and DMA from a one-instruction budget (`Bus.advance` ticks all subsystems after each CPU instruction)
+- [x] Master step loop driving CPU, PPU, APU, timer, and DMA from a one-instruction budget (`Bus.advance` ticks all subsystems after each CPU
+  instruction)
 - [x] STOP instruction triggers CGB speed switch when KEY1 bit 0 is set; halts otherwise
 - [ ] HALT bug behavior with `IME = 0` and pending IF
-- [x] Optional DMG/CGB boot ROM execution path: `ocelot play --boot-rom <path>` installs the boot ROM at `0x0000-0x00FF` (and `0x0200-0x08FF` on CGB) until the cartridge writes `0xFF50`. Without `--boot-rom`, falls back to the post-boot register state per platform.
+- [x] Optional DMG/CGB boot ROM execution path: `ocelot play --boot-rom <path>` installs the boot ROM at `0x0000-0x00FF` (and `0x0200-0x08FF` on CGB)
+  until the cartridge writes `0xFF50`. Without `--boot-rom`, falls back to the post-boot register state per platform.
 - [x] CGB double-speed mode (KEY1)
 
 ### Memory and Cartridge
 
 - [x] DMG memory map: ROM banks, VRAM, ERAM, WRAM, OAM, IO, HRAM, IE
 - [x] Echo RAM mirroring (`0xE000-0xFDFF` -> `0xC000-0xDDFF`)
-- [x] OAM DMA (`0xFF46`) stepped one byte per M-cycle for 160 M-cycles, with non-HRAM CPU bus lockout while the transfer is active and a 1-cycle startup delay matching real hardware
+- [x] OAM DMA (`0xFF46`) stepped one byte per M-cycle for 160 M-cycles, with non-HRAM CPU bus lockout while the transfer is active and a 1-cycle
+  startup delay matching real hardware
 - [x] CGB WRAM banking (`SVBK`/`WBK` at `0xFF70`, banks 1-7, bank 0 treated as bank 1)
 - [x] CGB VRAM banking (`VBK` at `0xFF4F`, two 8 KiB banks)
 - [x] CGB HDMA: general-purpose (instant copy) and HBlank (one 16-byte chunk per HBlank entry)
@@ -39,14 +42,16 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] MBC5 with bank switching (rumble bit not yet observable)
 - [ ] MBC6, MBC7 (accelerometer, EEPROM)
 - [ ] HuC1, HuC3, MMM01, TAMA5
-- [x] Battery-backed save persistence: `.sav` load and store on emulator entry/exit, RAM plus VBA-M-compatible 48-byte RTC suffix when the cart has a timer
+- [x] Battery-backed save persistence: `.sav` load and store on emulator entry/exit, RAM plus VBA-M-compatible 48-byte RTC suffix when the cart has a
+  timer
 - [ ] General-purpose HDMA blocking timing (currently instant; should hold the CPU for `length * 8` T-cycles)
 
 ### Timer and Serial
 
 - [x] DIV register at 16384 Hz with reset-on-write
 - [x] TIMA/TMA/TAC with selectable input clock
-- [x] Timer falling-edge detector and TIMA reload window (writes to TIMA cancel reload, writes to TMA shift the loaded value, DIV/TAC writes that drop the AND signal increment TIMA). Mooneye timer category: 11/13 passing.
+- [x] Timer falling-edge detector and TIMA reload window (writes to TIMA cancel reload, writes to TMA shift the loaded value, DIV/TAC writes that drop
+  the AND signal increment TIMA). Mooneye timer category: 11/13 passing.
 - [x] Serial transfer (SB/SC) with stub clock for blargg test ROM output capture (writes to SC with bit 7 set capture SB to a buffer)
 - [ ] Link cable peer mode (deferred; see Future Goals)
 
@@ -66,7 +71,8 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] CGB sprite priority resolution (master priority bit, BG-to-OAM, OAM-order)
 - [x] RGB framebuffer alongside the palette-index framebuffer (DMG via fixed shade palette, CGB via BG/OBJ palette RAM with RGB555 decoding)
 - [ ] LCD on/off transitions and STAT/LY behavior on reset (LCD-off freeze is implemented; full reset semantics not audited)
-- [x] Validation: dmg-acid2 golden frame hash (FNV-1a baseline locked; cross-check vs Matt Currie's reference image at https://github.com/mattcurrie/dmg-acid2 to claim conformance)
+- [x] Validation: dmg-acid2 golden frame hash (FNV-1a baseline locked; cross-check vs Matt Currie's reference image
+  at https://github.com/mattcurrie/dmg-acid2 to claim conformance)
 - [x] Validation: cgb-acid2 golden frame hash (same caveat; baseline locked from current PPU output)
 - [ ] Validation: mooneye PPU acceptance suite
 
@@ -127,17 +133,23 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Blargg test ROM collection wired in as a git submodule under `external/gb-test-roms`
 - [x] Blargg cpu_instrs run-to-pass coverage: all 11 individual tests pass under `OCELOT_GOLDEN=1`
 - [x] Blargg instr_timing run-to-pass coverage
-- [x] Blargg result-via-`0xA000` memory runner: reads the final exit byte from cart RAM (per blargg's `shell.s`) so suites that don't print to serial (sound, oam_bug, mem_timing, halt_bug, interrupt_time) get a real verdict + numeric error code instead of "no Pass/Fail in N instructions" timeouts
+- [x] Blargg result-via-`0xA000` memory runner: reads the final exit byte from cart RAM (per blargg's `shell.s`) so suites that don't print to
+  serial (sound, oam_bug, mem_timing, halt_bug, interrupt_time) get a real verdict + numeric error code instead of "no Pass/Fail in N instructions"
+  timeouts
 - [x] Blargg mem_timing wired in (3 sub-ROMs, aspirational; reveals memory timing gaps via error codes)
-- [x] Blargg dmg_sound wired in (12 sub-ROMs, aspirational; 8 currently pass: 01-registers, 02-len ctr, 03-trigger, 04-sweep, 05-sweep details, 06-overflow on trigger, 08-len ctr during power, 11-regs after power)
-- [x] Blargg cgb_sound wired in (11 sub-ROMs available, aspirational; 8 currently pass: 01-registers, 02-len ctr, 03-trigger, 04-sweep, 05-sweep details, 06-overflow on trigger, 08-len ctr during power, 10-wave trigger while on)
+- [x] Blargg dmg_sound wired in (12 sub-ROMs, aspirational; 8 currently pass: 01-registers, 02-len ctr, 03-trigger, 04-sweep, 05-sweep details,
+  06-overflow on trigger, 08-len ctr during power, 11-regs after power)
+- [x] Blargg cgb_sound wired in (11 sub-ROMs available, aspirational; 8 currently pass: 01-registers, 02-len ctr, 03-trigger, 04-sweep, 05-sweep
+  details, 06-overflow on trigger, 08-len ctr during power, 10-wave trigger while on)
 - [x] Blargg oam_bug wired in (8 sub-ROMs, aspirational; ~2 currently pass: 3-non_causes, 6-timing_no_bug)
 - [x] Blargg halt_bug, interrupt_time wired in (aspirational; both currently report error code 0xFF)
 - [ ] Promote aspirational blargg ROMs to strict run-to-pass as accuracy is added
 - [x] Mooneye magic-breakpoint runner in `GoldenSpec.hs`: observes BCDEHL after each chunk for the Fibonacci pass tuple or all-`0x42` failure tuple
 - [x] Mooneye prebuilt-ZIP fetcher (`make mooneye-roms`) downloads gekkio.fi's binaries to `test/testroms/mooneye/`
-- [x] Mooneye acceptance ROMs auto-discovered and wired as one test per ROM (failures surface as `pendingWith` entries, not red marks, so the suite stays green while accuracy gaps are visible)
-- [ ] mooneye acceptance category 100% run-to-pass coverage (current baseline: 31 of 75 acceptance ROMs pass)
+- [x] Mooneye acceptance ROMs auto-discovered and wired as one test per ROM (failures surface as `pendingWith` entries, not red marks, so the suite
+  stays green while accuracy gaps are visible)
+- [ ] mooneye acceptance category 100% run-to-pass coverage (current baseline: 36 of 75 acceptance ROMs pass; the entire `timer/` subcategory is
+  green)
 - [ ] mooneye emulator-only category run-to-pass coverage
 - [ ] mooneye CGB-specific category run-to-pass coverage
 - [ ] Coverage reporting via `hpc-codecov` in CI
@@ -152,7 +164,8 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] CGB system detection from cartridge header CGB flag (`busCgb`)
 - [x] Dual-mode (DMG/CGB) machine selection from header (`Ppu.setCgbMode`, `busCgb`)
 - [x] CGB-only WRAM, VRAM, palette RAM, and HDMA paths
-- [x] DMG-on-CGB compatibility palettes (3-state PPU render mode: `RenderDmg` / `RenderCgbCompat` / `RenderCgbFull`; CGB host pre-loads CGB palette RAM with a grayscale auto palette so DMG carts route through the CGB pipeline). Title-hash table for famous-title color sets is a follow-up.
+- [x] DMG-on-CGB compatibility palettes (3-state PPU render mode: `RenderDmg` / `RenderCgbCompat` / `RenderCgbFull`; CGB host pre-loads CGB palette
+  RAM with a grayscale auto palette so DMG carts route through the CGB pipeline). Title-hash table for famous-title color sets is a follow-up.
 - [x] CGB double-speed switch (KEY1) timing for CPU-only subsystems (peripherals halved)
 - [ ] Validation: cgb-acid2 golden hash
 - [ ] Validation: mooneye CGB-specific acceptance tests

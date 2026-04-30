@@ -23,17 +23,20 @@ The falling-edge view explains several "obscure timer" behaviors:
 * Writing @TAC@ that changes the rate or clears the enable bit can
   similarly drive AND high to low, with the same effect.
 
-TIMA overflow has a 1 M-cycle reload window:
+TIMA overflow runs a small state machine across two M-cycle windows:
 
-* T0 the falling edge wraps TIMA from 0xFF to 0x00 (no @IF@ yet).
-* T1..T3 TIMA stays at 0; writes to TIMA in this window cancel the
-  reload (and the IF), and writes to TMA queue the new reload value.
-* T4 the reload fires: TIMA := TMA, @IF@ bit 2 set.
+* T0 the falling edge wraps TIMA past @0xFF@; the wrap enters the
+  /reloading/ window with TIMA reading as 0.
+* T1..T3 TIMA still reads as 0; writes to TIMA here cancel the reload
+  (and the IF), and writes to TMA queue the new reload value.
+* T4 the reload fires: TIMA := TMA, @IF@ bit 2 set; TIMA enters the
+  /reloaded/ window (one further M-cycle) where TIMA writes are ignored
+  while TMA writes still propagate into TIMA.
+* T8 TIMA returns to /running/.
 
-This module models all of the above. The single hardware behavior we
-deliberately do not replicate is the "writes to TIMA in the same M-cycle
-as the reload fire are ignored" rule, which mooneye does not stress
-through this module's surface.
+This is the same three-state model SameBoy uses ('RUNNING' /
+'RELOADING' / 'RELOADED'), required to match the mooneye
+@tima_write_reloading@ and @tma_write_reloading@ acceptance ROMs.
 -}
 module Ocelot.Timer (
     TimerState (..),
@@ -62,16 +65,21 @@ data TimerState = TimerState
     -- ^ Previous AND of (timer-enabled) and (selected divider bit).
     -- TIMA increments on the falling edge of this signal.
     , timReloadCounter :: !Int
-    -- ^ T-cycles remaining until a pending TIMA-from-TMA reload fires;
-    -- 0 means no reload pending. Set to 4 when a falling edge wraps
-    -- TIMA from 0xFF to 0x00. During the count-down a write to TIMA
-    -- cancels the reload (and the IF that would have fired with it);
-    -- a write to TMA changes the value the reload will load.
+    -- ^ T-cycles remaining in the /reloading/ window; 0 means not in
+    -- that window. Set to 4 when a falling edge wraps TIMA from 0xFF
+    -- to 0x00. During the count-down TIMA reads as 0; a TIMA write
+    -- cancels the reload (and the IF), and a TMA write changes the
+    -- value the reload will load.
+    , timReloadedCounter :: !Int
+    -- ^ T-cycles remaining in the /reloaded/ window that follows a
+    -- successful reload. While this is non-zero, TIMA writes are
+    -- ignored (the just-loaded value is "frozen" for one M-cycle),
+    -- but TMA writes still propagate into TIMA.
     }
     deriving (Eq, Show)
 
 initialTimer :: TimerState
-initialTimer = TimerState 0 0 0 0 False 0
+initialTimer = TimerState 0 0 0 0 False 0 0
 
 readDiv :: TimerState -> Word8
 readDiv ts = fromIntegral (timDivider ts `shiftR` 8)
@@ -116,17 +124,31 @@ fired this T-cycle (the bus turns that into an @IF@ bit-2 raise).
 -}
 stepT :: TimerState -> (TimerState, Bool)
 stepT ts0 =
-    -- 1. Decrement a pending reload counter. If it reaches 0 this cycle,
-    --    fire the reload: TIMA := TMA, signal IF.
-    let !rc = timReloadCounter ts0
+    -- 1a. Tick the post-reload "ignore" window. Writes to TIMA stay
+    --     gated for the duration; we just count it down.
+    let !ic = timReloadedCounter ts0
+        ts0a
+            | ic > 0 = ts0{timReloadedCounter = ic - 1}
+            | otherwise = ts0
+        -- 1b. Tick the reloading window. If it expires this cycle, the
+        --     reload fires: TIMA := TMA, the IF bit pulses, and we
+        --     enter the 4 T-cycle "reloaded" window.
+        !rc = timReloadCounter ts0a
         (ts1, fired) =
             if rc > 0
                 then
                     let !rc' = rc - 1
                      in if rc' == 0
-                            then (ts0{timReloadCounter = 0, timTima = timTma ts0}, True)
-                            else (ts0{timReloadCounter = rc'}, False)
-                else (ts0, False)
+                            then
+                                ( ts0a
+                                    { timReloadCounter = 0
+                                    , timTima = timTma ts0a
+                                    , timReloadedCounter = 4
+                                    }
+                                , True
+                                )
+                            else (ts0a{timReloadCounter = rc'}, False)
+                else (ts0a, False)
         -- 2. Tick the divider.
         !d' = timDivider ts1 + 1
         ts2 = ts1{timDivider = d'}
@@ -161,13 +183,25 @@ writeTac v ts =
 
 writeTima :: Word8 -> TimerState -> TimerState
 writeTima v ts
-    -- A TIMA write during the reload window cancels the reload and the
-    -- pending @IF@ raise: the new value sticks instead of TMA.
+    -- During the /reloading/ window: write cancels the pending reload
+    -- (and the @IF@ raise), TIMA takes the new value.
     | timReloadCounter ts > 0 = ts{timTima = v, timReloadCounter = 0}
+    -- During the /reloaded/ window: TIMA was just loaded with TMA and
+    -- writes are ignored for one M-cycle.
+    | timReloadedCounter ts > 0 = ts
     | otherwise = ts{timTima = v}
 
 writeTma :: Word8 -> TimerState -> TimerState
-writeTma v ts = ts{timTma = v}
+writeTma v ts =
+    -- TMA always latches. While TIMA is in the /reloading/ window the
+    -- pending reload will pick up the new value at fire time; while
+    -- TIMA is in the /reloaded/ window the just-loaded value is
+    -- replaced by the new TMA, matching the documented "TMA write
+    -- during reload" behavior.
+    let ts' = ts{timTma = v}
+     in if timReloadCounter ts' > 0 || timReloadedCounter ts' > 0
+            then ts'{timTima = v}
+            else ts'
 
 {- | Advance the timer by @mCycles@ M-cycles (@mCycles * 4@ T-cycles).
 Returns the new state and whether the timer interrupt should be raised

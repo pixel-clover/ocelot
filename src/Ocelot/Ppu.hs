@@ -419,8 +419,7 @@ transition mode ps = case mode of
     ModeOamScan -> do
         writeIORef (ppuMode ps) ModeDrawing
         writeIORef (ppuDot ps) 80
-        s <- statEdge ps
-        pure s
+        statEdge ps
     ModeDrawing -> do
         renderLine ps
         writeIORef (ppuMode ps) ModeHBlank

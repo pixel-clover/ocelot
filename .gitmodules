@@ -2,3 +2,7 @@
 	path = external/gb-test-roms
 	url = https://github.com/retrio/gb-test-roms
 	branch = master
+[submodule "external/SameBoy"]
+	path = external/SameBoy
+	url = https://github.com/LIJI32/SameBoy
+	branch = master

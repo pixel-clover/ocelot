@@ -6,7 +6,7 @@ import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
 import Data.Word (Word8)
 import Ocelot.Cpu.Execute (interruptVector, pendingInterrupt, runFor, step)
-import Ocelot.Cpu.Registers (regPC, regSP)
+import Ocelot.Cpu.Registers (regA, regPC, regSP)
 import Ocelot.Cpu.State (CpuState (..))
 import Ocelot.Machine (Machine (..), getCpu, getCpuRegs, mapCpu, readMem, writeMem)
 import Ocelot.Testing (machineWithProgram)
@@ -114,6 +114,24 @@ spec = do
             _ <- runFor 1 m
             cpu <- getCpu m
             cpuHalted cpu `shouldBe` True
+
+        it "HALT bug: byte after HALT is decoded twice" $ do
+            -- HALT (0x76) at PC=0; INC A (0x3C) at PC=1; INC A again at
+            -- PC=2 just so we have something to execute next. With IME=0
+            -- and a pending+enabled IRQ, HALT must not halt and the byte
+            -- following it is read twice, so A increments twice from 0x00
+            -- before the loop continues past PC=2.
+            m <- mkProg [0x76, 0x3C, 0x3C, 0x00]
+            setIfIe 0x04 0x04 m
+            -- HALT itself, plus the duplicated INC A, plus the second
+            -- INC A: 3 instructions to execute.
+            _ <- runFor 3 m
+            regs <- getCpuRegs m
+            -- After HALT (1st step) + INC A (twice) we should be at PC=2
+            -- with A = 2. With the bug fix, the INC at PC=1 ran, PC stayed
+            -- at 1, then the same INC ran again advancing PC to 2.
+            regPC regs `shouldBe` 0x0002
+            regA regs `shouldBe` 0x02
 
     describe "EI delay" $ do
         it "EI does not enable IME until after the next instruction" $ do

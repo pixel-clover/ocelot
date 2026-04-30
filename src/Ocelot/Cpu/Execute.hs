@@ -33,7 +33,9 @@ module Ocelot.Cpu.Execute (
     interruptVector,
 ) where
 
+import Control.Monad (when)
 import Data.Bits (clearBit, complement, setBit, shiftL, shiftR, testBit, (.&.), (.|.))
+import Data.IORef (readIORef, writeIORef)
 import Data.Int (Int8)
 import Data.Word (Word16, Word8)
 import qualified Ocelot.Bus as Bus
@@ -72,6 +74,7 @@ import Ocelot.Cpu.State (CpuState (..))
 import Ocelot.Machine (
     Machine (..),
     advanceBus,
+    advanceBusInline,
     getCpu,
     getCpuRegs,
     mapCpu,
@@ -120,15 +123,28 @@ haltStep m = do
 
 doInstruction :: Machine -> IO ()
 doInstruction m = do
-    pc <- regPC <$> getCpuRegs m
+    cpu0 <- getCpu m
+    let pc = regPC (cpuRegs cpu0)
     b0 <- readMem pc m
     b1 <- readMem (pc + 1) m
     b2 <- readMem (pc + 2) m
     let Decoded instr len = decode b0 b1 b2
-    mapCpuRegs (\r -> r{regPC = pc + fromIntegral len}) m
+    -- HALT-bug fetch: PC stays at the byte we just read, so the *next*
+    -- iteration sees the same opcode again. Consume the latch here.
+    if cpuHaltBug cpu0
+        then mapCpu (\c -> c{cpuHaltBug = False}) m
+        else mapCpuRegs (\r -> r{regPC = pc + fromIntegral len}) m
+    -- Reset the inline-advance counter; instructions that interleave
+    -- bus ticks with memory writes (CALL, PUSH, RST, ...) call
+    -- 'advanceBusInline' which both ticks the bus and bumps this
+    -- counter, so the dispatcher subtracts those cycles from the
+    -- final advance below.
+    writeIORef (machineInternalAdvance m) 0
     mc <- execute instr m
     mapCpu (\c -> c{cpuCycles = cpuCycles c + fromIntegral mc}) m
-    advanceBus mc m
+    consumed <- readIORef (machineInternalAdvance m)
+    let remaining = mc - consumed
+    when (remaining > 0) (advanceBus remaining m)
 
 pendingInterrupt :: Machine -> IO (Maybe Int)
 pendingInterrupt m = do
@@ -186,17 +202,17 @@ execute instr m = case instr of
     Nop -> pure 1
     Halt -> do
         -- HALT bug: when IME=0 and at least one pending interrupt is enabled
-        -- (IF & IE != 0), the CPU does not halt. Real hardware also fails to
-        -- advance PC on the next fetch (executing the following instruction
-        -- twice); we model the simpler "skip the halt" form, which is what
-        -- most ROMs need to avoid stalling.
+        -- (IF & IE != 0), the CPU does not halt and the next instruction
+        -- fetch fails to advance PC, so the byte after HALT is decoded
+        -- twice. We latch 'cpuHaltBug' here and consume it in the next
+        -- 'doInstruction' call.
         cpu <- getCpu m
         if not (cpuIme cpu)
             then do
                 iflag <- Bus.read8 0xFF0F (machineBus m)
                 ie <- Bus.read8 0xFFFF (machineBus m)
                 if (iflag .&. ie .&. 0x1F) /= 0
-                    then pure 1
+                    then mapCpu (\c -> c{cpuHaltBug = True}) m >> pure 1
                     else mapCpu (\c -> c{cpuHalted = True}) m >> pure 1
             else mapCpu (\c -> c{cpuHalted = True}) m >> pure 1
     LdRR dst src -> do
@@ -268,22 +284,30 @@ execute instr m = case instr of
     JrCC c e -> do
         b <- testCond c m
         if b then jumpRelative e m >> pure 3 else pure 2
-    JpNN nn -> mapCpuRegs (\r -> r{regPC = nn}) m >> pure 4
+    JpNN nn -> do
+        -- JP nn: M2/M3 fetch the immediates, M4 is the internal jump
+        -- cycle (PC commit). Advancing the bus inline ensures the PC
+        -- write becomes observable after the full 4 M-cycles, not at
+        -- cycle 0 of the instruction.
+        advanceBusInline 4 m
+        mapCpuRegs (\r -> r{regPC = nn}) m
+        pure 4
     CallNN nn -> do
         pc <- regPC <$> getCpuRegs m
         pushWord pc m
         mapCpuRegs (\r -> r{regPC = nn}) m
         pure 6
     Ret -> do
-        target <- popWord m
+        target <- popWordTimed 2 m -- reads at M2+M3 of the 4-cycle RET
+        advanceBusInline 1 m -- M4: internal jump cycle
         mapCpuRegs (\r -> r{regPC = target}) m
         pure 4
     PushRr s -> do
         v <- getReg16Stack s m
-        pushWord v m
+        pushWordTimed 3 v m -- writes at M3+M4 of the 4-M-cycle PUSH
         pure 4
     PopRr s -> do
-        v <- popWord m
+        v <- popWordTimed 2 m -- reads at M2+M3 of the 3-cycle POP
         setReg16Stack s v m
         pure 3
     JpCC c nn -> do
@@ -319,7 +343,7 @@ execute instr m = case instr of
         pure 1
     Rst target -> do
         pc <- regPC <$> getCpuRegs m
-        pushWord pc m
+        pushWordTimed 3 pc m -- writes at M3+M4 of the 4-M-cycle RST
         mapCpuRegs (\r -> r{regPC = fromIntegral target}) m
         pure 4
     AddHlRr rr -> do
@@ -557,10 +581,50 @@ pushWord v m = do
     writeMem sp2 lo m
     mapCpuRegs (\r -> r{regSP = sp2}) m
 
+{- | Stack push with bus-cycle-accurate write timing. Caller passes the
+number of M-cycles that should have already elapsed before the
+high-byte write (e.g. 3 for @PUSH@ / @RST@ which write at M3+M4 of
+their 4-cycle window once M1 fetch is included, 5 for @CALL@ which
+writes at M5+M6 of 6). This helper ticks @pre@ inline cycles, writes
+the high byte, ticks one more cycle, then writes the low byte. Total
+inline advance is @pre + 1@, which 'doInstruction' subtracts from the
+instruction's reported cycle count via 'machineInternalAdvance'.
+-}
+pushWordTimed :: Int -> Word16 -> Machine -> IO ()
+pushWordTimed pre v m = do
+    sp <- regSP <$> getCpuRegs m
+    let hi = fromIntegral (v `shiftR` 8) :: Word8
+        lo = fromIntegral (v .&. 0xFF) :: Word8
+        sp1 = sp - 1
+        sp2 = sp1 - 1
+    advanceBusInline pre m
+    writeMem sp1 hi m
+    advanceBusInline 1 m
+    writeMem sp2 lo m
+    mapCpuRegs (\r -> r{regSP = sp2}) m
+
 popWord :: Machine -> IO Word16
 popWord m = do
     sp <- regSP <$> getCpuRegs m
     lo <- readMem sp m
+    hi <- readMem (sp + 1) m
+    let v = (fromIntegral hi `shiftL` 8) .|. fromIntegral lo
+    mapCpuRegs (\r -> r{regSP = sp + 2}) m
+    pure v
+
+{- | Stack pop with bus-cycle-accurate read timing. Caller passes how
+many M-cycles should have elapsed before the low-byte read. For POP
+that is 2 (read at M2+M3 of 3); for RET it's 2 (read at M2+M3 of 4,
+with one trailing internal cycle); RETI / RET cc also share the
+2-pre offset. The helper ticks @pre@ inline cycles, reads the low
+byte, ticks one more cycle, reads the high byte.
+-}
+popWordTimed :: Int -> Machine -> IO Word16
+popWordTimed pre m = do
+    sp <- regSP <$> getCpuRegs m
+    advanceBusInline pre m
+    lo <- readMem sp m
+    advanceBusInline 1 m
     hi <- readMem (sp + 1) m
     let v = (fromIntegral hi `shiftL` 8) .|. fromIntegral lo
     mapCpuRegs (\r -> r{regSP = sp + 2}) m

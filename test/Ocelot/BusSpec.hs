@@ -90,7 +90,11 @@ spec = do
             write8 0xFF01 0x41 b
             write8 0xFF02 0x81 b
             v <- read8 0xFF02 b
-            (v `mod` 0x80) `shouldBe` 0x01
+            -- SC bits 6..1 read as 1 on hardware; bit 7 (transfer-start)
+            -- has been cleared by the capture; bit 0 (internal clock)
+            -- holds its written value. So the readback is 0x7F.
+            (v .&. 0x80) `shouldBe` 0x00 -- start bit cleared
+            (v .&. 0x01) `shouldBe` 0x01 -- internal-clock bit preserved
 
         it "writes to SC without bit 7 set do not capture" $ do
             b <- emptyBus

@@ -6,7 +6,6 @@
 
 <h2>Ocelot</h2>
 
-
 [![Tests](https://img.shields.io/github/actions/workflow/status/pixel-clover/ocelot/tests.yml?label=tests&style=flat&labelColor=282c34&logo=github)](https://github.com/pixel-clover/ocelot/actions/workflows/tests.yml)
 [![Lints](https://img.shields.io/github/actions/workflow/status/pixel-clover/ocelot/lints.yml?label=lints&style=flat&labelColor=282c34&logo=github)](https://github.com/pixel-clover/ocelot/actions/workflows/lints.yml)
 [![Code Coverage](https://img.shields.io/codecov/c/github/pixel-clover/ocelot?label=coverage&style=flat&labelColor=282c34&logo=codecov)](https://codecov.io/gh/pixel-clover/ocelot)
@@ -45,8 +44,14 @@ Ocelot is licensed under the MIT License (see [LICENSE](LICENSE)).
 ### Acknowledgements
 
 * The logo is from [SVG Repo](https://www.svgrepo.com/svg/28849/old-gameboy-console) with some modifications.
-* This project uses material from the following projects and resources:
-    * [Minish](https://github.com/CogitatorTech/minish) framework for property-based testing
-    * [Chilli](https://github.com/CogitatorTech/chilli) framework for CLI parsing and handling
-    * [Rocket 68](https://github.com/habedi/rocket68) for the main CPU (Motorola 68000) emulation
-    * [jgz80](https://github.com/carmiker/jgz80) for the Z80 chip emulation
+* This project uses material from the following projects and resources (mainly for testing):
+    * [gb-test-roms](https://github.com/retrio/gb-test-roms)
+    * [mooneye-test-suite](https://github.com/Gekkio/mooneye-test-suite)
+    * [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) and [cgb-acid2](https://github.com/mattcurrie/cgb-acid2)
+
+### Reference Implementations
+
+Ocelot's implementation logic was checked with the following reference material for finding errors and verifying correctness:
+* [Pan Docs](https://gbdev.io/pandocs/)
+* [SameBoy](https://github.com/LIJI32/SameBoy)
+* [Game Boy: Complete Technical Reference](https://gekkio.fi/files/gb-docs/gbctr.pdf)

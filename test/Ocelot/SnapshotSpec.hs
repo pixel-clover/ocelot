@@ -68,6 +68,7 @@ spec = do
                     , cpuIme = True
                     , cpuEiDelay = False
                     , cpuHalted = False
+                    , cpuHaltBug = False
                     , cpuCycles = 0xCAFEBABE
                     }
             blob <- Snap.save m
@@ -79,6 +80,7 @@ spec = do
                     , cpuIme = False
                     , cpuEiDelay = False
                     , cpuHalted = False
+                    , cpuHaltBug = False
                     , cpuCycles = 0
                     }
             r <- Snap.load blob m
@@ -100,9 +102,10 @@ spec = do
                     , timTac = 0x07
                     , timPrevAnd = True
                     , timReloadCounter = 3
+                    , timReloadedCounter = 2
                     }
             blob <- Snap.save m
-            writeIORef (Bus.busTimer (machineBus m)) (TimerState 0 0 0 0 False 0)
+            writeIORef (Bus.busTimer (machineBus m)) (TimerState 0 0 0 0 False 0 0)
             _ <- Snap.load blob m
             ts <- readIORef (Bus.busTimer (machineBus m))
             ts
@@ -113,6 +116,7 @@ spec = do
                     , timTac = 0x07
                     , timPrevAnd = True
                     , timReloadCounter = 3
+                    , timReloadedCounter = 2
                     }
 
         it "round-trips PPU regs and VRAM" $ do

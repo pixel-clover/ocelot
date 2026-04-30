@@ -25,6 +25,8 @@ Special handling on writes:
 module Ocelot.Bus (
     Bus (..),
     fromCartridge,
+    fromCartridgeOnHost,
+    HostHardware (..),
     read8,
     write8,
     advance,
@@ -126,8 +128,38 @@ data Bus = Bus
     -- it was triggered" behavior.
     }
 
+{- | Choice of host model for the emulated bus. Most CGB-only registers
+(KEY1, VBK, BCPS\/BCPD, OCPS\/OCPD, HDMA1-5, SVBK) become inaccessible
+under 'HostDmg' (reads return @0xFF@, writes are ignored), and the
+PPU's render path swaps between greenish-DMG shades ('Ppu.RenderDmg')
+and the full CGB color pipeline ('Ppu.RenderCgbFull').
+-}
+data HostHardware
+    = HostDmg
+    -- ^ Original Game Boy / Game Boy Pocket. Greenish-DMG palette.
+    | HostCgb
+    -- ^ Game Boy Color. CGB-only registers fully accessible. DMG carts
+    -- run in compatibility mode with the auto-palette.
+    deriving (Eq, Show)
+
+{- | Default constructor: pick the host hardware automatically based on
+the cart's CGB flag (DMG-only carts get a DMG host, CGB-aware carts
+get a CGB host). Use 'fromCartridgeOnHost' to override.
+-}
 fromCartridge :: Cartridge -> IO Bus
-fromCartridge c = do
+fromCartridge c =
+    let host = case Header.hdrCgbFlag (Cartridge.cartridgeHeader c) of
+            Header.DmgOnly -> HostDmg
+            Header.DmgAndCgb -> HostCgb
+            Header.CgbOnly -> HostCgb
+     in fromCartridgeOnHost host c
+
+{- | Construct a bus with an explicit host-hardware choice. Lets you run
+a DMG cart on a CGB host (matching real-hardware backwards
+compatibility, with the auto-palette pre-loaded) or vice versa.
+-}
+fromCartridgeOnHost :: HostHardware -> Cartridge -> IO Bus
+fromCartridgeOnHost host c = do
     wram <- MV.replicate 0x8000 0
     hram <- MV.replicate 0x7F 0
     io <- MV.replicate 0x80 0
@@ -155,10 +187,14 @@ fromCartridge c = do
             Header.DmgOnly -> False
             Header.DmgAndCgb -> True
             Header.CgbOnly -> True
-        hardwareCgb = True -- SDL frontend models a CGB; DMG-only flag is a follow-up
-        cgb = cgbCart
+        hardwareCgb = host == HostCgb
+        -- 'busCgb' gates CGB-only registers (KEY1, VBK, BCPS, ...). On a
+        -- DMG host these always read 0xFF, so we tie this to the host
+        -- rather than the cart. A DMG cart running on a CGB host still
+        -- has the CGB I/O surface visible (just not used in compat mode).
+        cgb = hardwareCgb
         renderMode
-            | cgbCart = Ppu.RenderCgbFull
+            | cgbCart && hardwareCgb = Ppu.RenderCgbFull
             | hardwareCgb = Ppu.RenderCgbCompat
             | otherwise = Ppu.RenderDmg
     Ppu.setCgbMode cgb ppu
@@ -168,10 +204,26 @@ fromCartridge c = do
     -- counters preserved), and blargg cgb_sound for CGB behavior (cleared).
     -- Tying the APU mode to the cart lets both suites pass simultaneously.
     Apu.setCgbMode cgb apu
+    -- Post-boot APU state: when no boot ROM is run, the APU otherwise
+    -- starts powered off, which leaves carts that assume a boot-ROM
+    -- handoff (most CGB titles, plus most DMG titles that don't write
+    -- NR52 themselves) silent. Mirror the values the official boot ROMs
+    -- leave behind: NR52 powered on, master volume at 7/7 (NR50=0x77),
+    -- panning all-channels-both-sides (NR51=0xF3 on DMG / 0xF3 on CGB).
+    Apu.write8 0xFF26 0x80 apu -- power on
+    Apu.write8 0xFF24 0x77 apu -- NR50: master vol 7 / 7
+    Apu.write8 0xFF25 0xF3 apu -- NR51: standard channel-to-side mapping
     -- DMG-on-CGB compat: pre-load CGB palette RAM with the auto palette
     -- so the DMG cart's BGP/OBP shades index into recognizable colors.
     when (renderMode == Ppu.RenderCgbCompat) $
         applyCompatPalette (Cartridge.cartridgeHeader c) ppu
+    -- Post-boot CGB palette state: real hardware's boot ROM seeds BG
+    -- palette 0 with a non-white default so that CGB carts which are
+    -- slow to fill BCPS/BCPD don't show a blank-white screen on entry.
+    -- We use the same grayscale auto-palette as the DMG-on-CGB compat
+    -- path; CGB carts that initialise their own palettes overwrite it.
+    when (renderMode == Ppu.RenderCgbFull) $
+        writePalEntry (Ppu.ppuBgPalRam ppu) 0 grayscaleAuto
     pure
         Bus
             { busCart = c
@@ -246,14 +298,28 @@ read8Raw addr b
     | addr == 0xFF46 = MV.read (busIo b) 0x46
     | addr >= 0xFF40 && addr <= 0xFF4B = Ppu.read8 addr (busPpu b)
     | addr == 0xFF4D = readKey1 b
-    | addr == 0xFF4F = Ppu.read8 addr (busPpu b)
+    -- All CGB-only registers below: read 0xFF on a DMG host. KEY1 and
+    -- the WRAM bank already gate themselves; the PPU-routed ones (VBK,
+    -- BCPS, BCPD, OCPS, OCPD) and the HDMA control register need an
+    -- explicit gate at the bus layer.
+    | addr == 0xFF4F = if busCgb b then Ppu.read8 addr (busPpu b) else pure 0xFF
+    -- HDMA1-4 are write-only on hardware; they always read 0xFF, on
+    -- both DMG and CGB. HDMA5 reads transfer state (CGB) or 0xFF (DMG).
+    | addr >= 0xFF51 && addr <= 0xFF54 = pure 0xFF
     | addr == 0xFF55 = readHdma5 b
-    | addr == 0xFF68 = Ppu.read8 addr (busPpu b)
-    | addr == 0xFF69 = Ppu.read8 addr (busPpu b)
-    | addr == 0xFF6A = Ppu.read8 addr (busPpu b)
-    | addr == 0xFF6B = Ppu.read8 addr (busPpu b)
+    | addr == 0xFF68 = if busCgb b then Ppu.read8 addr (busPpu b) else pure 0xFF
+    | addr == 0xFF69 = if busCgb b then Ppu.read8 addr (busPpu b) else pure 0xFF
+    | addr == 0xFF6A = if busCgb b then Ppu.read8 addr (busPpu b) else pure 0xFF
+    | addr == 0xFF6B = if busCgb b then Ppu.read8 addr (busPpu b) else pure 0xFF
     | addr == 0xFF70 = readWramBank b
-    | addr <= 0xFF7F = MV.read (busIo b) (fromIntegral (addr - 0xFF00))
+    -- SB / SC (serial): SB stores its byte; SC's lower bits (transfer
+    -- enable, internal clock) are stored, with bit 1 (clock speed) and
+    -- bits 6..2 reading as 1 on real hardware.
+    | addr == 0xFF01 = MV.read (busIo b) 0x01
+    | addr == 0xFF02 = (.|. 0x7E) <$> MV.read (busIo b) 0x02
+    -- Anything else in the I/O page is an unmapped / reserved register
+    -- that reads back 0xFF on hardware (mooneye 'bits/unused_hwio').
+    | addr <= 0xFF7F = pure 0xFF
     | addr <= 0xFFFE = MV.read (busHram b) (fromIntegral (addr - 0xFF80))
     | otherwise = readIORef (busIe b)
 

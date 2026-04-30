@@ -63,6 +63,14 @@ mkBus rom = do
     Right cart <- Cartridge.loadRom rom
     Bus.fromCartridge cart
 
+-- | Force a CGB host (the SDL frontend's choice for compat-mode tests),
+-- even when the cart is DMG-only. Used by tests that exercise the
+-- DMG-on-CGB auto-palette pipeline.
+mkBusOnCgbHost :: BS.ByteString -> IO Bus.Bus
+mkBusOnCgbHost rom = do
+    Right cart <- Cartridge.loadRom rom
+    Bus.fromCartridgeOnHost Bus.HostCgb cart
+
 spec :: Spec
 spec = do
     describe "CGB cartridge detection" $ do
@@ -73,6 +81,32 @@ spec = do
         it "DmgOnly cart leaves busCgb False" $ do
             b <- mkBus mkDmgRom
             Bus.busCgb b `shouldBe` False
+
+    describe "DMG host gates CGB-only registers" $ do
+        -- All addresses in this set are CGB-only registers; reads on a
+        -- DMG host (the default for a DMG cart) must return 0xFF and
+        -- writes are ignored.
+        it "FF4D (KEY1), FF4F (VBK), FF55 (HDMA5), FF68/69/6A/6B (palettes), FF70 (SVBK) read 0xFF" $ do
+            b <- mkBus mkDmgRom
+            mapM_
+                ( \addr -> do
+                    -- Stuff the register first to make sure the gate is
+                    -- intercepting reads, not just observing zeros.
+                    Bus.write8 addr 0x42 b
+                    v <- Bus.read8 addr b
+                    (addr, v) `shouldBe` (addr, 0xFF)
+                )
+                [0xFF4D, 0xFF4F, 0xFF55, 0xFF68, 0xFF69, 0xFF6A, 0xFF6B, 0xFF70]
+
+        it "unmapped I/O page addresses read 0xFF (mooneye unused_hwio)" $ do
+            b <- mkBus mkDmgRom
+            mapM_
+                ( \addr -> do
+                    Bus.write8 addr 0x42 b
+                    v <- Bus.read8 addr b
+                    (addr, v) `shouldBe` (addr, 0xFF)
+                )
+                [0xFF03, 0xFF08, 0xFF0E, 0xFF4C, 0xFF4E, 0xFF56, 0xFF6C, 0xFF7F]
 
         it "CGB cart starts the CPU at A=0x11 (post-boot platform probe)" $ do
             Right cart <- Cartridge.loadRom mkCgbRom
@@ -273,10 +307,11 @@ spec = do
             (rgb V.! 3, rgb V.! 4, rgb V.! 5) `shouldBe` (0x00, 0xFF, 0x00)
 
         it "DMG cart on CGB host renders through the compat auto-palette" $ do
-            -- The bus models a CGB host, so a DMG-only cart selects
+            -- Forced to a CGB host so a DMG-only cart selects
             -- RenderCgbCompat. The default (no-title-match) auto-palette
             -- is grayscale; shade 1 decodes to RGB (0x94, 0x94, 0x94).
-            b <- mkBus mkDmgRom
+            -- Default 'mkBus' would now pick a DMG host for a DMG cart.
+            b <- mkBusOnCgbHost mkDmgRom
             let ps = Bus.busPpu b
             MV.write (Ppu.ppuVram ps) 0 0xFF
             MV.write (Ppu.ppuVram ps) 1 0x00

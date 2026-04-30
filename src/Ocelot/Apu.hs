@@ -588,7 +588,7 @@ writeRegister cgb addr v s
         0xFF1B -> writeNr31 v s
         0xFF1C -> writeNr32 v s
         0xFF1D -> writeNr33 v s
-        0xFF1E -> writeNr34 v s
+        0xFF1E -> writeNr34 cgb v s
         0xFF20 -> writeNr41 v s
         0xFF21 -> writeNr42 v s
         0xFF22 -> writeNr43 v s
@@ -908,8 +908,8 @@ writeNr33 v s =
         !freq = (wvFreq ch .&. 0x700) .|. fromIntegral v
      in s{apuCh3 = ch{wvFreq = freq}}
 
-writeNr34 :: Word8 -> ApuInternal -> ApuInternal
-writeNr34 v s =
+writeNr34 :: Bool -> Word8 -> ApuInternal -> ApuInternal
+writeNr34 cgb v s =
     let ch = apuCh3 s
         !freq = (wvFreq ch .&. 0xFF) .|. (fromIntegral (v .&. 0x07) `shiftL` 8)
         !lengthEn = testBit v 6
@@ -919,6 +919,21 @@ writeNr34 v s =
         !ch0 = ch{wvFreq = freq, wvLengthEn = lengthEn}
         !ch1 = applyExtraClockWave lenJustEn firstHalf ch0
         !preTrigLen = wvLength ch1
+        -- DMG wave RAM corruption: retriggering ch3 while it is currently
+        -- enabled and just about to read its next sample byte corrupts
+        -- positions 0..3 of wave RAM. Per Lior Halphon's SameBoy, the
+        -- "just about to read" condition lines up with the cycle the
+        -- frequency timer is about to wrap (we approximate with the
+        -- low watermark of 'wvFreqTimer'). On CGB this glitch is fixed.
+        !shouldCorrupt =
+            trigger
+                && not cgb
+                && wvEnabled ch1
+                && wvFreqTimer ch1 <= 2
+        !waveRam' =
+            if shouldCorrupt
+                then corruptWaveRam (wvPos ch1) (apuWaveRam s)
+                else apuWaveRam s
         !ch2 =
             if trigger
                 then
@@ -931,7 +946,27 @@ writeNr34 v s =
                 else ch1
         !postClock = trigger && lengthEn && firstHalf && (lenJustEn || preTrigLen == 0)
         !ch3 = applyExtraClockWave postClock True ch2
-     in s{apuCh3 = ch3}
+     in s{apuCh3 = ch3, apuWaveRam = waveRam'}
+
+{- | Apply the DMG wave-RAM corruption transform. The byte index of the
+upcoming wave-RAM read is @offset = ((pos + 1) \`div\` 2) \`mod\` 16@.
+If @offset < 4@, only @waveRam[0]@ is overwritten with @waveRam[offset]@.
+Otherwise the four bytes starting at @offset & 0xC@ are copied to
+positions 0..3 (a 4-byte block-move).
+-}
+corruptWaveRam :: Int -> Vector Word8 -> Vector Word8
+corruptWaveRam pos ram =
+    let !offset = ((pos + 1) `div` 2) `mod` 16
+     in if offset < 4
+            then ram V.// [(0, ram V.! offset)]
+            else
+                let !base = offset .&. 0xC
+                 in ram
+                        V.// [ (0, ram V.! base)
+                             , (1, ram V.! (base + 1))
+                             , (2, ram V.! (base + 2))
+                             , (3, ram V.! (base + 3))
+                             ]
 
 writeNr41 :: Word8 -> ApuInternal -> ApuInternal
 writeNr41 v s =

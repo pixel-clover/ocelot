@@ -61,11 +61,11 @@ magic :: ByteString
 magic = BS.pack [0x4F, 0x43, 0x53, 0x31] -- "OCS1"
 
 currentVersion :: Word32
-currentVersion = 5
+currentVersion = 6
 
 cpuLen, timerLen, joyLen, ppuRegLen :: Int
 cpuLen = 24
-timerLen = 7
+timerLen = 8
 joyLen = 3
 ppuRegLen = 16
 
@@ -124,6 +124,7 @@ encodeTimer ts =
         <> Snap.putU8 (timTac ts)
         <> Snap.putBool (timPrevAnd ts)
         <> Snap.putU8 (fromIntegral (timReloadCounter ts))
+        <> Snap.putU8 (fromIntegral (timReloadedCounter ts))
 
 encodeJoypad :: (Word8, Word8, Bool) -> BB.Builder
 encodeJoypad (sel, mask, irq) =
@@ -336,6 +337,7 @@ applyCpu bs m = do
             , cpuIme = ime
             , cpuEiDelay = ei
             , cpuHalted = halted
+            , cpuHaltBug = False -- transient one-instruction latch
             , cpuCycles = cycles
             }
 
@@ -350,6 +352,7 @@ applyTimer bs bus =
             , timTac = BS.index bs 4
             , timPrevAnd = BS.index bs 5 /= 0
             , timReloadCounter = fromIntegral (BS.index bs 6)
+            , timReloadedCounter = fromIntegral (BS.index bs 7)
             }
 
 applyJoypad :: ByteString -> Bus.Bus -> IO ()

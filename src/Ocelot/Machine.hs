@@ -11,6 +11,7 @@ module Ocelot.Machine (
     readMem,
     writeMem,
     advanceBus,
+    advanceBusInline,
     getCpuRegs,
     getCpu,
     putCpu,
@@ -31,6 +32,13 @@ import Ocelot.Cpu.State (CpuState (..), cgbPostBootCpu, dmgPostBootCpu, freshCpu
 data Machine = Machine
     { machineCpu :: !(IORef CpuState)
     , machineBus :: !Bus
+    , machineInternalAdvance :: !(IORef Int)
+    -- ^ M-cycles already advanced from inside the current instruction's
+    -- execution. Reset to 0 by 'doInstruction' before dispatch and
+    -- subtracted from the instruction's reported cycle count when
+    -- finishing the outer 'advanceBus'. Lets timed instructions
+    -- (CALL, PUSH, RST, etc.) interleave bus ticks with their memory
+    -- writes without double-counting.
     }
 
 {- | Construct a Machine from a freshly loaded cartridge with no boot
@@ -61,7 +69,8 @@ machineFromCartridgeWithBoot mBoot c = do
     case mBoot of
         Just rom -> Bus.installBootRom rom bus
         Nothing -> pure ()
-    pure (Machine cpuRef bus)
+    internalAdvance <- newIORef 0
+    pure (Machine cpuRef bus internalAdvance)
 
 readMem :: Word16 -> Machine -> IO Word8
 readMem addr m = Bus.read8 addr (machineBus m)
@@ -71,6 +80,18 @@ writeMem addr !v m = Bus.write8 addr v (machineBus m)
 
 advanceBus :: Int -> Machine -> IO ()
 advanceBus n m = Bus.advance n (machineBus m)
+
+{- | Variant of 'advanceBus' for use inside instruction-level handlers
+that need to interleave bus ticks with their memory accesses (CALL,
+PUSH, RST, ...). Ticks the bus by @n@ M-cycles AND records the
+advance so that the dispatcher in 'Ocelot.Cpu.Execute.doInstruction'
+subtracts it from the instruction's cycle count, avoiding a
+double-advance.
+-}
+advanceBusInline :: Int -> Machine -> IO ()
+advanceBusInline n m = do
+    Bus.advance n (machineBus m)
+    modifyIORef' (machineInternalAdvance m) (+ n)
 
 getCpu :: Machine -> IO CpuState
 getCpu m = readIORef (machineCpu m)

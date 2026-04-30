@@ -37,7 +37,8 @@ machineWithProgram bs = do
             let cpu = freshCpu{cpuRegs = (cpuRegs freshCpu){regPC = 0x0000}}
             cpuRef <- newIORef cpu
             bus <- Bus.fromCartridge cart
-            pure (Machine cpuRef bus)
+            internalAdvance <- newIORef 0
+            pure (Machine cpuRef bus internalAdvance)
         Left err ->
             error
                 ( "Ocelot.Testing.machineWithProgram: synthetic ROM did not load: "
