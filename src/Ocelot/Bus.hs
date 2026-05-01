@@ -213,17 +213,29 @@ fromCartridgeOnHost host c = do
     Apu.write8 0xFF26 0x80 apu -- power on
     Apu.write8 0xFF24 0x77 apu -- NR50: master vol 7 / 7
     Apu.write8 0xFF25 0xF3 apu -- NR51: standard channel-to-side mapping
+    -- Post-boot PPU state: the boot ROM leaves LCDC=0x91 (LCD on, BG on,
+    -- BG tile data area at 0x8000, BG tile map at 0x9800), BGP=0xFC, and
+    -- OBP0/OBP1=0xFF. Many carts assume this state and skip explicitly
+    -- writing some of these registers. Without it we sit at our default
+    -- (LCDC=0x91 from initialPpu) which is fine, but BGP/OBP need
+    -- explicit init since their defaults ('initialPpu') are 0xFC / 0xFF
+    -- for BGP and OBP1 already; we still write them so the values pass
+    -- through to any post-boot snapshot path that reads them out.
+    Ppu.write8 0xFF47 0xFC ppu -- BGP
+    Ppu.write8 0xFF48 0xFF ppu -- OBP0
+    Ppu.write8 0xFF49 0xFF ppu -- OBP1
     -- DMG-on-CGB compat: pre-load CGB palette RAM with the auto palette
     -- so the DMG cart's BGP/OBP shades index into recognizable colors.
     when (renderMode == Ppu.RenderCgbCompat) $
         applyCompatPalette (Cartridge.cartridgeHeader c) ppu
-    -- Post-boot CGB palette state: real hardware's boot ROM seeds BG
-    -- palette 0 with a non-white default so that CGB carts which are
-    -- slow to fill BCPS/BCPD don't show a blank-white screen on entry.
-    -- We use the same grayscale auto-palette as the DMG-on-CGB compat
-    -- path; CGB carts that initialise their own palettes overwrite it.
+    -- Post-boot CGB palette state: real hardware's boot ROM seeds all
+    -- BG palettes with the same grayscale ramp so CGB carts that take a
+    -- moment to fill BCPS/BCPD don't show pure-white during early frames.
+    -- CGB carts that initialise their own palettes overwrite it.
     when (renderMode == Ppu.RenderCgbFull) $
-        writePalEntry (Ppu.ppuBgPalRam ppu) 0 grayscaleAuto
+        mapM_
+            (\palIdx -> writePalEntry (Ppu.ppuBgPalRam ppu) palIdx grayscaleAuto)
+            [0 .. 7]
     pure
         Bus
             { busCart = c

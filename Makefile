@@ -14,7 +14,7 @@ DOC_OUT       := docs/haskell
 ################################################################################
 
 .PHONY: all build rebuild run test cov lint format format-check doc clean install-deps release help coverage \
- repl setup-hooks test-hooks mooneye-roms acid2-roms test-roms
+ repl setup-hooks test-hooks mooneye-roms acid2-roms test-roms tools
 
 .DEFAULT_GOAL := help
 
@@ -129,3 +129,14 @@ acid2-roms: ## Fetch the prebuilt dmg-acid2 and cgb-acid2 ROMs into `test/testro
 
 test-roms: mooneye-roms acid2-roms ## Fetch all third-party test ROMs into `test/testroms`
 	@echo "All test ROMs ready. Run with OCELOT_GOLDEN=1 to exercise them."
+
+TOOLS_OUT := bin/tools
+TOOLS_SRCS := $(wildcard tools/*.hs)
+TOOLS_BINS := $(patsubst tools/%.hs,$(TOOLS_OUT)/%,$(TOOLS_SRCS))
+
+tools: $(TOOLS_BINS) ## Build the developer diagnostic tools under `tools/` into `bin/tools`
+
+$(TOOLS_OUT)/%: tools/%.hs
+	@mkdir -p $(TOOLS_OUT)
+	@echo "Building $@"
+	@$(STACK) ghc --no-haddock-deps -- $< -package ocelot -package containers -o $@ -outputdir $(TOOLS_OUT)/.objs 2>/dev/null

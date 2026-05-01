@@ -360,6 +360,18 @@ handleLcdcWrite v ps = do
         writeIORef (ppuDot ps) 0
         writeIORef (ppuWindowLine ps) 0
         writeIORef (ppuPrevStatLine ps) False
+    -- LCD turning back on: real hardware starts a fresh frame at mode 2
+    -- (OAM scan), LY=0, dot=0. Without this reset the PPU resumes from
+    -- 'ModeHBlank' (where 'unless (testBit v 7)' just put it during the
+    -- preceding LCD-off), which leaves the first 456 dots after re-enable
+    -- as one elongated HBlank: real CGB games that toggle LCD on/off per
+    -- frame end up with their first scanline never re-entering OAM scan,
+    -- which serialises into "BG never renders" on the very first frame.
+    when (not (testBit prev 7) && testBit v 7) $ do
+        writeIORef (ppuMode ps) ModeOamScan
+        writeIORef (ppuLy ps) 0
+        writeIORef (ppuDot ps) 0
+        writeIORef (ppuWindowLine ps) 0
     sampleStatLine ps
 
 modeBits :: PpuMode -> Word8
