@@ -8,15 +8,21 @@ loading requires the same ROM that was running at snapshot time.
 Format (all little-endian):
 
 > magic "OCS1"      4 bytes
-> version           u32   (currently 1)
+> version           u32   (see 'currentVersion')
 > CPU section       fixed 24 bytes
-> Timer section     fixed 7 bytes
+> Timer section     fixed 8 bytes
 > Joypad section    fixed 3 bytes
 > PPU regs section  fixed 16 bytes (11 byte regs + 1 mode + 4 dot)
 > PPU VRAM/OAM/FB   3x length-prefixed blobs
+> PPU CGB block     u8 vbk + u8 bcps + u8 ocps + 2x palette blobs
+> PPU window line   u32
+> PPU STAT edge     u8 prev-line + u8 pending-irq (v7)
 > APU blob          1x length-prefixed
 > Bus WRAM/HRAM/IO  3x length-prefixed blobs
 > Bus IE            u8
+> Bus CGB block     u8 wbk + u8 key1
+> Bus HDMA block    u16 src + u16 dst + u32 len + 3x bool
+> Bus OAM DMA       u8 active + u8 starting + u16 src + u8 index (v7)
 > Cart RAM+RTC blob 1x length-prefixed (output of 'extractSave')
 > Cart MBC blob     1x length-prefixed (output of 'dumpMbc')
 
@@ -31,7 +37,7 @@ module Ocelot.Snapshot (
 ) where
 
 import Control.Monad (when)
-import Data.Bits (shiftL, (.|.))
+import Data.Bits (shiftL, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BB
@@ -61,7 +67,7 @@ magic :: ByteString
 magic = BS.pack [0x4F, 0x43, 0x53, 0x31] -- "OCS1"
 
 currentVersion :: Word32
-currentVersion = 6
+currentVersion = 8
 
 cpuLen, timerLen, joyLen, ppuRegLen :: Int
 cpuLen = 24
@@ -156,6 +162,17 @@ ppuSnapshot ps = do
     objPal <- ioVectorBytes (Ppu.ppuObjPalRam ps)
     -- v4 addition: window-line counter.
     wly <- readIORef (Ppu.ppuWindowLine ps)
+    -- v7 addition: STAT edge-detector latches. Without these, restoring
+    -- a snapshot that was taken with a high STAT line would resume with
+    -- prev=False and immediately re-fire the edge on the next mode
+    -- transition; restoring one with a pending IRQ that hadn't yet been
+    -- consumed by the bus would lose the IRQ.
+    prevStat <- readIORef (Ppu.ppuPrevStatLine ps)
+    pendStat <- readIORef (Ppu.ppuPendingStatIrq ps)
+    -- v8 addition: OPRI (0xFF6C). CGB-compat carts that boot with
+    -- OPRI=1 would resume with the default 0 if not snapshotted, which
+    -- silently flips sprite Z-ordering on reload.
+    opri <- readIORef (Ppu.ppuOpri ps)
     pure $
         Snap.putU8 lcdc
             <> Snap.putU8 stat
@@ -181,6 +198,11 @@ ppuSnapshot ps = do
             <> Snap.putBlob objPal
             -- v4: window-line counter (u32 to leave room for tall frames).
             <> Snap.putU32 (fromIntegral wly)
+            -- v7: STAT edge-detector latches.
+            <> Snap.putBool prevStat
+            <> Snap.putBool pendStat
+            -- v8: OPRI register.
+            <> Snap.putU8 opri
 
 busSnapshot :: Bus.Bus -> IO BB.Builder
 busSnapshot b = do
@@ -198,6 +220,14 @@ busSnapshot b = do
     hdmaActive <- readIORef (Bus.busHdmaActive b)
     ds <- readIORef (Bus.busDoubleSpeed b)
     dsAcc <- readIORef (Bus.busDoubleSpeedAcc b)
+    -- v7 additions: in-flight OAM DMA. Without these, a snapshot taken
+    -- while OAM DMA is mid-copy resumes with the DMA dropped, leaving
+    -- the partially-copied OAM region in whatever state the snapshot
+    -- captured but never finishing the remaining bytes.
+    oamActive <- readIORef (Bus.busOamDmaActive b)
+    oamStarting <- readIORef (Bus.busOamDmaStarting b)
+    oamSrc <- readIORef (Bus.busOamDmaSrc b)
+    oamIndex <- readIORef (Bus.busOamDmaIndex b)
     pure $
         Snap.putBlob wram
             <> Snap.putBlob hram
@@ -211,6 +241,11 @@ busSnapshot b = do
             <> Snap.putBool hdmaActive
             <> Snap.putBool ds
             <> Snap.putU8 (fromIntegral dsAcc)
+            -- v7: OAM DMA state.
+            <> Snap.putBool oamActive
+            <> Snap.putBool oamStarting
+            <> Snap.putU16 oamSrc
+            <> Snap.putU8 (fromIntegral oamIndex)
 
 ioVectorBytes :: MV.IOVector Word8 -> IO ByteString
 ioVectorBytes v = do
@@ -265,7 +300,16 @@ applySnapshot bs0 m = do
             (Ppu.ppuWindowLine (Bus.busPpu bus))
             (fromIntegral (decodeU32 bs7c))
     let bs7d = BS.drop 4 bs7c
-        (apuBlob, bs8) = takeBlob bs7d
+    -- v7: STAT edge-detector latches (prev-line, pending-irq).
+    when (BS.length bs7d >= 2) $ do
+        writeIORef (Ppu.ppuPrevStatLine (Bus.busPpu bus)) (BS.index bs7d 0 /= 0)
+        writeIORef (Ppu.ppuPendingStatIrq (Bus.busPpu bus)) (BS.index bs7d 1 /= 0)
+    let bs7e = BS.drop 2 bs7d
+    -- v8: OPRI.
+    when (BS.length bs7e >= 1) $
+        writeIORef (Ppu.ppuOpri (Bus.busPpu bus)) (BS.index bs7e 0 .&. 0x01)
+    let bs7f = BS.drop 1 bs7e
+        (apuBlob, bs8) = takeBlob bs7f
     Apu.loadState apuBlob (Bus.busApu bus)
     let (wram, bs9) = takeBlob bs8
         (hram, bs10) = takeBlob bs9
@@ -292,7 +336,14 @@ applySnapshot bs0 m = do
         writeIORef (Bus.busDoubleSpeed bus) (BS.index bs12a 9 /= 0)
         writeIORef (Bus.busDoubleSpeedAcc bus) (fromIntegral (BS.index bs12a 10))
     let bs12b = BS.drop 11 bs12a
-        (cartRam, bs13) = takeBlob bs12b
+    -- v7: OAM DMA state (active u8, starting u8, src u16, index u8) = 5 bytes.
+    when (BS.length bs12b >= 5) $ do
+        writeIORef (Bus.busOamDmaActive bus) (BS.index bs12b 0 /= 0)
+        writeIORef (Bus.busOamDmaStarting bus) (BS.index bs12b 1 /= 0)
+        writeIORef (Bus.busOamDmaSrc bus) (decodeU16 (BS.drop 2 bs12b))
+        writeIORef (Bus.busOamDmaIndex bus) (fromIntegral (BS.index bs12b 4))
+    let bs12c = BS.drop 5 bs12b
+        (cartRam, bs13) = takeBlob bs12c
         (cartMbc, _) = takeBlob bs13
     Cart.loadSave cartRam (Bus.busCart bus)
     Cart.loadMbc cartMbc (Bus.busCart bus)

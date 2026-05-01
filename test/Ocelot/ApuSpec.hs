@@ -12,12 +12,18 @@ import Test.Hspec
 spec :: Spec
 spec = do
     describe "default state" $ do
-        it "NR52 reports power on, all channels off, with unused bits set" $ do
+        it "NR52 reports power off, all channels off, with unused bits set (hardware power-on)" $ do
             apu <- initial
             v <- read8 0xFF26 apu
-            (v .&. 0x80) `shouldBe` 0x80 -- power on
+            (v .&. 0x80) `shouldBe` 0x00 -- power off (boot ROM enables it)
             (v .&. 0x70) `shouldBe` 0x70 -- unused bits read 1
             (v .&. 0x0F) `shouldBe` 0x00 -- no channel enabled
+        it "NR52 reports power on after writing 0x80 to NR52" $ do
+            apu <- initial
+            write8 0xFF26 0x80 apu
+            v <- read8 0xFF26 apu
+            (v .&. 0x80) `shouldBe` 0x80
+            (v .&. 0x0F) `shouldBe` 0x00
     describe "register read masks" $ do
         it "NR10 high bit reads as 1" $ do
             apu <- initial
@@ -100,10 +106,10 @@ spec = do
             write8 0xFF14 0xC0 apu
             v' <- read8 0xFF26 apu
             (v' .&. 0x01) `shouldBe` 0x01 -- channel re-enabled
-
     describe "channel 2 trigger" $ do
         it "writing the trigger bit and a non-zero envelope enables ch2 in NR52" $ do
             apu <- initial
+            write8 0xFF26 0x80 apu -- power APU on (post-boot handoff)
             -- NR21: 50% duty, no length restriction.
             write8 0xFF16 0x80 apu
             -- NR22: initial volume 15, envelope down, period 0.
@@ -159,6 +165,32 @@ spec = do
             v <- read8 0xFF12 apu
             v `shouldBe` 0x00
 
+        it "DMG vs CGB: NRx1 length writes while powered off differ" $ do
+            -- DMG accepts the length value; CGB ignores it. We probe by
+            -- triggering ch1 with length-enable after the length write,
+            -- then driving a few frame-sequencer length steps. The DMG
+            -- write loaded length=1, so the channel disables on the very
+            -- next length step; the CGB write was discarded so length
+            -- defaults to 64 and the channel stays on. Matches SameBoy
+            -- 'GB_apu_write' line 1685 (the @reg != GB_IO_NRx1@ guard
+            -- only applies on DMG).
+            let probe isCgb = do
+                    apu <- initial
+                    setCgbMode isCgb apu
+                    write8 0xFF26 0x00 apu -- power off
+                    write8 0xFF11 0x3F apu -- length = 1 (DMG only takes effect)
+                    write8 0xFF26 0x80 apu -- power on
+                    write8 0xFF12 0xF0 apu -- envelope volume 15
+                    write8 0xFF14 0xC0 apu -- trigger + length-enable
+                    -- Two length-counter steps (each 16384 T-cycles).
+                    advance 8192 apu
+                    advance 8192 apu
+                    nr52 <- read8 0xFF26 apu
+                    pure (nr52 .&. 0x01)
+            dmgBit <- probe False
+            cgbBit <- probe True
+            dmgBit `shouldBe` 0x00 -- ch1 off on DMG (length expired)
+            cgbBit `shouldBe` 0x01 -- ch1 still on on CGB (length write blocked)
         it "powering off then on leaves channels disabled" $ do
             apu <- initial
             write8 0xFF17 0xF0 apu
@@ -171,6 +203,7 @@ spec = do
     describe "advance produces samples" $ do
         it "after triggering ch2 and advancing 1 frame, samples are emitted" $ do
             apu <- initial
+            write8 0xFF26 0x80 apu -- power APU on (post-boot handoff)
             -- Set up a 1 kHz square wave: freq = 2048 - 4194304/(32*1000) = 1917.
             -- Encode: low byte = 1917 & 0xFF, high bits = (1917 >> 8) & 7.
             write8 0xFF24 0x77 apu -- master vol both sides 7

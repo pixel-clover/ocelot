@@ -12,6 +12,9 @@ module Ocelot.Machine (
     writeMem,
     advanceBus,
     advanceBusInline,
+    cycleRead,
+    cycleWrite,
+    cycleNoAccess,
     getCpuRegs,
     getCpu,
     putCpu,
@@ -26,7 +29,7 @@ import Ocelot.Bus (Bus)
 import qualified Ocelot.Bus as Bus
 import Ocelot.Cartridge (Cartridge, cartridgeHeader)
 import qualified Ocelot.Cartridge.Header as Header
-import Ocelot.Cpu.Registers (Registers, regPC)
+import Ocelot.Cpu.Registers (Registers)
 import Ocelot.Cpu.State (CpuState (..), cgbPostBootCpu, dmgPostBootCpu, freshCpu)
 
 data Machine = Machine
@@ -64,8 +67,15 @@ machineFromCartridgeWithBoot mBoot c = do
                 Header.DmgOnly -> dmgPostBootCpu
                 Header.DmgAndCgb -> cgbPostBootCpu
                 Header.CgbOnly -> cgbPostBootCpu
+        bootMode = case mBoot of
+            Just _ -> Bus.BootPowerOn
+            Nothing -> Bus.BootPostBoot
+        host = case Header.hdrCgbFlag (cartridgeHeader c) of
+            Header.DmgOnly -> Bus.HostDmg
+            Header.DmgAndCgb -> Bus.HostCgb
+            Header.CgbOnly -> Bus.HostCgb
     cpuRef <- newIORef cpu
-    bus <- Bus.fromCartridge c
+    bus <- Bus.fromCartridgeOnHost host bootMode c
     case mBoot of
         Just rom -> Bus.installBootRom rom bus
         Nothing -> pure ()
@@ -92,6 +102,28 @@ advanceBusInline :: Int -> Machine -> IO ()
 advanceBusInline n m = do
     Bus.advance n (machineBus m)
     modifyIORef' (machineInternalAdvance m) (+ n)
+
+{- | Cycle-accurate memory read: tick the bus by 1 M-cycle, then read
+the address. The read latches the bus state from the END of the
+ticked cycle, matching SameBoy's @cycle_read@ semantics. The internal
+advance counter is bumped so the dispatcher does not double-tick.
+-}
+cycleRead :: Word16 -> Machine -> IO Word8
+cycleRead addr m = do
+    advanceBusInline 1 m
+    Bus.read8 addr (machineBus m)
+
+{- | Cycle-accurate memory write: tick the bus by 1 M-cycle, then write
+the byte. Mirrors 'cycleRead' for the write path.
+-}
+cycleWrite :: Word16 -> Word8 -> Machine -> IO ()
+cycleWrite addr !v m = do
+    advanceBusInline 1 m
+    Bus.write8 addr v (machineBus m)
+
+-- | Tick the bus by 1 M-cycle without an access (internal cycles).
+cycleNoAccess :: Machine -> IO ()
+cycleNoAccess = advanceBusInline 1
 
 getCpu :: Machine -> IO CpuState
 getCpu m = readIORef (machineCpu m)

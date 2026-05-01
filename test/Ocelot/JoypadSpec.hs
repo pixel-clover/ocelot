@@ -62,3 +62,64 @@ spec = do
             ip0 `shouldBe` False
             ip1 `shouldBe` True
             ip2 `shouldBe` False
+
+    describe "IRQ edge detection" $ do
+        it "press of a button in the selected row latches an IRQ" $ do
+            jp <- initial
+            writeP1 0x10 jp -- select action row
+            -- Drain the row-select edge (no buttons pressed -> no edge yet).
+            _ <- takeIrqPending jp
+            setButton ButtonA True jp
+            edge <- takeIrqPending jp
+            edge `shouldBe` True
+
+        it "press in the unselected row does not fire" $ do
+            jp <- initial
+            writeP1 0x10 jp -- select action row only
+            _ <- takeIrqPending jp
+            setButton ButtonUp True jp -- direction row, deselected
+            edge <- takeIrqPending jp
+            edge `shouldBe` False
+
+        it "row-select change exposes a held button as a falling edge" $ do
+            -- Press Up first while the direction row is deselected, so
+            -- the press itself does not fire an IRQ. Then switch the row
+            -- selector to expose direction; the low nibble flips bit 2
+            -- from 1 to 0 and that should latch a joypad-IRQ. Without
+            -- this, games that use 'select row + HALT' to wait for input
+            -- can miss buttons held across the row change.
+            jp <- initial
+            writeP1 0x10 jp -- action only
+            _ <- takeIrqPending jp
+            setButton ButtonUp True jp
+            preEdge <- takeIrqPending jp
+            preEdge `shouldBe` False
+            writeP1 0x20 jp -- switch to direction; Up bit goes 1->0
+            edge <- takeIrqPending jp
+            edge `shouldBe` True
+
+        it "row-select change with no held button does not fire" $ do
+            jp <- initial
+            writeP1 0x10 jp
+            _ <- takeIrqPending jp
+            writeP1 0x20 jp
+            edge <- takeIrqPending jp
+            edge `shouldBe` False
+
+        it "press in shared column with both rows selected and other-row button held does not fire" $ do
+            -- Regression: with both rows selected (sel=0x00), bit 0 of
+            -- the low nibble is the AND of A (action row) and Right
+            -- (direction row). If Right is already held (bit 0 = 0)
+            -- and the user then presses A, the bit stays at 0 — no
+            -- falling edge. The previous implementation always fired
+            -- an IRQ on a fresh selected-row press, missing this AND
+            -- interaction. SameBoy 'GB_update_joyp' computes the OR
+            -- across rows and edge-detects the merged byte.
+            jp <- initial
+            writeP1 0x00 jp -- both rows selected
+            _ <- takeIrqPending jp
+            setButton ButtonRight True jp -- bit 0 -> 0 (falling edge)
+            _ <- takeIrqPending jp -- drain
+            setButton ButtonA True jp -- shares bit 0; no new edge
+            edge <- takeIrqPending jp
+            edge `shouldBe` False

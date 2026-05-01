@@ -85,6 +85,7 @@ test-suite ocelot-test
   main-is: Spec.hs
   other-modules:
       Ocelot.ApuSpec
+      Ocelot.BootRomSpec
       Ocelot.BusSpec
       Ocelot.Cartridge.HeaderSpec
       Ocelot.Cartridge.Mbc1Spec

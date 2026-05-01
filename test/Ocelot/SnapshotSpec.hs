@@ -274,6 +274,57 @@ spec = do
             ds `shouldBe` True
             dsAcc `shouldBe` 1
 
+        it "round-trips OAM DMA state mid-transfer (v7)" $ do
+            m <- mkMachine
+            let bus = Ocelot.Machine.machineBus m
+            writeIORef (Bus.busOamDmaActive bus) True
+            writeIORef (Bus.busOamDmaStarting bus) False
+            writeIORef (Bus.busOamDmaSrc bus) 0xC100
+            writeIORef (Bus.busOamDmaIndex bus) 73
+            blob <- Snap.save m
+            -- Clobber.
+            writeIORef (Bus.busOamDmaActive bus) False
+            writeIORef (Bus.busOamDmaStarting bus) True
+            writeIORef (Bus.busOamDmaSrc bus) 0
+            writeIORef (Bus.busOamDmaIndex bus) 0
+            r <- Snap.load blob m
+            r `shouldBe` Right ()
+            active <- readIORef (Bus.busOamDmaActive bus)
+            starting <- readIORef (Bus.busOamDmaStarting bus)
+            src <- readIORef (Bus.busOamDmaSrc bus)
+            idx <- readIORef (Bus.busOamDmaIndex bus)
+            active `shouldBe` True
+            starting `shouldBe` False
+            src `shouldBe` 0xC100
+            idx `shouldBe` 73
+
+        it "round-trips PPU OPRI register (v8)" $ do
+            m <- mkMachine
+            let ppu = Bus.busPpu (Ocelot.Machine.machineBus m)
+            writeIORef (Ppu.ppuOpri ppu) 0x01
+            blob <- Snap.save m
+            writeIORef (Ppu.ppuOpri ppu) 0x00
+            r <- Snap.load blob m
+            r `shouldBe` Right ()
+            v <- readIORef (Ppu.ppuOpri ppu)
+            v `shouldBe` 0x01
+
+        it "round-trips PPU STAT edge-detector state (v7)" $ do
+            m <- mkMachine
+            let ppu = Bus.busPpu (Ocelot.Machine.machineBus m)
+            writeIORef (Ppu.ppuPrevStatLine ppu) True
+            writeIORef (Ppu.ppuPendingStatIrq ppu) True
+            blob <- Snap.save m
+            -- Clobber.
+            writeIORef (Ppu.ppuPrevStatLine ppu) False
+            writeIORef (Ppu.ppuPendingStatIrq ppu) False
+            r <- Snap.load blob m
+            r `shouldBe` Right ()
+            prev <- readIORef (Ppu.ppuPrevStatLine ppu)
+            pend <- readIORef (Ppu.ppuPendingStatIrq ppu)
+            prev `shouldBe` True
+            pend `shouldBe` True
+
         it "rejects a blob with an unknown version" $ do
             m <- mkMachine
             blob <- Snap.save m

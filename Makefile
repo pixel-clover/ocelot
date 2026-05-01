@@ -14,7 +14,7 @@ DOC_OUT       := docs/haskell
 ################################################################################
 
 .PHONY: all build rebuild run test cov lint format format-check doc clean install-deps release help coverage \
- repl setup-hooks test-hooks mooneye-roms acid2-roms test-roms tools
+ repl setup-hooks test-hooks mooneye-roms acid2-roms test-roms tools sameboy-core sameboy-trace
 
 .DEFAULT_GOAL := help
 
@@ -134,9 +134,32 @@ TOOLS_OUT := bin/tools
 TOOLS_SRCS := $(wildcard tools/*.hs)
 TOOLS_BINS := $(patsubst tools/%.hs,$(TOOLS_OUT)/%,$(TOOLS_SRCS))
 
-tools: $(TOOLS_BINS) ## Build the developer diagnostic tools under `tools/` into `bin/tools`
+tools: $(TOOLS_BINS) $(TOOLS_OUT)/sameboy-trace ## Build the developer diagnostic tools under `tools/` into `bin/tools`
 
 $(TOOLS_OUT)/%: tools/%.hs
 	@mkdir -p $(TOOLS_OUT)
 	@echo "Building $@"
 	@$(STACK) ghc --no-haddock-deps -- $< -package ocelot -package containers -o $@ -outputdir $(TOOLS_OUT)/.objs 2>/dev/null
+
+# SameBoy differential trace driver. Reuses the Core/*.o objects that
+# `make -C external/SameBoy tester` produces. Flags must match Core's
+# build (no GB_DISABLE_* overrides) or struct layouts diverge and the
+# binary segfaults on first malloc.
+SAMEBOY_DIR    := external/SameBoy
+SAMEBOY_OBJS   := $(wildcard $(SAMEBOY_DIR)/build/obj/Core/*.o)
+SAMEBOY_CFLAGS := -g -fPIC -std=gnu11 -D_GNU_SOURCE -DGB_VERSION='"local"' -DGB_COPYRIGHT_YEAR='"local"' \
+                  -DGB_INTERNAL -D_USE_MATH_DEFINES -I$(SAMEBOY_DIR) -Wno-multichar
+
+sameboy-core: ## Build SameBoy core object files (prerequisite for sameboy-trace)
+	@$(MAKE) -C $(SAMEBOY_DIR) tester
+
+$(SAMEBOY_DIR)/build/obj/Core/gb.c.o:
+	@$(MAKE) -C $(SAMEBOY_DIR) tester
+
+$(TOOLS_OUT)/sameboy-trace: tools/sameboy-trace.c $(SAMEBOY_DIR)/build/obj/Core/gb.c.o
+	@mkdir -p $(TOOLS_OUT)
+	@echo "Building $@"
+	@gcc $(SAMEBOY_CFLAGS) -c tools/sameboy-trace.c -o $(TOOLS_OUT)/sameboy-trace.o
+	@gcc -o $@ $(TOOLS_OUT)/sameboy-trace.o $(SAMEBOY_DIR)/build/obj/Core/*.o -lm -lpthread
+
+sameboy-trace: $(TOOLS_OUT)/sameboy-trace ## Build the SameBoy-side differential trace driver

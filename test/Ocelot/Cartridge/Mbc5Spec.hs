@@ -86,12 +86,16 @@ spec = do
             v <- read8 0x4000 c
             v `shouldBe` 0x03
 
-        it "writing the high bit at 0x3000 with low byte at 0x2000 selects banks > 0xFF" $ do
+        it "writing the high bit at 0x3000 with low byte at 0x2000 wraps mod the cart's bank count" $ do
+            -- 128-bank ROM has 7 bank-select lines wired. Writing bank
+            -- index 0x105 (bit 8 set) wraps mod 128 to bank 0x05, per
+            -- SameBoy's @rom_size - 1@ mask. The cart fills bank N's
+            -- bytes with @N & 0xFF@, so reading at $4000 returns 0x05.
             c <- buildCart 128 0
             write8 0x3000 0x01 c
             write8 0x2000 0x05 c
             v <- read8 0x4000 c
-            v `shouldBe` 0xFF
+            v `shouldBe` 0x05
 
     describe "RAM enable and round-trip" $ do
         it "RAM is locked until 0x0A is written to 0x0000" $ do

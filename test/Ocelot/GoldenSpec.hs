@@ -16,7 +16,7 @@ hasn't fetched the @external/gb-test-roms@ submodule.
 module Ocelot.GoldenSpec (spec) where
 
 import Control.Exception (IOException, try)
-import Control.Monad (forM, when)
+import Control.Monad (forM, unless, when)
 import Data.Bits (xor)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -102,6 +102,14 @@ spec = do
             , "03-modify_timing"
             ]
 
+    describe "blargg mem_timing-2 (individual)" $
+        mapM_
+            (blarggSubRomAspirational "external/gb-test-roms/mem_timing-2/rom_singles")
+            [ "01-read_timing"
+            , "02-write_timing"
+            , "03-modify_timing"
+            ]
+
     describe "blargg dmg_sound (individual)" $
         mapM_
             (blarggSubRomAspirational "external/gb-test-roms/dmg_sound/rom_singles")
@@ -142,6 +150,16 @@ spec = do
                         <> "Run 'make mooneye-roms' to fetch the prebuilt ZIP."
                     )
             else mapM_ mooneyeCase mooneyeRoms
+
+    mooneyeEmuRoms <- runIO (discoverMooneyeSubsetRoms "emulator-only")
+    describe "mooneye-test-suite (emulator-only)" $
+        unless (null mooneyeEmuRoms) $
+            mapM_ mooneyeCase mooneyeEmuRoms
+
+    mooneyeMiscRoms <- runIO (discoverMooneyeSubsetRoms "misc")
+    describe "mooneye-test-suite (misc)" $
+        unless (null mooneyeMiscRoms) $
+            mapM_ mooneyeCase mooneyeMiscRoms
 
     describe "dmg-acid2" $
         it "palette-index framebuffer hash matches the reference" $
@@ -347,8 +365,16 @@ every @.gb@ ROM under it (sorted). Returns an empty list when the
 directory isn't populated.
 -}
 discoverMooneyeAcceptanceRoms :: IO [FilePath]
-discoverMooneyeAcceptanceRoms = do
-    let root = mooneyeRoot </> "acceptance"
+discoverMooneyeAcceptanceRoms = discoverMooneyeSubsetRoms "acceptance"
+
+{- | Walk a named subdirectory under @test/testroms/mooneye/@ and
+return every @.gb@ / @.gbc@ ROM it finds (sorted). Used to wire up
+the @emulator-only@ and @misc@ categories without duplicating the
+discovery logic.
+-}
+discoverMooneyeSubsetRoms :: FilePath -> IO [FilePath]
+discoverMooneyeSubsetRoms subset = do
+    let root = mooneyeRoot </> subset
     present <- doesDirectoryExist root
     if not present then pure [] else sort <$> walk root
   where
@@ -359,7 +385,7 @@ discoverMooneyeAcceptanceRoms = do
             isDir <- doesDirectoryExist p
             if isDir
                 then walk p
-                else pure [p | ".gb" `isSuffixOf` e]
+                else pure [p | ".gb" `isSuffixOf` e || ".gbc" `isSuffixOf` e]
 
 {- | Run a mooneye ROM and report the result.
 

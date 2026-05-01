@@ -170,6 +170,15 @@ data Wave = Wave
     , wvFreqTimer :: !Int
     , wvPos :: !Int
     -- ^ 0..31 (each step is one 4-bit sample)
+    , wvJustRead :: !Bool
+    -- ^ True for the M-cycle in which the channel just read a sample
+    -- byte from wave RAM. The CPU sees the byte at the current sample
+    -- index (rather than 0xFF on DMG, or the cached byte on CGB) only
+    -- when this flag is set. Backed by a 4-T-cycle countdown
+    -- ('wvJustReadCountdown') so the flag stays True across the four
+    -- T-cycles of the M-cycle that contains the read, matching the
+    -- granularity at which our CPU model resolves wave-RAM accesses.
+    , wvJustReadCountdown :: !Int
     }
     deriving (Eq, Show)
 
@@ -184,6 +193,8 @@ initialWave =
         , wvLengthEn = False
         , wvFreqTimer = 1
         , wvPos = 0
+        , wvJustRead = False
+        , wvJustReadCountdown = 0
         }
 
 data Noise = Noise
@@ -228,7 +239,10 @@ initialNoise =
 initialApuInternal :: ApuInternal
 initialApuInternal =
     ApuInternal
-        { apuPower = True
+        { -- Hardware power-on: APU off (matches SameBoy GB_apu_init's
+          -- bzero of the apu struct). Callers that want post-boot state
+          -- (NR52 bit 7 set) must write 0xFF26 explicitly.
+          apuPower = False
         , apuFrameStep = 0
         , apuFrameTimer = frameSequencerPeriod
         , apuSampleAcc = 0
@@ -252,8 +266,9 @@ initial = do
     cgb <- newIORef False
     pure (ApuState ref samples cgb)
 
--- | Mark whether the host is a CGB. Affects only NR52 power-off behavior
--- (CGB resets length counters on power-off, DMG preserves them).
+{- | Mark whether the host is a CGB. Affects only NR52 power-off behavior
+(CGB resets length counters on power-off, DMG preserves them).
+-}
 setCgbMode :: Bool -> ApuState -> IO ()
 setCgbMode b apu = writeIORef (apuCgb apu) b
 
@@ -434,6 +449,12 @@ decodeWave = do
             , wvLengthEn = lenEn
             , wvFreqTimer = fT
             , wvPos = pos
+            , -- Transient latches; safe to default to zero / False on
+              -- snapshot load. Worst case the very next CPU wave-RAM
+              -- access misses the briefly-readable window; the channel
+              -- self-corrects on its next sample read.
+              wvJustRead = False
+            , wvJustReadCountdown = 0
             }
 
 encodeNoise :: Noise -> BB.Builder
@@ -502,10 +523,11 @@ dutyTable _ _ = False
 read8 :: Word16 -> ApuState -> IO Word8
 read8 addr apu = do
     s <- readIORef (apuRef apu)
-    pure (readRegister addr s)
+    cgb <- readIORef (apuCgb apu)
+    pure (readRegister cgb addr s)
 
-readRegister :: Word16 -> ApuInternal -> Word8
-readRegister addr s = case addr of
+readRegister :: Bool -> Word16 -> ApuInternal -> Word8
+readRegister cgb addr s = case addr of
     0xFF10 -> apuNr10 s .|. 0x80 -- bit 7 always reads 1
     0xFF11 -> (fromIntegral (sqDuty (apuCh1 s)) `shiftL` 6) .|. 0x3F
     0xFF12 -> sqEnvelopeByte (apuCh1 s)
@@ -533,8 +555,40 @@ readRegister addr s = case addr of
     0xFF26 -> nr52Byte s
     a
         | a >= 0xFF30 && a <= 0xFF3F ->
-            apuWaveRam s V.! fromIntegral (a - 0xFF30)
+            waveRamRead cgb s (fromIntegral (a - 0xFF30))
     _ -> 0xFF
+
+{- | Wave RAM read while ch3 is playing. Real hardware aliases the
+read to the byte at the current sample position; on DMG that
+aliasing is gated by the @wave_form_just_read@ flag (the channel
+just read its sample byte in the same M-cycle), while on CGB it is
+unconditional. Outside that window DMG returns @0xFF@. The
+'wvJustRead' flag is set for a 4-T-cycle pulse around each wave
+read, covering the M-cycle granularity our CPU model resolves to.
+
+Drives blargg dmg_sound 09 and cgb_sound 09.
+-}
+waveRamRead :: Bool -> ApuInternal -> Int -> Word8
+waveRamRead cgb s i
+    | not (wvEnabled (apuCh3 s)) = apuWaveRam s V.! i
+    | cgb || wvJustRead (apuCh3 s) =
+        apuWaveRam s V.! (wvPos (apuCh3 s) `shiftR` 1)
+    | otherwise = 0xFF
+
+{- | Wave RAM write while ch3 is playing. Mirrors 'waveRamRead' for
+the write path: CGB always redirects to the current sample byte,
+DMG redirects only inside the @wave_form_just_read@ window.
+
+Drives blargg dmg_sound 12 and cgb_sound 12.
+-}
+waveRamWrite :: Bool -> Int -> Word8 -> ApuInternal -> ApuInternal
+waveRamWrite cgb i v s
+    | not (wvEnabled (apuCh3 s)) =
+        s{apuWaveRam = apuWaveRam s V.// [(i, v)]}
+    | cgb || wvJustRead (apuCh3 s) =
+        let !pos = wvPos (apuCh3 s) `shiftR` 1
+         in s{apuWaveRam = apuWaveRam s V.// [(pos, v)]}
+    | otherwise = s
 
 sqEnvelopeByte :: Square -> Word8
 sqEnvelopeByte sq =
@@ -572,8 +626,8 @@ writeRegister :: Bool -> Word16 -> Word8 -> ApuInternal -> ApuInternal
 writeRegister cgb addr v s
     | addr == 0xFF26 = handleNr52 cgb v s
     | addr >= 0xFF30 && addr <= 0xFF3F =
-        s{apuWaveRam = apuWaveRam s V.// [(fromIntegral (addr - 0xFF30), v)]}
-    | not (apuPower s) = writeWhilePoweredOff addr v s
+        waveRamWrite cgb (fromIntegral (addr - 0xFF30)) v s
+    | not (apuPower s) = writeWhilePoweredOff cgb addr v s
     | otherwise = case addr of
         0xFF10 -> writeNr10 v s
         0xFF11 -> writeNr11 v s
@@ -602,11 +656,14 @@ writeRegister cgb addr v s
         0xFF25 -> s{apuPanning = v}
         _ -> s
 
--- DMG allows length-counter writes while the APU is off, but only the
--- length value (not the duty / DAC bits in the same register). All other
--- writes are ignored.
-writeWhilePoweredOff :: Word16 -> Word8 -> ApuInternal -> ApuInternal
-writeWhilePoweredOff addr v s = case addr of
+-- DMG allows length-counter writes (NRx1) while the APU is off, but
+-- only the length value (not the duty / DAC bits in the same register).
+-- CGB blocks every register write (other than NR52 and wave RAM, which
+-- are handled in 'writeRegister') while the APU is off, so on CGB this
+-- function is a no-op. Matches SameBoy 'GB_apu_write' line 1685.
+writeWhilePoweredOff :: Bool -> Word16 -> Word8 -> ApuInternal -> ApuInternal
+writeWhilePoweredOff True _ _ s = s
+writeWhilePoweredOff False addr v s = case addr of
     0xFF11 ->
         let ch = apuCh1 s
          in s{apuCh1 = ch{sqLength = 64 - fromIntegral (v .&. 0x3F)}}
@@ -1101,13 +1158,31 @@ tickSquare !t sq =
 
 tickWave :: Int -> Wave -> Wave
 tickWave !t w =
+    -- 'wvJustRead' is set True at the T-cycle the channel reads its
+    -- sample byte and stays True for one M-cycle (4 T-cycles); that
+    -- window covers the case where the CPU's wave-RAM access and the
+    -- wave channel's sample read fall in the same M-cycle but at
+    -- different T-cycle offsets. We approximate the per-T-cycle
+    -- wave_form_just_read flag with this 4-T-cycle pulse since the
+    -- CPU model only resolves accesses to M-cycle boundaries.
     let !timer = wvFreqTimer w - t
+        !justReadCountdown = max 0 (wvJustReadCountdown w - t)
      in if timer > 0
-            then w{wvFreqTimer = timer}
+            then
+                w
+                    { wvFreqTimer = timer
+                    , wvJustReadCountdown = justReadCountdown
+                    , wvJustRead = justReadCountdown > 0
+                    }
             else
                 let !period = max 1 ((2048 - wvFreq w) * 2)
                     !pos' = (wvPos w + 1) `mod` 32
-                 in w{wvFreqTimer = period, wvPos = pos'}
+                 in w
+                        { wvFreqTimer = period
+                        , wvPos = pos'
+                        , wvJustRead = True
+                        , wvJustReadCountdown = 4
+                        }
 
 tickNoise :: Int -> Noise -> Noise
 tickNoise !t n =

@@ -115,9 +115,6 @@ questions, but do place new modules according to this map.
 - Cartridge MBC behavior is owned by `Ocelot.Cartridge`. The bus calls into the cartridge for `0x0000-0x7FFF` and `0xA000-0xBFFF`; do not bypass it
   from elsewhere.
 - Keep frontend concerns (windowing, audio output device, key mapping concrete codes) separate from emulation concerns.
-- Preserve MIT-license boundaries. Treat reference emulators (SameBoy, mooneye-gb, etc.) as references for behavior, not as code to copy. Test ROMs
-  are licensed by their authors. For blargg ROMs under `external/gb-test-roms/`, the upstream `readme.txt` is authoritative. For custom ROMs added
-  under `test/testroms/`, record provenance in `test/testroms/README.md`.
 
 ## Component APIs
 

@@ -46,6 +46,8 @@ import Control.Monad (unless, when)
 import Data.Bits (shiftL, shiftR, testBit, (.&.), (.|.))
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int8)
+import Data.List (sortBy)
+import Data.Ord (comparing)
 import Data.Vector.Unboxed (Vector)
 import qualified Data.Vector.Unboxed as V
 import Data.Vector.Unboxed.Mutable (IOVector)
@@ -144,11 +146,21 @@ data PpuState = PpuState
     -- ^ Latched whenever a register write (STAT, LYC, LCDC bit 7)
     -- causes a STAT-line rising edge. The bus reads and clears this
     -- via 'takePendingStatIrq' after the write, propagating to IF.
+    , ppuOpri :: !(IORef Word8)
+    -- ^ CGB sprite-priority register at @0xFF6C@. Bit 0 = 0 selects
+    -- OAM-index priority (CGB native); bit 0 = 1 selects leftmost-X
+    -- priority (DMG behavior). Bits 1-7 read as 1 on real hardware.
+    -- The CGB boot ROM seeds this from the cart's CGB-flag at startup
+    -- (1 for unmodified DMG carts, 0 for CGB carts); games may
+    -- overwrite it. We stub the boot logic by initializing the value
+    -- in 'Bus.fromCartridgeOnHost' based on the render mode.
     }
 
 initialPpu :: IO PpuState
 initialPpu = do
-    lcdc <- newIORef 0x91
+    -- Hardware power-on: LCD off. Callers that want the post-boot
+    -- handoff (LCDC=0x91, LCD on) set it explicitly via 'write8'.
+    lcdc <- newIORef 0x00
     stat <- newIORef 0x00
     ly <- newIORef 0x00
     lyc <- newIORef 0x00
@@ -156,9 +168,11 @@ initialPpu = do
     scx <- newIORef 0x00
     wy <- newIORef 0x00
     wx <- newIORef 0x00
-    bgp <- newIORef 0xFC
-    obp0 <- newIORef 0xFF
-    obp1 <- newIORef 0xFF
+    -- Hardware power-on: palettes 0x00. Post-boot callers overwrite to
+    -- BGP=0xFC, OBP0/OBP1=0xFF via Ppu.write8.
+    bgp <- newIORef 0x00
+    obp0 <- newIORef 0x00
+    obp1 <- newIORef 0x00
     mode <- newIORef ModeOamScan
     dot <- newIORef 0
     windowLine <- newIORef 0
@@ -175,6 +189,9 @@ initialPpu = do
     objPal <- MV.replicate 0x40 0xFF
     prevStatLine <- newIORef False
     pendingStatIrq <- newIORef False
+    -- Default OPRI = 0 (OAM priority). The bus overrides this for
+    -- DMG-on-CGB compat carts to match a CGB-boot-ROM-driven OPRI=1.
+    opri <- newIORef 0x00
     pure
         PpuState
             { ppuLcdc = lcdc
@@ -202,6 +219,7 @@ initialPpu = do
             , ppuOcps = ocps
             , ppuBgPalRam = bgPal
             , ppuObjPalRam = objPal
+            , ppuOpri = opri
             , ppuPrevStatLine = prevStatLine
             , ppuPendingStatIrq = pendingStatIrq
             }
@@ -284,14 +302,20 @@ read8 addr ps
     | addr == 0xFF4A = readIORef (ppuWy ps)
     | addr == 0xFF4B = readIORef (ppuWx ps)
     | addr == 0xFF4F = (.|. 0xFE) <$> readIORef (ppuVbk ps)
-    | addr == 0xFF68 = readIORef (ppuBcps ps)
+    -- BCPS/OCPS: bit 7 = auto-increment, bits 0-5 = palette index, bit 6
+    -- is unused and reads as 1 on real hardware (matches SameBoy
+    -- 'GB_IO_BGPI/OBPI' read path).
+    | addr == 0xFF68 = (.|. 0x40) <$> readIORef (ppuBcps ps)
     | addr == 0xFF69 = do
         ix <- readIORef (ppuBcps ps)
         MV.read (ppuBgPalRam ps) (fromIntegral (ix .&. 0x3F))
-    | addr == 0xFF6A = readIORef (ppuOcps ps)
+    | addr == 0xFF6A = (.|. 0x40) <$> readIORef (ppuOcps ps)
     | addr == 0xFF6B = do
         ix <- readIORef (ppuOcps ps)
         MV.read (ppuObjPalRam ps) (fromIntegral (ix .&. 0x3F))
+    -- OPRI: bit 0 readable, bits 1-7 read as 1 (matches SameBoy
+    -- 'memory.c:635': @io_registers[OPRI] | 0xFE@).
+    | addr == 0xFF6C = (.|. 0xFE) <$> readIORef (ppuOpri ps)
     | otherwise = pure 0xFF
 
 write8 :: Word16 -> Word8 -> PpuState -> IO ()
@@ -321,6 +345,8 @@ write8 addr !v ps
     | addr == 0xFF69 = writePaletteByte ps ppuBcps ppuBgPalRam v
     | addr == 0xFF6A = writeIORef (ppuOcps ps) v
     | addr == 0xFF6B = writePaletteByte ps ppuOcps ppuObjPalRam v
+    -- Only bit 0 of OPRI is meaningful; ignore the rest.
+    | addr == 0xFF6C = writeIORef (ppuOpri ps) (v .&. 0x01)
     | otherwise = pure ()
 
 -- | Byte offset of the active VRAM bank (0 or 0x2000).
@@ -500,8 +526,9 @@ takePendingStatIrq ps = do
     when p (writeIORef (ppuPendingStatIrq ps) False)
     pure p
 
--- | The current value of the OR'd STAT interrupt request line. Held low
--- while the LCD is off (LCDC bit 7 clear).
+{- | The current value of the OR'd STAT interrupt request line. Held low
+while the LCD is off (LCDC bit 7 clear).
+-}
 computeStatLine :: PpuState -> IO Bool
 computeStatLine ps = do
     lcdc <- readIORef (ppuLcdc ps)
@@ -544,8 +571,8 @@ renderLine ps = do
     -- Snapshot WLY for this line so mid-line increments don't leak into
     -- the same scanline's pixel addressing.
     wly <- readIORef (ppuWindowLine ps)
-    wy <- fromIntegral <$> readIORef (ppuWy ps)
-    wx <- fromIntegral <$> readIORef (ppuWx ps)
+    wy <- fromIntegral <$> readIORef (ppuWy ps) :: IO Int
+    wx <- fromIntegral <$> readIORef (ppuWx ps) :: IO Int
     let windowOnThisLine = winEnabled && lyI >= wy && wx <= 166
     -- Per-pixel BG info: (color index 0..3, optional CGB attribute byte).
     bgPixels <-
@@ -791,10 +818,17 @@ overlaySprites ps cgb ly lcdc bgPixels bgShades = do
     let height = if testBit lcdc 2 then 16 else 8
         masterOn = testBit lcdc 0
     sprs <- readOamSprites (ppuOam ps)
-    let candidates = take 10 (filter (overlaps ly height) sprs)
-        -- DMG: sort by X so the leftmost sprite has the highest priority.
-        -- CGB: OAM order alone determines priority, so leave them as-is.
-        sorted = if cgb then candidates else stableSortByX candidates
+    -- Sprite priority resolution: on a DMG host or in DMG-on-CGB compat
+    -- mode (where the CGB boot ROM has set OPRI=1), leftmost-X wins.
+    -- On a CGB host running a CGB cart, OPRI bit 0 selects the rule:
+    -- 0 = OAM-index priority (CGB native), 1 = leftmost-X priority
+    -- (DMG behavior). 'fromCartridgeOnHost' seeds OPRI=1 for compat
+    -- carts, so this collapses to one check that also lets CGB carts
+    -- override mid-game.
+    opri <- readIORef (ppuOpri ps)
+    let xOrder = not cgb || testBit opri 0
+        candidates = take 10 (filter (overlaps ly height) sprs)
+        sorted = if xOrder then stableSortByX candidates else candidates
     obp0 <- readIORef (ppuObp0 ps)
     obp1 <- readIORef (ppuObp1 ps)
     mapM
@@ -847,11 +881,13 @@ overlaySprites ps cgb ly lcdc bgPixels bgShades = do
                 Just idx | idx /= 0 -> pure (Just (s, idx))
                 _ -> foreMostHit height rest x
 
+{- | Stable sort by sprite X coordinate. Used by DMG (and DMG-on-CGB
+compat / OPRI=1) sprite priority where the leftmost sprite wins, and
+ties break on OAM order. 'Data.List.sortBy' is documented as stable,
+so equal-X sprites keep their original relative order.
+-}
 stableSortByX :: [Sprite] -> [Sprite]
-stableSortByX [] = []
-stableSortByX (x : xs) =
-    let (lt, ge) = span (\y -> spriteX y < spriteX x) xs
-     in stableSortByX lt ++ [x] ++ stableSortByX ge
+stableSortByX = sortBy (comparing spriteX)
 
 spritePixelIdx :: IOVector Word8 -> Bool -> Int -> Int -> Sprite -> Int -> IO (Maybe Word8)
 spritePixelIdx vram cgb ly height s x

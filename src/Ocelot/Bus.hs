@@ -27,6 +27,7 @@ module Ocelot.Bus (
     fromCartridge,
     fromCartridgeOnHost,
     HostHardware (..),
+    BootMode (..),
     read8,
     write8,
     advance,
@@ -37,7 +38,7 @@ module Ocelot.Bus (
 ) where
 
 import Control.Monad (replicateM_, when)
-import Data.Bits (setBit, shiftL, testBit, (.&.), (.|.))
+import Data.Bits (complement, setBit, shiftL, testBit, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
@@ -135,16 +136,33 @@ PPU's render path swaps between greenish-DMG shades ('Ppu.RenderDmg')
 and the full CGB color pipeline ('Ppu.RenderCgbFull').
 -}
 data HostHardware
-    = HostDmg
-    -- ^ Original Game Boy / Game Boy Pocket. Greenish-DMG palette.
-    | HostCgb
-    -- ^ Game Boy Color. CGB-only registers fully accessible. DMG carts
-    -- run in compatibility mode with the auto-palette.
+    = -- | Original Game Boy / Game Boy Pocket. Greenish-DMG palette.
+      HostDmg
+    | -- | Game Boy Color. CGB-only registers fully accessible. DMG carts
+      -- run in compatibility mode with the auto-palette.
+      HostCgb
+    deriving (Eq, Show)
+
+{- | Whether to leave peripheral state at hardware power-on (LCD off,
+APU off, palettes zero) or layer in the values a real boot ROM would
+have written by the time it hands off at PC=0x100. The PowerOn variant
+is required when running an actual boot ROM so the boot ROM observes
+the same registers a real DMG/CGB does at reset; PostBoot is the
+default shortcut used when running a cart directly.
+-}
+data BootMode
+    = -- | LCDC=0, BGP/OBP=0, NR52 bit 7=0; the boot ROM (or test) sets
+      -- everything itself.
+      BootPowerOn
+    | -- | LCDC=0x91, BGP=0xFC, OBP0/1=0xFF, APU on at NR50=0x77
+      -- NR51=0xF3 (post-boot register handoff).
+      BootPostBoot
     deriving (Eq, Show)
 
 {- | Default constructor: pick the host hardware automatically based on
 the cart's CGB flag (DMG-only carts get a DMG host, CGB-aware carts
-get a CGB host). Use 'fromCartridgeOnHost' to override.
+get a CGB host). Uses 'BootPostBoot' (skip-the-boot-ROM shortcut). Use
+'fromCartridgeOnHost' to override host or boot mode.
 -}
 fromCartridge :: Cartridge -> IO Bus
 fromCartridge c =
@@ -152,14 +170,16 @@ fromCartridge c =
             Header.DmgOnly -> HostDmg
             Header.DmgAndCgb -> HostCgb
             Header.CgbOnly -> HostCgb
-     in fromCartridgeOnHost host c
+     in fromCartridgeOnHost host BootPostBoot c
 
 {- | Construct a bus with an explicit host-hardware choice. Lets you run
 a DMG cart on a CGB host (matching real-hardware backwards
-compatibility, with the auto-palette pre-loaded) or vice versa.
+compatibility, with the auto-palette pre-loaded) or vice versa. The
+'BootMode' parameter selects between hardware power-on state and the
+post-boot-ROM register handoff.
 -}
-fromCartridgeOnHost :: HostHardware -> Cartridge -> IO Bus
-fromCartridgeOnHost host c = do
+fromCartridgeOnHost :: HostHardware -> BootMode -> Cartridge -> IO Bus
+fromCartridgeOnHost host bootMode c = do
     wram <- MV.replicate 0x8000 0
     hram <- MV.replicate 0x7F 0
     io <- MV.replicate 0x80 0
@@ -199,42 +219,53 @@ fromCartridgeOnHost host c = do
             | otherwise = Ppu.RenderDmg
     Ppu.setCgbMode cgb ppu
     Ppu.setCgbRenderMode renderMode ppu
-    -- APU power-off semantics follow the cart's hardware target rather than
-    -- the host: blargg dmg_sound is calibrated for DMG behavior (length
-    -- counters preserved), and blargg cgb_sound for CGB behavior (cleared).
-    -- Tying the APU mode to the cart lets both suites pass simultaneously.
+    -- APU power-off semantics follow the host. On a DMG host length
+    -- counters are preserved across power-off; on a CGB host they are
+    -- cleared, matching real hardware. Via 'fromCartridge' the host
+    -- defaults to follow the cart's CGB flag, so the default flow ties
+    -- APU mode to the cart and lets blargg dmg_sound (length-preserve)
+    -- and cgb_sound (length-clear) both pass.
     Apu.setCgbMode cgb apu
-    -- Post-boot APU state: when no boot ROM is run, the APU otherwise
-    -- starts powered off, which leaves carts that assume a boot-ROM
-    -- handoff (most CGB titles, plus most DMG titles that don't write
-    -- NR52 themselves) silent. Mirror the values the official boot ROMs
-    -- leave behind: NR52 powered on, master volume at 7/7 (NR50=0x77),
-    -- panning all-channels-both-sides (NR51=0xF3 on DMG / 0xF3 on CGB).
-    Apu.write8 0xFF26 0x80 apu -- power on
-    Apu.write8 0xFF24 0x77 apu -- NR50: master vol 7 / 7
-    Apu.write8 0xFF25 0xF3 apu -- NR51: standard channel-to-side mapping
-    -- Post-boot PPU state: the boot ROM leaves LCDC=0x91 (LCD on, BG on,
-    -- BG tile data area at 0x8000, BG tile map at 0x9800), BGP=0xFC, and
-    -- OBP0/OBP1=0xFF. Many carts assume this state and skip explicitly
-    -- writing some of these registers. Without it we sit at our default
-    -- (LCDC=0x91 from initialPpu) which is fine, but BGP/OBP need
-    -- explicit init since their defaults ('initialPpu') are 0xFC / 0xFF
-    -- for BGP and OBP1 already; we still write them so the values pass
-    -- through to any post-boot snapshot path that reads them out.
-    Ppu.write8 0xFF47 0xFC ppu -- BGP
-    Ppu.write8 0xFF48 0xFF ppu -- OBP0
-    Ppu.write8 0xFF49 0xFF ppu -- OBP1
+    -- Post-boot register handoff: only applied when no boot ROM is going
+    -- to run. With a boot ROM, the boot ROM is responsible for setting
+    -- LCDC, BGP/OBP*, and the APU power/mixer registers itself. Pre-
+    -- writing them here would, for example, leave LCDC=0x91 from
+    -- 'initialPpu' so the PPU advances LY during the boot ROM's leading
+    -- NOPs and any differential trace drifts in PPU state within
+    -- ~1000 T-cycles of cart entry.
+    case bootMode of
+        BootPostBoot -> do
+            -- APU: NR52 powered on, master volume 7/7, panning all-channels-both-sides.
+            Apu.write8 0xFF26 0x80 apu
+            Apu.write8 0xFF24 0x77 apu
+            Apu.write8 0xFF25 0xF3 apu
+            -- PPU: LCDC=0x91 (LCD on, BG on, tile data 0x8000, tile map 0x9800),
+            -- BGP=0xFC, OBP0/1=0xFF.
+            Ppu.write8 0xFF40 0x91 ppu
+            Ppu.write8 0xFF47 0xFC ppu
+            Ppu.write8 0xFF48 0xFF ppu
+            Ppu.write8 0xFF49 0xFF ppu
+        BootPowerOn -> pure ()
     -- DMG-on-CGB compat: pre-load CGB palette RAM with the auto palette
     -- so the DMG cart's BGP/OBP shades index into recognizable colors.
-    when (renderMode == Ppu.RenderCgbCompat) $
+    -- Also seed OPRI=1 so the sprite-priority logic uses leftmost-X
+    -- (DMG behavior); the real CGB boot ROM does this for unmodified
+    -- DMG carts.
+    when (renderMode == Ppu.RenderCgbCompat) $ do
         applyCompatPalette (Cartridge.cartridgeHeader c) ppu
+        Ppu.write8 0xFF6C 0x01 ppu
     -- Post-boot CGB palette state: real hardware's boot ROM seeds all
-    -- BG palettes with the same grayscale ramp so CGB carts that take a
-    -- moment to fill BCPS/BCPD don't show pure-white during early frames.
-    -- CGB carts that initialise their own palettes overwrite it.
-    when (renderMode == Ppu.RenderCgbFull) $
+    -- BG and OBJ palettes with the same grayscale ramp so CGB carts that
+    -- take a moment to fill BCPS/BCPD don't show pure-white during early
+    -- frames, and so carts that READ OBJ palette RAM during boot (e.g.
+    -- Wario Land 3) see a deterministic non-0xFF value to back up. CGB
+    -- carts that initialise their own palettes overwrite it.
+    when (renderMode == Ppu.RenderCgbFull && bootMode == BootPostBoot) $ do
         mapM_
             (\palIdx -> writePalEntry (Ppu.ppuBgPalRam ppu) palIdx grayscaleAuto)
+            [0 .. 7]
+        mapM_
+            (\palIdx -> writePalEntry (Ppu.ppuObjPalRam ppu) palIdx grayscaleAuto)
             [0 .. 7]
     pure
         Bus
@@ -323,27 +354,51 @@ read8Raw addr b
     | addr == 0xFF69 = if busCgb b then Ppu.read8 addr (busPpu b) else pure 0xFF
     | addr == 0xFF6A = if busCgb b then Ppu.read8 addr (busPpu b) else pure 0xFF
     | addr == 0xFF6B = if busCgb b then Ppu.read8 addr (busPpu b) else pure 0xFF
+    | addr == 0xFF6C = if busCgb b then Ppu.read8 addr (busPpu b) else pure 0xFF
     | addr == 0xFF70 = readWramBank b
     -- SB / SC (serial): SB stores its byte; SC's lower bits (transfer
     -- enable, internal clock) are stored, with bit 1 (clock speed) and
     -- bits 6..2 reading as 1 on real hardware.
     | addr == 0xFF01 = MV.read (busIo b) 0x01
     | addr == 0xFF02 = (.|. 0x7E) <$> MV.read (busIo b) 0x02
+    -- CGB-only undocumented R/W registers. On DMG they read 0xFF; on
+    -- CGB they round-trip the last byte written, with FF75 forcing
+    -- bits 0-3 and 7 to 1 (only bits 4-6 are wired). Mooneye
+    -- 'misc/bits/unused_hwio-C' verifies the round-trip.
+    | addr == 0xFF72 = if busCgb b then MV.read (busIo b) 0x72 else pure 0xFF
+    | addr == 0xFF73 = if busCgb b then MV.read (busIo b) 0x73 else pure 0xFF
+    | addr == 0xFF74 = if busCgb b then MV.read (busIo b) 0x74 else pure 0xFF
+    | addr == 0xFF75 =
+        if busCgb b
+            then (.|. 0x8F) <$> MV.read (busIo b) 0x75
+            else pure 0xFF
     -- Anything else in the I/O page is an unmapped / reserved register
     -- that reads back 0xFF on hardware (mooneye 'bits/unused_hwio').
     | addr <= 0xFF7F = pure 0xFF
     | addr <= 0xFFFE = MV.read (busHram b) (fromIntegral (addr - 0xFF80))
     | otherwise = readIORef (busIe b)
 
+{- | CPU-side bus write. Like 'read8', this is gated by the OAM DMA
+lockout: while DMA is in progress, writes from the CPU to non-HRAM
+addresses are silently dropped (real hardware tristates the address
+bus, so the write goes nowhere). Writes to the @0xFF46@ register
+itself are still accepted via the I/O range, which lets a cart
+restart an in-flight DMA per mooneye 'oam_dma_restart'.
+-}
 write8 :: Word16 -> Word8 -> Bus -> IO ()
 write8 addr !v b = do
-    write8Raw addr v b
-    -- PPU register writes (STAT, LYC, LCDC bit 7) can drive a low->high
-    -- transition of the OR'd STAT line and must raise IF bit 1 right
-    -- away. The PPU latches such edges into a pending flag; the bus
-    -- consumes it here regardless of which addr was written.
-    edge <- Ppu.takePendingStatIrq (busPpu b)
-    when edge (setIfBit 1 b)
+    blocked <- readIORef (busOamDmaActive b)
+    if blocked && not (addrAccessibleDuringDma addr)
+        then pure ()
+        else do
+            write8Raw addr v b
+            -- PPU register writes (STAT, LYC, LCDC bit 7) can drive a
+            -- low->high transition of the OR'd STAT line and must raise
+            -- IF bit 1 right away. The PPU latches such edges into a
+            -- pending flag; the bus consumes it here regardless of
+            -- which addr was written.
+            edge <- Ppu.takePendingStatIrq (busPpu b)
+            when edge (setIfBit 1 b)
 
 write8Raw :: Word16 -> Word8 -> Bus -> IO ()
 write8Raw addr !v b
@@ -371,6 +426,7 @@ write8Raw addr !v b
     | addr == 0xFF69 = when (busCgb b) (Ppu.write8 addr v (busPpu b))
     | addr == 0xFF6A = when (busCgb b) (Ppu.write8 addr v (busPpu b))
     | addr == 0xFF6B = when (busCgb b) (Ppu.write8 addr v (busPpu b))
+    | addr == 0xFF6C = when (busCgb b) (Ppu.write8 addr v (busPpu b))
     | addr == 0xFF50 = writeBootRomLock v b
     | addr == 0xFF70 = writeWramBank v b
     | addr <= 0xFF7F = MV.write (busIo b) (fromIntegral (addr - 0xFF00)) v
@@ -549,9 +605,13 @@ triggerSpeedSwitch b
 -- HDMA (CGB)
 ----------------------------------------------------------------------
 
-{- | HDMA5 read: bit 7 = 0 while an HBlank-mode transfer is still
-running, 1 otherwise; low 7 bits = (remaining-bytes \/ 16) - 1, or
-@0x7F@ when idle.
+{- | HDMA5 read:
+
+* Active HBlank transfer: bit 7 = 0, low 7 bits = @(remaining \/ 16) - 1@.
+* Cancelled HBlank transfer with bytes left: bit 7 = 1, low 7 bits =
+  @(remaining \/ 16) - 1@. CGB games (and the CGB boot ROM) read this
+  value to decide how to resume the transfer.
+* Otherwise idle: @0xFF@.
 -}
 readHdma5 :: Bus -> IO Word8
 readHdma5 b
@@ -559,9 +619,13 @@ readHdma5 b
     | otherwise = do
         active <- readIORef (busHdmaActive b)
         len <- readIORef (busHdmaLen b)
+        let !count = fromIntegral ((len `div` 16) - 1) .&. 0x7F
         if active
-            then pure (fromIntegral ((len `div` 16) - 1) .&. 0x7F)
-            else pure 0xFF
+            then pure count
+            else
+                if len > 0
+                    then pure (0x80 .|. count)
+                    else pure 0xFF
 
 writeHdmaReg :: Word16 -> Word8 -> Bus -> IO ()
 writeHdmaReg addr v b = when (busCgb b) $ case addr of
@@ -644,7 +708,14 @@ copyHdmaBytes :: Bus -> Word16 -> Word16 -> Int -> IO ()
 copyHdmaBytes b src dst n =
     mapM_
         ( \i -> do
-            byte <- read8 (src + fromIntegral i) b
+            -- HDMA is its own bus master and is not gated by the OAM-DMA
+            -- CPU lockout: 'read8' honors 'busOamDmaActive' and would
+            -- return 0xFF for non-HRAM sources whenever HDMA fires while
+            -- OAM DMA is mid-copy. 'read8Raw' is the underlying memory
+            -- read without that gate, matching SameBoy 'GB_hdma_run'
+            -- which reads through 'GB_read_memory_internal' regardless
+            -- of the current OAM-DMA state.
+            byte <- read8Raw (src + fromIntegral i) b
             -- Direct VRAM write (respects current VBK) bypassing the
             -- bus dispatcher to avoid recursion.
             Ppu.write8 (dst + fromIntegral i) byte (busPpu b)
@@ -660,6 +731,7 @@ advanceHdmaPointers b n = do
 read path so any source region (cart ROM/RAM, WRAM) works. Done instantly;
 the real 160-cycle delay and CPU lockout are not modeled.
 -}
+
 {- | Schedule an OAM DMA. The transfer doesn't copy any bytes during the
 M-cycles of the instruction that triggered it: 'busOamDmaStarting' is
 held high through the rest of the current 'advance' window. The first
@@ -696,15 +768,22 @@ stepOamDma b = do
     starting <- readIORef (busOamDmaStarting b)
     when (active && not starting) $ do
         idx <- readIORef (busOamDmaIndex b)
-        src <- readIORef (busOamDmaSrc b)
-        -- Read directly from the underlying memory rather than through
-        -- 'read8', so the DMA itself isn't subject to the lockout it
-        -- imposes on the CPU.
-        byte <- readDmaSource (src + fromIntegral idx) b
-        MV.write (Ppu.ppuOam (busPpu b)) idx byte
-        let idx' = idx + 1
-        writeIORef (busOamDmaIndex b) idx'
-        when (idx' >= 160) (writeIORef (busOamDmaActive b) False)
+        if idx >= 160
+            then -- All 160 bytes already copied. Defer clearing
+            -- 'busOamDmaActive' to one cycle past the final byte
+            -- copy so a CPU read scheduled at the same M-cycle as
+            -- the last byte still sees the lockout (mooneye
+            -- 'oam_dma_timing'). 'busOamDmaIndex >= 160' acts as
+            -- the deferred-clear sentinel.
+                writeIORef (busOamDmaActive b) False
+            else do
+                src <- readIORef (busOamDmaSrc b)
+                -- Read directly from the underlying memory rather than
+                -- through 'read8', so the DMA itself isn't subject to
+                -- the lockout it imposes on the CPU.
+                byte <- readDmaSource (src + fromIntegral idx) b
+                MV.write (Ppu.ppuOam (busPpu b)) idx byte
+                writeIORef (busOamDmaIndex b) (idx + 1)
 
 {- | DMA-internal source read. Bypasses the 'busOamDmaActive' lockout that
 'read8' applies to CPU accesses; otherwise routes the same way. (DMA is
@@ -718,11 +797,15 @@ readDmaSource addr b
     | addr <= 0xCFFF = MV.read (busWram b) (fromIntegral (addr - 0xC000))
     | addr <= 0xDFFF = readUpperWram (addr - 0xD000) b
     | addr <= 0xFDFF = readEcho (addr - 0xE000) b
-    -- Some games trigger DMA from FExx: real hardware mirrors the lower
-    -- 8 KiB of WRAM up through 0xFEFF for DMA reads. The CPU view of
-    -- 0xFEA0-0xFEFF is "unusable" but DMA still gets a byte.
-    | addr <= 0xFEFF = MV.read (busWram b) (fromIntegral (addr .&. 0x1FFF))
-    | otherwise = pure 0xFF
+    -- 0xFE00-0xFFFF: out-of-range source addresses. Real hardware splits
+    -- on host model (matches SameBoy 'GB_dma_run' lines 1890-1895):
+    --   * CGB: every byte reads as 0xFF.
+    --   * DMG: the source mirrors via 'src & ~0x2000' into the
+    --     0xC000-0xDFFF WRAM window (so e.g. 0xFE00 -> 0xDE00, 0xFF00 ->
+    --     0xDF00, 0xFFFF -> 0xDFFF). Includes the 0xFFxx tail, which
+    --     used to return 0xFF in this emulator.
+    | busHardwareCgb b = pure 0xFF
+    | otherwise = readDmaSource (addr .&. complement 0x2000) b
 
 {- | Advance time-driven subsystems by N M-cycles. Ticks Timer and PPU and
 latches the Timer interrupt (bit 2) and VBlank (bit 0) into @IF@ at @0xFF0F@.
@@ -746,10 +829,20 @@ advance mCycles b = do
     writeIORef (busTimer b) ts'
     ppuIrqs <- Ppu.advance pCycles (busPpu b)
     Apu.advance pCycles (busApu b)
-    -- OAM DMA copies one byte per peripheral M-cycle. Stepping it after
-    -- the PPU advance means the DMA reads OAM/VRAM at the freshly-updated
-    -- mode timing.
-    replicateM_ pCycles (stepOamDma b)
+    -- OAM DMA copies one byte per *CPU* M-cycle, NOT per peripheral
+    -- M-cycle: the DMA controller is on the CPU side of the speed
+    -- divider, so a 160 M-cycle CPU wait covers the whole transfer in
+    -- both single-speed and double-speed mode. Running this at the
+    -- halved 'pCycles' rate (as we used to) made OAM DMA take 320 CPU
+    -- M-cycles in double-speed, so a CGB cart that wrote FF46 and busy-
+    -- waited for ~160 cycles (Wario Land 3, Super Mario Bros. Deluxe,
+    -- Zelda DX, etc.) returned from its DMA wait while DMA was still
+    -- locked. RET then read 0xFF off the stack and crashed back to
+    -- 0xFFFF, sending the cart through its watchdog reset and into a
+    -- white-screen reboot loop. Matches SameBoy 'GB_advance_cycles'
+    -- 'gb->dma_cycles = cycles' (line 455) which captures the count
+    -- \*before* the single-speed 'cycles <<= 1' doubling.
+    replicateM_ mCycles (stepOamDma b)
     -- The "starting" flag holds the DMA off for the duration of the
     -- triggering instruction (we run advance after the instruction has
     -- already completed its register-store side-effect). Clearing it at

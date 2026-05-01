@@ -77,6 +77,13 @@ data Mbc1State = Mbc1State
     , m1RomBankLow :: !Word8
     , m1BankHi :: !Word8
     , m1Mode :: !Bool
+    , m1Multicart :: !Bool
+    -- ^ True for the MBC1M wiring variant: bank-low is only 4 bits
+    -- wide (not 5) and the bank-hi register shifts by 4 instead of 5,
+    -- so the cart can hold 4 sub-games of 16 banks each in 1 MiB.
+    -- Detected at 'loadRom' by matching the Nintendo logo at the
+    -- start of the cart against a copy at offset @0x40000@. Mooneye
+    -- 'emulator-only/mbc1/multicart_rom_8Mb' verifies this.
     }
     deriving (Eq, Show)
 
@@ -87,6 +94,7 @@ initialMbc1 =
         , m1RomBankLow = 0x01
         , m1BankHi = 0x00
         , m1Mode = False
+        , m1Multicart = False
         }
 
 data Mbc2State = Mbc2State
@@ -301,7 +309,7 @@ decodeMbc cur bs
     | BS.null bs = Nothing
     | otherwise = case (BS.head bs, cur) of
         (0x00, NoMbcImpl) -> Just NoMbcImpl
-        (0x01, Mbc1Impl _) ->
+        (0x01, Mbc1Impl curS) ->
             let p = BS.drop 1 bs
              in if BS.length p < 4
                     then Nothing
@@ -313,6 +321,9 @@ decodeMbc cur bs
                                     , m1RomBankLow = BS.index p 1
                                     , m1BankHi = BS.index p 2
                                     , m1Mode = BS.index p 3 /= 0
+                                    , -- Multicart wiring is detected at
+                                      -- 'loadRom', not snapshotted.
+                                      m1Multicart = m1Multicart curS
                                     }
         (0x02, Mbc2Impl _) ->
             let p = BS.drop 1 bs
@@ -389,7 +400,17 @@ loadRom raw =
                     Mbc2 -> 512
                     _ -> hdrRamBytes hdr
             ram <- MV.replicate ramBytes 0xFF
-            impl <- anchorRtc impl0
+            -- MBC1 multicart detection: a cart big enough to hold a
+            -- Nintendo-logo copy at offset 0x40000 with the same bytes
+            -- as the canonical logo at 0x104 is the MBC1M wiring (4
+            -- sub-games of 16 banks each in 1 MiB). Matches SameBoy
+            -- 'mbc.c' line 254.
+            let impl1 = case impl0 of
+                    Mbc1Impl s
+                        | detectMbc1Multicart raw ->
+                            Mbc1Impl s{m1Multicart = True}
+                    other -> other
+            impl <- anchorRtc impl1
             ref <- newIORef impl
             pure $
                 Right
@@ -399,6 +420,18 @@ loadRom raw =
                         , cartRam = ram
                         , cartImpl = ref
                         }
+
+{- | Heuristic for MBC1M (multicart) wiring: the cart is at least
+@0x44000@ bytes long and the Nintendo logo at @0x104..0x133@ is
+duplicated at @0x40104..0x40133@. Real-hardware MBC1 carts that ship
+4 sub-games of 16 banks each carry a copy of the logo at the start
+of each sub-cart. SameBoy uses the same heuristic.
+-}
+detectMbc1Multicart :: ByteString -> Bool
+detectMbc1Multicart raw =
+    BS.length raw >= 0x44000
+        && BS.take 0x30 (BS.drop 0x104 raw)
+            == BS.take 0x30 (BS.drop 0x40104 raw)
 
 {- | Set the MBC3 RTC anchor to "now" so the live count starts at zero.
 Cartridges with no RTC pass through unchanged.
@@ -474,15 +507,20 @@ noMbcWrite addr v c
 mbc1Read :: Mbc1State -> Word16 -> Cartridge -> IO Word8
 mbc1Read s addr c
     | addr <= 0x3FFF =
-        let !bank =
+        let !bankShift = if m1Multicart s then 4 else 5
+            !bank =
                 if m1Mode s
-                    then fromIntegral (m1BankHi s) `shiftL` 5 :: Int
+                    then fromIntegral (m1BankHi s) `shiftL` bankShift :: Int
                     else 0
-            !off = bank * 0x4000 + fromIntegral addr
+            -- Mask the bank by the cart's actual ROM-bank count so a
+            -- write of bank-hi bits beyond the cart's range wraps
+            -- around, matching real-hardware MBC1 (the bus only wires
+            -- as many bank-select lines as the cart ROM uses).
+            !off = (bank .&. mbc1BankMask c) * 0x4000 + fromIntegral addr
          in pure (romIndex (cartRom c) off)
     | addr <= 0x7FFF =
         let !bank = mbc1HighBank s
-            !off = bank * 0x4000 + fromIntegral (addr - 0x4000)
+            !off = (bank .&. mbc1BankMask c) * 0x4000 + fromIntegral (addr - 0x4000)
          in pure (romIndex (cartRom c) off)
     | addr >= 0xA000 && addr <= 0xBFFF =
         if not (m1RamEnabled s)
@@ -503,9 +541,12 @@ mbc1Write s addr v c
     | addr <= 0x1FFF =
         writeIORef (cartImpl c) (Mbc1Impl s{m1RamEnabled = (v .&. 0x0F) == 0x0A})
     | addr <= 0x3FFF =
-        let !low = v .&. 0x1F
-            !adj = if low == 0 then 1 else low
-         in writeIORef (cartImpl c) (Mbc1Impl s{m1RomBankLow = adj})
+        -- Store the raw 5-bit value. The bank-0-alias adjustment
+        -- (writes of 0x00, 0x20, 0x40, 0x60 select banks 1, 0x21,
+        -- 0x41, 0x61 respectively) is applied at read time inside
+        -- 'mbc1HighBank', because MBC1M wires the alias check
+        -- differently from standard MBC1.
+        writeIORef (cartImpl c) (Mbc1Impl s{m1RomBankLow = v .&. 0x1F})
     | addr <= 0x5FFF =
         writeIORef (cartImpl c) (Mbc1Impl s{m1BankHi = v .&. 0x03})
     | addr <= 0x7FFF =
@@ -520,13 +561,37 @@ mbc1Write s addr v c
     | otherwise = pure ()
 
 mbc1HighBank :: Mbc1State -> Int
-mbc1HighBank s =
-    let combined = (m1BankHi s `shiftL` 5) .|. m1RomBankLow s
-        adjusted =
-            if (combined .&. 0x1F) == 0
-                then combined .|. 0x01
-                else combined
-     in fromIntegral adjusted
+mbc1HighBank s
+    | m1Multicart s =
+        -- MBC1M wiring: only 4 bits of bank-low are wired to the ROM,
+        -- so the high nibble of bank-low does NOT contribute to the
+        -- bank index; it only feeds the bank-0-alias check. Per
+        -- SameBoy 'mbc.c' lines 65-77: combined =
+        -- @(bank_low & 0xF) | (bank_high << 4)@ and we increment by 1
+        -- when the FULL 5-bit @bank_low@ is zero (covering writes of
+        -- 0x00 only — 0x10 keeps the high bit so the alias does not
+        -- trigger).
+        let !low4 = fromIntegral (m1RomBankLow s) .&. 0x0F :: Int
+            !aliasZero = (m1RomBankLow s .&. 0x1F) == 0
+            !combined = (fromIntegral (m1BankHi s) `shiftL` 4) .|. low4
+         in if aliasZero then combined + 1 else combined
+    | otherwise =
+        let !combined = (m1BankHi s `shiftL` 5) .|. m1RomBankLow s
+            !adjusted =
+                if (combined .&. 0x1F) == 0
+                    then combined .|. 0x01
+                    else combined
+         in fromIntegral adjusted
+
+{- | Mask used to wrap an MBC1 ROM-bank index to the cart's actual
+size. Real-hardware MBC1 only wires as many bank-select lines as the
+cart needs, so writes beyond the cart's bank range wrap mod the bank
+count. Mooneye 'emulator-only/mbc1/rom_*Mb' tests check this.
+-}
+mbc1BankMask :: Cartridge -> Int
+mbc1BankMask c =
+    let !banks = max 1 (BS.length (cartRom c) `div` 0x4000)
+     in banks - 1
 
 romIndex :: ByteString -> Int -> Word8
 romIndex rom i =
@@ -540,7 +605,8 @@ mbc2Read :: Mbc2State -> Word16 -> Cartridge -> IO Word8
 mbc2Read s addr c
     | addr <= 0x3FFF = pure (romIndex (cartRom c) (fromIntegral addr))
     | addr <= 0x7FFF =
-        let !off = fromIntegral (m2RomBank s) * 0x4000 + fromIntegral (addr - 0x4000)
+        let !bank = fromIntegral (m2RomBank s) :: Int
+            !off = (bank .&. mbc1BankMask c) * 0x4000 + fromIntegral (addr - 0x4000)
          in pure (romIndex (cartRom c) off)
     | addr >= 0xA000 && addr <= 0xBFFF =
         if not (m2RamEnabled s)
@@ -580,7 +646,8 @@ mbc3Read :: Mbc3State -> Word16 -> Cartridge -> IO Word8
 mbc3Read s addr c
     | addr <= 0x3FFF = pure (romIndex (cartRom c) (fromIntegral addr))
     | addr <= 0x7FFF =
-        let !off = fromIntegral (m3RomBank s) * 0x4000 + fromIntegral (addr - 0x4000)
+        let !bank = fromIntegral (m3RomBank s) :: Int
+            !off = (bank .&. mbc1BankMask c) * 0x4000 + fromIntegral (addr - 0x4000)
          in pure (romIndex (cartRom c) off)
     | addr >= 0xA000 && addr <= 0xBFFF =
         if not (m3RamRtcEnabled s)
@@ -825,7 +892,11 @@ mbc5Read s addr c
     | addr <= 0x3FFF = pure (romIndex (cartRom c) (fromIntegral addr))
     | addr <= 0x7FFF =
         let !bank = mbc5HighBank s
-            !off = bank * 0x4000 + fromIntegral (addr - 0x4000)
+            -- Real-hardware MBC5 only wires as many bank-select lines
+            -- as the cart needs; out-of-range bank indices wrap mod
+            -- the cart's bank count (matches SameBoy's @& (rom_size -
+            -- 1)@). Mooneye 'emulator-only/mbc5/rom_*Mb' verify this.
+            !off = (bank .&. mbc1BankMask c) * 0x4000 + fromIntegral (addr - 0x4000)
          in pure (romIndex (cartRom c) off)
     | addr >= 0xA000 && addr <= 0xBFFF =
         if not (m5RamEnabled s)
@@ -867,7 +938,8 @@ huc1Read :: HuC1State -> Word16 -> Cartridge -> IO Word8
 huc1Read s addr c
     | addr <= 0x3FFF = pure (romIndex (cartRom c) (fromIntegral addr))
     | addr <= 0x7FFF =
-        let !off = fromIntegral (hcRomBank s) * 0x4000 + fromIntegral (addr - 0x4000)
+        let !bank = fromIntegral (hcRomBank s) :: Int
+            !off = (bank .&. mbc1BankMask c) * 0x4000 + fromIntegral (addr - 0x4000)
          in pure (romIndex (cartRom c) off)
     | addr >= 0xA000 && addr <= 0xBFFF =
         if not (hcRamEnabled s)

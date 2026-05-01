@@ -26,7 +26,7 @@ module Ocelot.Joypad (
 ) where
 
 import Control.Monad (unless, when)
-import Data.Bits (shiftL, testBit, (.&.), (.|.))
+import Data.Bits (complement, shiftL, testBit, (.&.), (.|.))
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -66,25 +66,27 @@ initial = do
 {- | Set a button as pressed ('True') or released ('False'). Called by the
 frontend on every key state change.
 
-If the press transitions a selected-row button bit from 1 to 0 (the SM83's
-joypad-interrupt condition), @jpIrqPending@ is latched so the next bus
-advance raises @IF@ bit 4.
+The joypad interrupt fires on a 1->0 transition of any bit in the
+low nibble of @P1@. We compute the low nibble before and after the
+press to check for an actual falling edge, which correctly handles
+the case where both rows are selected and the button being pressed
+shares a column with an already-pressed button in the other row (the
+two rows AND together, so the bit was already low and pressing the
+new button does not constitute a new falling edge).
 -}
 setButton :: Button -> Bool -> JoypadState -> IO ()
 setButton b !pressed jp = do
     btns <- readIORef (jpButtons jp)
     let !already = Set.member b btns
     if pressed
-        then do
-            modifyIORef' (jpButtons jp) (Set.insert b)
-            -- Falling edge candidate: button newly pressed AND its row is selected.
-            unless already $ do
-                sel <- readIORef (jpRowSelect jp)
-                let action = b == ButtonA || b == ButtonB || b == ButtonSelect || b == ButtonStart
-                    actionRow = not (testBit sel 5)
-                    directionRow = not (testBit sel 4)
-                    edge = (action && actionRow) || (not action && directionRow)
-                when edge (writeIORef (jpIrqPending jp) True)
+        then unless already $ do
+            sel <- readIORef (jpRowSelect jp)
+            let !oldLow = lowNibble sel btns
+                !newBtns = Set.insert b btns
+                !newLow = lowNibble sel newBtns
+            writeIORef (jpButtons jp) newBtns
+            when ((oldLow .&. complement newLow) /= 0) $
+                writeIORef (jpIrqPending jp) True
         else modifyIORef' (jpButtons jp) (Set.delete b)
 
 {- | Read and clear the pending-IRQ latch. Called by 'Ocelot.Bus.advance' so
@@ -133,6 +135,35 @@ readP1 :: JoypadState -> IO Word8
 readP1 jp = do
     sel <- readIORef (jpRowSelect jp)
     btns <- readIORef (jpButtons jp)
+    pure (0xC0 .|. (sel .&. 0x30) .|. lowNibble sel btns)
+
+{- | Write the @P1@ register. Only bits 4-5 are writable; the rest are
+ignored on real hardware.
+
+A row-select change can drive a previously-unseen pressed button bit
+from 1 to 0 (e.g. the game switches from the action row to the
+direction row while @Up@ is held). That counts as a joypad-IRQ
+falling edge, so this helper compares the low-nibble before and after
+the change and latches @jpIrqPending@ on any 1->0 transition (matches
+SameBoy 'GB_update_joyp' line 136 / 152).
+-}
+writeP1 :: Word8 -> JoypadState -> IO ()
+writeP1 v jp = do
+    btns <- readIORef (jpButtons jp)
+    oldSel <- readIORef (jpRowSelect jp)
+    let !oldLow = lowNibble oldSel btns
+        !newSel = v .&. 0x30
+        !newLow = lowNibble newSel btns
+    writeIORef (jpRowSelect jp) newSel
+    when ((oldLow .&. complement newLow) /= 0) $
+        writeIORef (jpIrqPending jp) True
+
+{- | Compute the active-low bottom nibble of @P1@ for a given row-select
+byte and pressed-button set. Lifted out of 'readP1' so 'writeP1' can
+reuse it for edge detection without duplicating the row-select logic.
+-}
+lowNibble :: Word8 -> Set Button -> Word8
+lowNibble sel btns =
     let actionRow = not (testBit sel 5)
         directionRow = not (testBit sel 4)
         bit p mask = if Set.member p btns then 0 else mask
@@ -146,15 +177,8 @@ readP1 jp = do
                 .|. bit ButtonLeft 0x02
                 .|. bit ButtonUp 0x04
                 .|. bit ButtonDown 0x08
-        lowNibble
-            | actionRow && directionRow = actionBits .&. directionBits
-            | actionRow = actionBits
-            | directionRow = directionBits
-            | otherwise = 0x0F
-    pure (0xC0 .|. (sel .&. 0x30) .|. lowNibble)
-
-{- | Write the @P1@ register. Only bits 4-5 are writable; the rest are
-ignored on real hardware.
--}
-writeP1 :: Word8 -> JoypadState -> IO ()
-writeP1 v jp = writeIORef (jpRowSelect jp) (v .&. 0x30)
+     in case (actionRow, directionRow) of
+            (True, True) -> actionBits .&. directionBits
+            (True, False) -> actionBits
+            (False, True) -> directionBits
+            (False, False) -> 0x0F

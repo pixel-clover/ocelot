@@ -95,7 +95,6 @@ spec = do
             -- holds its written value. So the readback is 0x7F.
             (v .&. 0x80) `shouldBe` 0x00 -- start bit cleared
             (v .&. 0x01) `shouldBe` 0x01 -- internal-clock bit preserved
-
         it "writes to SC without bit 7 set do not capture" $ do
             b <- emptyBus
             write8 0xFF01 0x42 b
@@ -136,14 +135,46 @@ spec = do
             advance 3 b
             partway <- read8 0xFE00 b
             partway `shouldBe` 0xFF -- locked, but more importantly: not yet copied
-            -- 160 M-cycles of subsequent instruction time complete the copy.
-            advance 160 b
+            -- 160 M-cycles of subsequent instruction time complete the
+            -- copy, plus 1 deferred-clear cycle so 'busOamDmaActive'
+            -- transitions from True to False (matches mooneye
+            -- 'oam_dma_timing': a CPU read scheduled at the same
+            -- M-cycle as the final byte still sees the lockout).
+            advance 161 b
             v0 <- read8 0xFE00 b
             v1 <- read8 0xFE01 b
             v9F <- read8 0xFE9F b
             v0 `shouldBe` 0x00
             v1 `shouldBe` 0x01
             v9F `shouldBe` 0x9F
+
+        it "DMG: source 0xFExx mirrors WRAM via 'src & ~0x2000'" $ do
+            -- 'emptyBus' synthesises a no-MBC ROM with the DMG-only
+            -- header, so 'fromCartridge' picks 'HostDmg'. On DMG, an OAM
+            -- DMA from source 0xFE00..0xFFFF reads through the echo
+            -- mirror at 'src & ~0x2000' (here 0xDE00..0xDFFF), matching
+            -- SameBoy 'GB_dma_run' line 1894. We seed the upper-WRAM
+            -- byte that 0xFE00 should mirror to (0xDE00 -> WRAM offset
+            -- 0x1E00) and verify byte 0 of OAM lands on it.
+            b <- emptyBus
+            write8 0xDE00 0x55 b -- = WRAM[0x1E00] via the upper bank
+            write8 0xFF46 0xFE b -- DMA source = 0xFE00
+            advance 1 b -- consume the 1-cycle startup delay
+            advance 161 b -- finish the copy + 1 deferred-clear cycle
+            v0 <- read8 0xFE00 b
+            v0 `shouldBe` 0x55
+
+        it "DMG: source 0xFFxx mirrors WRAM via 'src & ~0x2000'" $ do
+            -- Source 0xFF00..0xFFFF reads from 0xDF00..0xDFFF on DMG.
+            -- Without the fix, this region returned 0xFF for every byte
+            -- regardless of WRAM contents.
+            b <- emptyBus
+            write8 0xDF42 0xCD b -- = upper WRAM byte that source 0xFF42 mirrors to
+            write8 0xFF46 0xFF b -- DMA source = 0xFF00
+            advance 1 b
+            advance 161 b -- 160 copies + 1 deferred-clear cycle
+            v42 <- read8 0xFE42 b
+            v42 `shouldBe` 0xCD
 
         it "blocks main-bus reads but lets I/O regs and HRAM through" $ do
             b <- emptyBus

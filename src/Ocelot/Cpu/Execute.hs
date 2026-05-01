@@ -33,7 +33,7 @@ module Ocelot.Cpu.Execute (
     interruptVector,
 ) where
 
-import Control.Monad (when)
+import Control.Monad (forM_, when)
 import Data.Bits (clearBit, complement, setBit, shiftL, shiftR, testBit, (.&.), (.|.))
 import Data.IORef (readIORef, writeIORef)
 import Data.Int (Int8)
@@ -74,7 +74,9 @@ import Ocelot.Cpu.State (CpuState (..))
 import Ocelot.Machine (
     Machine (..),
     advanceBus,
-    advanceBusInline,
+    cycleNoAccess,
+    cycleRead,
+    cycleWrite,
     getCpu,
     getCpuRegs,
     mapCpu,
@@ -125,26 +127,72 @@ doInstruction :: Machine -> IO ()
 doInstruction m = do
     cpu0 <- getCpu m
     let pc = regPC (cpuRegs cpu0)
-    b0 <- readMem pc m
-    b1 <- readMem (pc + 1) m
-    b2 <- readMem (pc + 2) m
-    let Decoded instr len = decode b0 b1 b2
+    -- Reset the inline-advance counter BEFORE prefetch so that the
+    -- M1/M2/M3 fetch ticks count toward the instruction's total
+    -- inline advance, mirroring SameBoy's per-cycle 'cycle_read'
+    -- model where the opcode and immediate fetches each cost
+    -- 1 M-cycle of bus tick.
+    writeIORef (machineInternalAdvance m) 0
+    b0 <- cycleRead pc m
+    -- Only fetch the immediate bytes the instruction actually
+    -- consumes. The previous unconditional 3-byte fetch ticked extra
+    -- cycles for short instructions and could touch memory-mapped
+    -- registers at @pc+1@/@pc+2@.
+    let len = opcodeLength b0
+    b1 <- if len >= 2 then cycleRead (pc + 1) m else pure 0
+    b2 <- if len >= 3 then cycleRead (pc + 2) m else pure 0
+    let Decoded instr _ = decode b0 b1 b2
     -- HALT-bug fetch: PC stays at the byte we just read, so the *next*
     -- iteration sees the same opcode again. Consume the latch here.
     if cpuHaltBug cpu0
         then mapCpu (\c -> c{cpuHaltBug = False}) m
         else mapCpuRegs (\r -> r{regPC = pc + fromIntegral len}) m
-    -- Reset the inline-advance counter; instructions that interleave
-    -- bus ticks with memory writes (CALL, PUSH, RST, ...) call
-    -- 'advanceBusInline' which both ticks the bus and bumps this
-    -- counter, so the dispatcher subtracts those cycles from the
-    -- final advance below.
-    writeIORef (machineInternalAdvance m) 0
     mc <- execute instr m
     mapCpu (\c -> c{cpuCycles = cpuCycles c + fromIntegral mc}) m
     consumed <- readIORef (machineInternalAdvance m)
     let remaining = mc - consumed
     when (remaining > 0) (advanceBus remaining m)
+
+{- | Length in bytes of the instruction starting with opcode byte @b0@,
+matching 'Ocelot.Cpu.Decode.decode'. Used by 'doInstruction' to avoid
+reading immediate bytes the instruction does not consume.
+-}
+opcodeLength :: Word8 -> Int
+opcodeLength b = case b of
+    -- 3-byte (16-bit immediate or absolute address)
+    0x01 -> 3
+    0x08 -> 3
+    0x11 -> 3
+    0x21 -> 3
+    0x31 -> 3
+    0xC2 -> 3
+    0xC3 -> 3
+    0xC4 -> 3
+    0xCA -> 3
+    0xCC -> 3
+    0xCD -> 3
+    0xD2 -> 3
+    0xD4 -> 3
+    0xDA -> 3
+    0xDC -> 3
+    0xEA -> 3
+    0xFA -> 3
+    -- 2-byte (8-bit immediate, signed offset, or CB prefix)
+    0x10 -> 2
+    0x18 -> 2
+    0x20 -> 2
+    0x28 -> 2
+    0x30 -> 2
+    0x38 -> 2
+    0xCB -> 2
+    0xE0 -> 2
+    0xE8 -> 2
+    0xF0 -> 2
+    0xF8 -> 2
+    op
+        | (op .&. 0xC7) == 0x06 -> 2 -- LD r, d8
+        | (op .&. 0xC7) == 0xC6 -> 2 -- ALU A, d8
+        | otherwise -> 1
 
 pendingInterrupt :: Machine -> IO (Maybe Int)
 pendingInterrupt m = do
@@ -164,16 +212,52 @@ lowestSetBit = go 0
         | testBit w i = i
         | otherwise = go (i + 1) w
 
+{- | Service a pending interrupt: 5 M-cycles, modeled cycle-accurately.
+
+The sequence (per SameBoy 'sm83_cpu.c' interrupt service): 2 internal
+cycles (a wasted opcode read + an OAM-bug-trigger cycle in real
+hardware), then 1 internal cycle, then write PC hi at SP-1, then
+write PC lo at SP-2. Each of the writes ticks the bus by 1 M-cycle
+inline.
+
+The actual interrupt vector is sampled AFTER the writes. This is the
+@ie_push@ behavior (mooneye 'interrupts/ie_push'): when
+@SP - 2 == 0xFF0F@ the M5 write lands on the IF register itself,
+which can clear the bit that triggered the dispatch in the first
+place. SameBoy's logic ('sm83_cpu.c' lines 1671-1697):
+
+* In the special case, the queue is @IE & OLD_IF@ where OLD_IF is
+  the IF value sampled BEFORE the M5 write.
+* In the normal case, the queue is just the post-write IF value
+  (equivalent to OLD_IF since the write did not touch IF).
+* If the queue has any set bit, the lowest is the vector and that
+  bit is cleared from IF; otherwise PC jumps to @0x0000@.
+-}
 serviceInterrupt :: Int -> Machine -> IO ()
-serviceInterrupt n m = do
-    iflag <- readMem 0xFF0F m
-    writeMem 0xFF0F (clearBit iflag n) m
-    mapCpu (\c -> c{cpuIme = False, cpuHalted = False}) m
+serviceInterrupt _ m = do
+    -- Reset the inline-advance counter so cycleRead/cycleWrite ticks
+    -- here are tracked the same way as inside doInstruction.
+    writeIORef (machineInternalAdvance m) 0
+    cycleNoAccess m -- M1: wasted opcode read
+    cycleNoAccess m -- M2: OAM-bug-trigger cycle
     pc <- regPC <$> getCpuRegs m
-    pushWord pc m
-    mapCpuRegs (\r -> r{regPC = interruptVector n}) m
-    mapCpu (\c -> c{cpuCycles = cpuCycles c + 5}) m
-    advanceBus 5 m
+    sp <- regSP <$> getCpuRegs m
+    let hi = fromIntegral (pc `shiftR` 8) :: Word8
+        lo = fromIntegral (pc .&. 0xFF) :: Word8
+    cycleNoAccess m -- M3: internal/SP--
+    cycleWrite (sp - 1) hi m -- M4
+    cycleWrite (sp - 2) lo m -- M5 (may land on IF if SP - 2 == 0xFF0F)
+    -- Re-sample IF and IE AFTER the M5 write. If M5 went to IF, the
+    -- post-write value determines which bit is still pending. The
+    -- vector is the lowest-set IF & IE bit; if none, PC := 0x0000.
+    iflag <- readMem 0xFF0F m
+    ie <- readMem 0xFFFF m
+    let active = iflag .&. ie .&. 0x1F
+        servicedBit = if active == 0 then Nothing else Just (lowestSetBit active)
+        target = maybe 0x0000 interruptVector servicedBit
+    forM_ servicedBit (\b -> writeMem 0xFF0F (clearBit iflag b) m)
+    mapCpuRegs (\r -> r{regSP = sp - 2, regPC = target}) m
+    mapCpu (\c -> c{cpuIme = False, cpuHalted = False, cpuCycles = cpuCycles c + 5}) m
 
 runUntilHalt :: Int -> Machine -> IO Int
 runUntilHalt cap = go 0
@@ -222,119 +306,177 @@ execute instr m = case instr of
     LdRD8 dst v -> setReg8 dst v m >> pure (if dst == RIndHL then 3 else 2)
     LdRrD16 rr v -> setReg16 rr v m >> pure 3
     LdABC -> do
-        a <- readMem <$> getReg16 RBC m <*> pure m
-        a' <- a
-        setReg8 RA a' m
+        addr <- getReg16 RBC m
+        v <- cycleRead addr m
+        setReg8 RA v m
         pure 2
     LdADE -> do
         addr <- getReg16 RDE m
-        v <- readMem addr m
+        v <- cycleRead addr m
         setReg8 RA v m
         pure 2
     LdBCA -> do
         addr <- getReg16 RBC m
         a <- getReg8 RA m
-        writeMem addr a m
+        cycleWrite addr a m
         pure 2
     LdDEA -> do
         addr <- getReg16 RDE m
         a <- getReg8 RA m
-        writeMem addr a m
+        cycleWrite addr a m
         pure 2
     LdAHLI -> do
         hl <- getReg16 RHL m
-        v <- readMem hl m
+        v <- cycleRead hl m
         setReg8 RA v m
         setReg16 RHL (hl + 1) m
         pure 2
     LdAHLD -> do
         hl <- getReg16 RHL m
-        v <- readMem hl m
+        v <- cycleRead hl m
         setReg8 RA v m
         setReg16 RHL (hl - 1) m
         pure 2
     LdHLIA -> do
         hl <- getReg16 RHL m
         a <- getReg8 RA m
-        writeMem hl a m
+        cycleWrite hl a m
         setReg16 RHL (hl + 1) m
         pure 2
     LdHLDA -> do
         hl <- getReg16 RHL m
         a <- getReg8 RA m
-        writeMem hl a m
+        cycleWrite hl a m
         setReg16 RHL (hl - 1) m
         pure 2
     IncR r -> applyInc r m
     DecR r -> applyDec r m
+    -- INC rr / DEC rr are 2 M-cycles: M1 fetch + 1 internal cycle.
     IncRr rr -> do
         v <- getReg16 rr m
         setReg16 rr (v + 1) m
+        cycleNoAccess m
         pure 2
     DecRr rr -> do
         v <- getReg16 rr m
         setReg16 rr (v - 1) m
+        cycleNoAccess m
         pure 2
     AluR op r -> do
         v <- getReg8 r m
         applyAlu op v m
         pure (if r == RIndHL then 2 else 1)
     AluD8 op v -> applyAlu op v m >> pure 2
-    Jr e -> jumpRelative e m >> pure 3
+    -- JR e (3 cycles): M1 fetch, M2 fetch immediate (prefetch), M3
+    -- internal jump cycle (PC commit).
+    Jr e -> do
+        jumpRelative e m
+        cycleNoAccess m
+        pure 3
     JrCC c e -> do
         b <- testCond c m
-        if b then jumpRelative e m >> pure 3 else pure 2
+        if b
+            then do
+                jumpRelative e m
+                cycleNoAccess m -- M3 jump cycle (taken)
+                pure 3
+            else pure 2 -- not taken: M1+M2 prefetch only
     JpNN nn -> do
-        -- JP nn: M2/M3 fetch the immediates, M4 is the internal jump
-        -- cycle (PC commit). Advancing the bus inline ensures the PC
-        -- write becomes observable after the full 4 M-cycles, not at
-        -- cycle 0 of the instruction.
-        advanceBusInline 4 m
+        -- JP nn (4 cycles): prefetch covers M1..M3, M4 is the internal
+        -- jump cycle.
+        cycleNoAccess m
         mapCpuRegs (\r -> r{regPC = nn}) m
         pure 4
     CallNN nn -> do
         pc <- regPC <$> getCpuRegs m
-        pushWord pc m
-        mapCpuRegs (\r -> r{regPC = nn}) m
+        sp <- regSP <$> getCpuRegs m
+        -- CALL nn (6 cycles): prefetch covers M1..M3. M4 internal +
+        -- SP--, M5 write hi, M6 write lo. Then PC := nn.
+        let hi = fromIntegral (pc `shiftR` 8) :: Word8
+            lo = fromIntegral (pc .&. 0xFF) :: Word8
+        cycleNoAccess m -- M4
+        cycleWrite (sp - 1) hi m -- M5
+        cycleWrite (sp - 2) lo m -- M6
+        mapCpuRegs (\r -> r{regSP = sp - 2, regPC = nn}) m
         pure 6
     Ret -> do
-        target <- popWordTimed 2 m -- reads at M2+M3 of the 4-cycle RET
-        advanceBusInline 1 m -- M4: internal jump cycle
-        mapCpuRegs (\r -> r{regPC = target}) m
+        -- RET (4 cycles): prefetch covers M1. M2 read low, M3 read
+        -- high, M4 internal jump.
+        sp <- regSP <$> getCpuRegs m
+        lo <- cycleRead sp m
+        hi <- cycleRead (sp + 1) m
+        cycleNoAccess m
+        let target = (fromIntegral hi `shiftL` 8) .|. fromIntegral lo
+        mapCpuRegs (\r -> r{regSP = sp + 2, regPC = target}) m
         pure 4
     PushRr s -> do
+        -- PUSH rr (4 cycles): prefetch covers M1. M2 internal/SP--,
+        -- M3 write hi, M4 write lo.
         v <- getReg16Stack s m
-        pushWordTimed 3 v m -- writes at M3+M4 of the 4-M-cycle PUSH
+        sp <- regSP <$> getCpuRegs m
+        let hi = fromIntegral (v `shiftR` 8) :: Word8
+            lo = fromIntegral (v .&. 0xFF) :: Word8
+        cycleNoAccess m
+        cycleWrite (sp - 1) hi m
+        cycleWrite (sp - 2) lo m
+        mapCpuRegs (\r -> r{regSP = sp - 2}) m
         pure 4
     PopRr s -> do
-        v <- popWordTimed 2 m -- reads at M2+M3 of the 3-cycle POP
+        -- POP rr (3 cycles): prefetch covers M1. M2 read low, M3 read high.
+        sp <- regSP <$> getCpuRegs m
+        lo <- cycleRead sp m
+        hi <- cycleRead (sp + 1) m
+        let v = (fromIntegral hi `shiftL` 8) .|. fromIntegral lo
+        mapCpuRegs (\r -> r{regSP = sp + 2}) m
         setReg16Stack s v m
         pure 3
     JpCC c nn -> do
         b <- testCond c m
         if b
-            then mapCpuRegs (\r -> r{regPC = nn}) m >> pure 4
-            else pure 3
+            then do
+                cycleNoAccess m -- M4 internal jump
+                mapCpuRegs (\r -> r{regPC = nn}) m
+                pure 4
+            else pure 3 -- not taken: M1..M3 prefetch only
     CallCC c nn -> do
         b <- testCond c m
         if b
             then do
                 pc <- regPC <$> getCpuRegs m
-                pushWord pc m
-                mapCpuRegs (\r -> r{regPC = nn}) m
+                sp <- regSP <$> getCpuRegs m
+                let hi = fromIntegral (pc `shiftR` 8) :: Word8
+                    lo = fromIntegral (pc .&. 0xFF) :: Word8
+                cycleNoAccess m
+                cycleWrite (sp - 1) hi m
+                cycleWrite (sp - 2) lo m
+                mapCpuRegs (\r -> r{regSP = sp - 2, regPC = nn}) m
                 pure 6
             else pure 3
     RetCC c -> do
         b <- testCond c m
         if b
             then do
-                target <- popWord m
-                mapCpuRegs (\r -> r{regPC = target}) m
+                -- RET cc taken (5 cycles): prefetch M1. M2 cond check
+                -- internal, M3 read low, M4 read high, M5 internal.
+                cycleNoAccess m
+                sp <- regSP <$> getCpuRegs m
+                lo <- cycleRead sp m
+                hi <- cycleRead (sp + 1) m
+                cycleNoAccess m
+                let target = (fromIntegral hi `shiftL` 8) .|. fromIntegral lo
+                mapCpuRegs (\r -> r{regSP = sp + 2, regPC = target}) m
                 pure 5
-            else pure 2
+            else do
+                cycleNoAccess m -- M2 cond check
+                pure 2
     Reti -> do
-        target <- popWord m
-        mapCpuRegs (\r -> r{regPC = target}) m
+        -- RETI: like RET, plus IME := True at the end.
+        sp <- regSP <$> getCpuRegs m
+        lo <- cycleRead sp m
+        hi <- cycleRead (sp + 1) m
+        cycleNoAccess m
+        let target = (fromIntegral hi `shiftL` 8) .|. fromIntegral lo
+        mapCpuRegs (\r -> r{regSP = sp + 2, regPC = target}) m
         mapCpu (\c -> c{cpuIme = True}) m
         pure 4
     JpHL -> do
@@ -342,66 +484,81 @@ execute instr m = case instr of
         mapCpuRegs (\r -> r{regPC = hl}) m
         pure 1
     Rst target -> do
+        -- RST n (4 cycles): prefetch M1. M2 internal, M3/M4 push PC.
         pc <- regPC <$> getCpuRegs m
-        pushWordTimed 3 pc m -- writes at M3+M4 of the 4-M-cycle RST
-        mapCpuRegs (\r -> r{regPC = fromIntegral target}) m
+        sp <- regSP <$> getCpuRegs m
+        let hi = fromIntegral (pc `shiftR` 8) :: Word8
+            lo = fromIntegral (pc .&. 0xFF) :: Word8
+        cycleNoAccess m
+        cycleWrite (sp - 1) hi m
+        cycleWrite (sp - 2) lo m
+        mapCpuRegs (\r -> r{regSP = sp - 2, regPC = fromIntegral target}) m
         pure 4
     AddHlRr rr -> do
+        -- ADD HL, rr (2 cycles): prefetch M1, +1 internal cycle.
         hl <- getReg16 RHL m
         v <- getReg16 rr m
         zIn <- (`testBit` 7) . regF <$> getCpuRegs m
         let (r, flags) = Alu.add16 hl v zIn
         setReg16 RHL r m
         setFlagsByte (flagsToByte flags) m
+        cycleNoAccess m
         pure 2
     AddSpE e -> do
+        -- ADD SP, e (4 cycles): prefetch M1+M2, +2 internal cycles.
         sp <- regSP <$> getCpuRegs m
         let (r, flags) = Alu.addSP sp e
         mapCpuRegs (\rs -> rs{regSP = r}) m
         setFlagsByte (flagsToByte flags) m
+        cycleNoAccess m
+        cycleNoAccess m
         pure 4
     LdHlSpE e -> do
+        -- LD HL, SP+e (3 cycles): prefetch M1+M2, +1 internal cycle.
         sp <- regSP <$> getCpuRegs m
         let (r, flags) = Alu.addSP sp e
         setReg16 RHL r m
         setFlagsByte (flagsToByte flags) m
+        cycleNoAccess m
         pure 3
     LdSpHl -> do
+        -- LD SP, HL (2 cycles): prefetch M1, +1 internal cycle.
         hl <- getReg16 RHL m
         mapCpuRegs (\r -> r{regSP = hl}) m
+        cycleNoAccess m
         pure 2
     LdhNA n -> do
         a <- getReg8 RA m
-        writeMem (0xFF00 + fromIntegral n) a m
+        cycleWrite (0xFF00 + fromIntegral n) a m
         pure 3
     LdhAN n -> do
-        v <- readMem (0xFF00 + fromIntegral n) m
+        v <- cycleRead (0xFF00 + fromIntegral n) m
         setReg8 RA v m
         pure 3
     LdCA -> do
         cv <- regC <$> getCpuRegs m
         a <- getReg8 RA m
-        writeMem (0xFF00 + fromIntegral cv) a m
+        cycleWrite (0xFF00 + fromIntegral cv) a m
         pure 2
     LdAC -> do
         cv <- regC <$> getCpuRegs m
-        v <- readMem (0xFF00 + fromIntegral cv) m
+        v <- cycleRead (0xFF00 + fromIntegral cv) m
         setReg8 RA v m
         pure 2
     LdNNA nn -> do
         a <- getReg8 RA m
-        writeMem nn a m
+        cycleWrite nn a m
         pure 4
     LdANN nn -> do
-        v <- readMem nn m
+        v <- cycleRead nn m
         setReg8 RA v m
         pure 4
     LdNNSp nn -> do
         sp <- regSP <$> getCpuRegs m
         let lo = fromIntegral (sp .&. 0xFF) :: Word8
             hi = fromIntegral (sp `shiftR` 8) :: Word8
-        writeMem nn lo m
-        writeMem (nn + 1) hi m
+        cycleWrite nn lo m
+        cycleWrite (nn + 1) hi m
         pure 5
     Rlca -> aRotate Alu.rlc8 m
     Rrca -> aRotate Alu.rrc8 m
@@ -437,7 +594,17 @@ execute instr m = case instr of
         setFlagsByte (flagsToByte (Alu.Flags zF False False (not cF))) m
         pure 1
     Di -> mapCpu (\c -> c{cpuIme = False, cpuEiDelay = False}) m >> pure 1
-    Ei -> mapCpu (\c -> c{cpuEiDelay = True}) m >> pure 1
+    Ei -> do
+        -- EI is a no-op if IME is already enabled (or if a previous EI
+        -- has already armed the toggle). Only schedule the delayed
+        -- IME-set when both flags are clear; otherwise the next step's
+        -- IRQ-sampling skip would inappropriately delay an already-
+        -- pending interrupt by an extra instruction. Matches SameBoy
+        -- 'sm83_cpu.c' line 1352.
+        cpu <- getCpu m
+        when (not (cpuIme cpu) && not (cpuEiDelay cpu)) $
+            mapCpu (\c -> c{cpuEiDelay = True}) m
+        pure 1
     Stop -> do
         -- On a CGB cart with KEY1 bit 0 set, STOP triggers the
         -- single/double-speed switch instead of halting; otherwise it
@@ -570,66 +737,6 @@ testCond c m = do
         CondNC -> not (testBit f 4)
         CondC -> testBit f 4
 
-pushWord :: Word16 -> Machine -> IO ()
-pushWord v m = do
-    sp <- regSP <$> getCpuRegs m
-    let hi = fromIntegral (v `shiftR` 8) :: Word8
-        lo = fromIntegral (v .&. 0xFF) :: Word8
-        sp1 = sp - 1
-        sp2 = sp1 - 1
-    writeMem sp1 hi m
-    writeMem sp2 lo m
-    mapCpuRegs (\r -> r{regSP = sp2}) m
-
-{- | Stack push with bus-cycle-accurate write timing. Caller passes the
-number of M-cycles that should have already elapsed before the
-high-byte write (e.g. 3 for @PUSH@ / @RST@ which write at M3+M4 of
-their 4-cycle window once M1 fetch is included, 5 for @CALL@ which
-writes at M5+M6 of 6). This helper ticks @pre@ inline cycles, writes
-the high byte, ticks one more cycle, then writes the low byte. Total
-inline advance is @pre + 1@, which 'doInstruction' subtracts from the
-instruction's reported cycle count via 'machineInternalAdvance'.
--}
-pushWordTimed :: Int -> Word16 -> Machine -> IO ()
-pushWordTimed pre v m = do
-    sp <- regSP <$> getCpuRegs m
-    let hi = fromIntegral (v `shiftR` 8) :: Word8
-        lo = fromIntegral (v .&. 0xFF) :: Word8
-        sp1 = sp - 1
-        sp2 = sp1 - 1
-    advanceBusInline pre m
-    writeMem sp1 hi m
-    advanceBusInline 1 m
-    writeMem sp2 lo m
-    mapCpuRegs (\r -> r{regSP = sp2}) m
-
-popWord :: Machine -> IO Word16
-popWord m = do
-    sp <- regSP <$> getCpuRegs m
-    lo <- readMem sp m
-    hi <- readMem (sp + 1) m
-    let v = (fromIntegral hi `shiftL` 8) .|. fromIntegral lo
-    mapCpuRegs (\r -> r{regSP = sp + 2}) m
-    pure v
-
-{- | Stack pop with bus-cycle-accurate read timing. Caller passes how
-many M-cycles should have elapsed before the low-byte read. For POP
-that is 2 (read at M2+M3 of 3); for RET it's 2 (read at M2+M3 of 4,
-with one trailing internal cycle); RETI / RET cc also share the
-2-pre offset. The helper ticks @pre@ inline cycles, reads the low
-byte, ticks one more cycle, reads the high byte.
--}
-popWordTimed :: Int -> Machine -> IO Word16
-popWordTimed pre m = do
-    sp <- regSP <$> getCpuRegs m
-    advanceBusInline pre m
-    lo <- readMem sp m
-    advanceBusInline 1 m
-    hi <- readMem (sp + 1) m
-    let v = (fromIntegral hi `shiftL` 8) .|. fromIntegral lo
-    mapCpuRegs (\r -> r{regSP = sp + 2}) m
-    pure v
-
 getReg8 :: Reg8 -> Machine -> IO Word8
 getReg8 r m = case r of
     RA -> regA <$> getCpuRegs m
@@ -639,9 +746,14 @@ getReg8 r m = case r of
     RE -> regE <$> getCpuRegs m
     RH -> regH <$> getCpuRegs m
     RL -> regL <$> getCpuRegs m
+    -- @(HL)@ access ticks 1 M-cycle inline (the access M-cycle of the
+    -- instruction containing this read), matching SameBoy's
+    -- 'cycle_read'. The bus state at the read is therefore the bus
+    -- state at the END of the corresponding M-cycle, which is what
+    -- mooneye PPU/timer alignment tests expect.
     RIndHL -> do
         hl <- getReg16 RHL m
-        readMem hl m
+        cycleRead hl m
 
 setReg8 :: Reg8 -> Word8 -> Machine -> IO ()
 setReg8 r v m = case r of
@@ -654,7 +766,7 @@ setReg8 r v m = case r of
     RL -> mapCpuRegs (\rs -> rs{regL = v}) m
     RIndHL -> do
         hl <- getReg16 RHL m
-        writeMem hl v m
+        cycleWrite hl v m
 
 getReg16 :: Reg16 -> Machine -> IO Word16
 getReg16 r m = case r of

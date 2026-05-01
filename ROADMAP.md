@@ -20,9 +20,11 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Master step loop driving CPU, PPU, APU, timer, and DMA from a one-instruction budget (`Bus.advance` ticks all subsystems after each CPU
   instruction)
 - [x] STOP instruction triggers CGB speed switch when KEY1 bit 0 is set; halts otherwise
-- [ ] HALT bug behavior with `IME = 0` and pending IF
+- [x] HALT bug behavior with `IME = 0` and pending IF (latched in `Cpu.Execute.execute Halt` and consumed by the next `doInstruction` so the byte after `HALT` decodes twice)
 - [x] Optional DMG/CGB boot ROM execution path: `ocelot play --boot-rom <path>` installs the boot ROM at `0x0000-0x00FF` (and `0x0200-0x08FF` on CGB)
   until the cartridge writes `0xFF50`. Without `--boot-rom`, falls back to the post-boot register state per platform.
+- [x] Boot-ROM-aware peripheral power-on state: when a boot ROM is supplied, LCDC/BGP/OBP*/NR52 start at hardware power-on values (LCD off, palettes 0,
+  APU off) rather than post-boot defaults, so the boot ROM observes the same registers a real DMG/CGB does at reset
 - [x] CGB double-speed mode (KEY1)
 
 ### Memory and Cartridge
@@ -37,21 +39,24 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Cartridge header parsing (title, CGB flag, MBC type, ROM/RAM size, checksum)
 - [x] No-MBC cartridges (32 KiB, optional 8 KiB RAM)
 - [x] MBC1 with mode select (multicart variant detection deferred)
-- [ ] MBC2 (built-in 512x4-bit RAM)
+- [x] MBC2 (built-in 512x4-bit RAM, bit-8-of-address dispatch between RAM enable and ROM bank select)
 - [x] MBC3 with RTC (POSIX-time backed live counter, halt, day-carry, latch sequence, RTC bank reads/writes)
 - [x] MBC5 with bank switching (rumble bit not yet observable)
 - [ ] MBC6, MBC7 (accelerometer, EEPROM)
-- [ ] HuC1, HuC3, MMM01, TAMA5
+- [x] HuC1 (RAM/IR mode select, 6-bit ROM bank, 2-bit RAM bank; IR transceiver itself is not modeled)
+- [ ] HuC3, MMM01, TAMA5
 - [x] Battery-backed save persistence: `.sav` load and store on emulator entry/exit, RAM plus VBA-M-compatible 48-byte RTC suffix when the cart has a
   timer
-- [ ] General-purpose HDMA blocking timing (currently instant; should hold the CPU for `length * 8` T-cycles)
+- [x] General-purpose HDMA blocking timing: peripherals advance by `length / 2` M-cycles in single-speed (`length`
+  in double-speed) during the copy, matching the 8 µs / 16 bytes Pan Docs spec; covered by the "advances
+  peripherals during the copy block" regression in `Ocelot.CgbSpec`
 
 ### Timer and Serial
 
 - [x] DIV register at 16384 Hz with reset-on-write
 - [x] TIMA/TMA/TAC with selectable input clock
 - [x] Timer falling-edge detector and TIMA reload window (writes to TIMA cancel reload, writes to TMA shift the loaded value, DIV/TAC writes that drop
-  the AND signal increment TIMA). Mooneye timer category: 11/13 passing.
+  the AND signal increment TIMA). Mooneye timer category: 13/13 passing.
 - [x] Serial transfer (SB/SC) with stub clock for blargg test ROM output capture (writes to SC with bit 7 set capture SB to a buffer)
 - [ ] Link cable peer mode (deferred; see Future Goals)
 
@@ -148,7 +153,7 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Mooneye prebuilt-ZIP fetcher (`make mooneye-roms`) downloads gekkio.fi's binaries to `test/testroms/mooneye/`
 - [x] Mooneye acceptance ROMs auto-discovered and wired as one test per ROM (failures surface as `pendingWith` entries, not red marks, so the suite
   stays green while accuracy gaps are visible)
-- [ ] mooneye acceptance category 100% run-to-pass coverage (current baseline: 36 of 75 acceptance ROMs pass; the entire `timer/` subcategory is
+- [ ] mooneye acceptance category 100% run-to-pass coverage (current baseline: 37 of 75 acceptance ROMs pass; the entire `timer/` subcategory is
   green)
 - [ ] mooneye emulator-only category run-to-pass coverage
 - [ ] mooneye CGB-specific category run-to-pass coverage
@@ -166,6 +171,10 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] CGB-only WRAM, VRAM, palette RAM, and HDMA paths
 - [x] DMG-on-CGB compatibility palettes (3-state PPU render mode: `RenderDmg` / `RenderCgbCompat` / `RenderCgbFull`; CGB host pre-loads CGB palette
   RAM with a grayscale auto palette so DMG carts route through the CGB pipeline). Title-hash table for famous-title color sets is a follow-up.
+- [x] DMG-on-CGB compatibility sprite priority: `RenderCgbCompat` sorts sprites by leftmost-X (matches the CGB boot ROM setting OPRI=1 for unmodified
+  DMG carts), instead of CGB OAM-order priority.
+- [x] Writable OPRI register (`0xFF6C`) for CGB carts that toggle sprite priority mid-game: bit 0 = 0 selects OAM-index priority, bit 0 = 1 selects
+  leftmost-X priority. Bits 1-7 read as 1. Seeded to 1 by `Bus.fromCartridgeOnHost` for DMG-on-CGB compat carts and snapshotted (v8).
 - [x] CGB double-speed switch (KEY1) timing for CPU-only subsystems (peripherals halved)
 - [ ] Validation: cgb-acid2 golden hash
 - [ ] Validation: mooneye CGB-specific acceptance tests
