@@ -139,14 +139,22 @@ doInstruction m = do
     -- cycles for short instructions and could touch memory-mapped
     -- registers at @pc+1@/@pc+2@.
     let len = opcodeLength b0
-    b1 <- if len >= 2 then cycleRead (pc + 1) m else pure 0
-    b2 <- if len >= 3 then cycleRead (pc + 2) m else pure 0
+    -- HALT-bug fetch: SameBoy models the bug as a single @PC--@ after
+    -- the opcode fetch, so subsequent operand fetches read from
+    -- addresses one byte earlier than normal (the byte AT the opcode
+    -- position becomes the first operand byte) and PC ends @len-1@
+    -- forward instead of @len@. Without this offset our previous
+    -- "don't advance PC, re-decode next iteration" model only matched
+    -- hardware for 1-byte instructions; 2- and 3-byte instructions
+    -- after HALT got the wrong operand bytes (off by +1) and the
+    -- wrong final PC. Drives blargg @halt_bug.gb@ subtest 1.
+    let !operandOffset = if cpuHaltBug cpu0 then 0 else 1
+    b1 <- if len >= 2 then cycleRead (pc + operandOffset) m else pure 0
+    b2 <- if len >= 3 then cycleRead (pc + operandOffset + 1) m else pure 0
     let Decoded instr _ = decode b0 b1 b2
-    -- HALT-bug fetch: PC stays at the byte we just read, so the *next*
-    -- iteration sees the same opcode again. Consume the latch here.
-    if cpuHaltBug cpu0
-        then mapCpu (\c -> c{cpuHaltBug = False}) m
-        else mapCpuRegs (\r -> r{regPC = pc + fromIntegral len}) m
+    when (cpuHaltBug cpu0) $
+        mapCpu (\c -> c{cpuHaltBug = False}) m
+    mapCpuRegs (\r -> r{regPC = pc + fromIntegral len - (1 - operandOffset)}) m
     mc <- execute instr m
     mapCpu (\c -> c{cpuCycles = cpuCycles c + fromIntegral mc}) m
     consumed <- readIORef (machineInternalAdvance m)
@@ -220,18 +228,19 @@ hardware), then 1 internal cycle, then write PC hi at SP-1, then
 write PC lo at SP-2. Each of the writes ticks the bus by 1 M-cycle
 inline.
 
-The actual interrupt vector is sampled AFTER the writes. This is the
-@ie_push@ behavior (mooneye 'interrupts/ie_push'): when
-@SP - 2 == 0xFF0F@ the M5 write lands on the IF register itself,
-which can clear the bit that triggered the dispatch in the first
-place. SameBoy's logic ('sm83_cpu.c' lines 1671-1697):
+The interrupt vector is sampled BETWEEN M4 and M5 — after M4's write
+has had any effect on @IF@/@IE@ (e.g. M4 lands on @0xFFFF@ when
+@SP = 0x0000@, clobbering @IE@) but before M5's write. This
+distinction is what mooneye 'interrupts/ie_push' verifies: with
+@SP = 0x0001@ the M5 write lands on @IE@, but vector selection has
+already been decided based on the original @IE@ value. With
+@SP = 0x0000@ the M4 write to @IE@ is visible at sample time, so
+the new value steers the vector. Sampling after M5 (as we did
+previously) conflates the two scenarios.
 
-* In the special case, the queue is @IE & OLD_IF@ where OLD_IF is
-  the IF value sampled BEFORE the M5 write.
-* In the normal case, the queue is just the post-write IF value
-  (equivalent to OLD_IF since the write did not touch IF).
-* If the queue has any set bit, the lowest is the vector and that
-  bit is cleared from IF; otherwise PC jumps to @0x0000@.
+The chosen @IF@ bit is cleared BEFORE M5 too, so a M5 write that
+lands on @IF@ overwrites the cleared state with PC-lo (matching
+SameBoy 'sm83_cpu.c' lines 1671-1697).
 -}
 serviceInterrupt :: Int -> Machine -> IO ()
 serviceInterrupt _ m = do
@@ -245,17 +254,18 @@ serviceInterrupt _ m = do
     let hi = fromIntegral (pc `shiftR` 8) :: Word8
         lo = fromIntegral (pc .&. 0xFF) :: Word8
     cycleNoAccess m -- M3: internal/SP--
-    cycleWrite (sp - 1) hi m -- M4
-    cycleWrite (sp - 2) lo m -- M5 (may land on IF if SP - 2 == 0xFF0F)
-    -- Re-sample IF and IE AFTER the M5 write. If M5 went to IF, the
-    -- post-write value determines which bit is still pending. The
-    -- vector is the lowest-set IF & IE bit; if none, PC := 0x0000.
+    cycleWrite (sp - 1) hi m -- M4 (may land on IE if SP - 1 == 0xFFFF)
+    -- Sample IF and IE BETWEEN M4 and M5. M4's write may have
+    -- modified IE; M5's write hasn't happened yet.
     iflag <- readMem 0xFF0F m
     ie <- readMem 0xFFFF m
     let active = iflag .&. ie .&. 0x1F
         servicedBit = if active == 0 then Nothing else Just (lowestSetBit active)
         target = maybe 0x0000 interruptVector servicedBit
+    -- Clear the chosen IF bit before M5. If M5 lands on IF
+    -- (@SP - 2 == 0xFF0F@), the M5 write will overwrite this anyway.
     forM_ servicedBit (\b -> writeMem 0xFF0F (clearBit iflag b) m)
+    cycleWrite (sp - 2) lo m -- M5 (may land on IE if SP - 2 == 0xFFFF, or on IF if SP - 2 == 0xFF0F)
     mapCpuRegs (\r -> r{regSP = sp - 2, regPC = target}) m
     mapCpu (\c -> c{cpuIme = False, cpuHalted = False, cpuCycles = cpuCycles c + 5}) m
 

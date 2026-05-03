@@ -2,8 +2,8 @@
 
 {- | Public facade for the Ocelot emulator.
 
-This module re-exports the deliberate public surface of the library. As
-subsystems land (CPU, MMU, PPU, and APU), additional types and operations will be exposed here.
+This module re-exports the deliberate public surface of the library.
+As subsystems land (CPU, MMU, PPU, and APU), additional types and operations will be exposed here.
 Internal coordination types (e.g. @PpuState@, @CpuState@) are not re-exported.
 -}
 module Ocelot (

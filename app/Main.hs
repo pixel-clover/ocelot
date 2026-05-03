@@ -254,9 +254,8 @@ runHeadless cart = do
     putStrLn "framebuffer (160x144, sampled to 80x72):"
     renderFramebuffer fb
 
-{- | Print up to 8 instructions starting at the supplied PC, walking
-through the CPU's bus so MBC banking and IO reads are honored. Useful
-when a headless run halts at an unexpected location.
+{- | Print up to 8 instructions starting at the supplied PC, walking through the CPU's bus so MBC
+banking and IO reads are honored. Useful when a headless run halts at an unexpected location.
 -}
 disassembleAround :: Word16 -> Machine -> IO ()
 disassembleAround pc0 m = go (8 :: Int) pc0

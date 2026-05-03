@@ -90,9 +90,8 @@ spec = do
             write8 0xFF01 0x41 b
             write8 0xFF02 0x81 b
             v <- read8 0xFF02 b
-            -- SC bits 6..1 read as 1 on hardware; bit 7 (transfer-start)
-            -- has been cleared by the capture; bit 0 (internal clock)
-            -- holds its written value. So the readback is 0x7F.
+            -- SC bits 6..1 read as 1 on hardware; bit 7 (transfer-start) has been cleared by the
+            -- capture; bit 0 (internal clock) holds its written value. So the readback is 0x7F.
             (v .&. 0x80) `shouldBe` 0x00 -- start bit cleared
             (v .&. 0x01) `shouldBe` 0x01 -- internal-clock bit preserved
         it "writes to SC without bit 7 set do not capture" $ do
@@ -114,12 +113,12 @@ spec = do
             write8 0xFF06 0x10 b -- TMA = 0x10
             write8 0xFF05 0xFF b -- TIMA = 0xFF
             write8 0xFF07 0x05 b -- TAC = 0x05 (enable + 16 T-cycles)
-            -- 4 M-cycles hits the falling edge that wraps TIMA, but the
-            -- 1-M-cycle reload window has not yet expired; IF stays clear.
+            -- 4 M-cycles hits the falling edge that wraps TIMA, but the 1-M-cycle reload window
+            -- has not yet expired; IF stays clear.
             advance 4 b
             iflag1 <- read8 0xFF0F b
             (iflag1 .&. 0x04) `shouldBe` 0x00
-            -- 1 more M-cycle drains the reload window: TIMA := TMA, IF set.
+            -- One more M-cycle drains the reload window: TIMA := TMA, IF set.
             advance 1 b
             iflag2 <- read8 0xFF0F b
             (iflag2 .&. 0x04) `shouldBe` 0x04
@@ -128,18 +127,16 @@ spec = do
         it "copies 160 bytes from (v << 8) into OAM at 0xFE00 starting next instruction" $ do
             b <- emptyBus
             mapM_ (\i -> write8 (0xC000 + fromIntegral i) (fromIntegral i) b) [0 .. 0x9F :: Int]
-            -- Model an LD (0xFF46), A: write to FF46, then advance for
-            -- the rest of that instruction's M-cycles. DMA must NOT have
-            -- copied any bytes during the triggering instruction.
+            -- Model an LD (0xFF46), A: write to FF46, then advance for the rest of that instruction's
+            -- M-cycles. DMA must NOT have copied any bytes during the triggering instruction.
             write8 0xFF46 0xC0 b
             advance 3 b
             partway <- read8 0xFE00 b
-            partway `shouldBe` 0xFF -- locked, but more importantly: not yet copied
-            -- 160 M-cycles of subsequent instruction time complete the
-            -- copy, plus 1 deferred-clear cycle so 'busOamDmaActive'
-            -- transitions from True to False (matches mooneye
-            -- 'oam_dma_timing': a CPU read scheduled at the same
-            -- M-cycle as the final byte still sees the lockout).
+            partway `shouldBe` 0xFF -- Locked, but more importantly: not yet copied
+            -- 160 M-cycles of subsequent instruction time complete the copy, plus 1 deferred-clear
+            -- cycle so 'busOamDmaActive' transitions from True to False (matches mooneye
+            -- 'oam_dma_timing': a CPU read scheduled at the same M-cycle as the final byte still
+            -- sees the lockout).
             advance 161 b
             v0 <- read8 0xFE00 b
             v1 <- read8 0xFE01 b
@@ -149,27 +146,23 @@ spec = do
             v9F `shouldBe` 0x9F
 
         it "DMG: source 0xFExx mirrors WRAM via 'src & ~0x2000'" $ do
-            -- 'emptyBus' synthesises a no-MBC ROM with the DMG-only
-            -- header, so 'fromCartridge' picks 'HostDmg'. On DMG, an OAM
-            -- DMA from source 0xFE00..0xFFFF reads through the echo
-            -- mirror at 'src & ~0x2000' (here 0xDE00..0xDFFF), matching
-            -- SameBoy 'GB_dma_run' line 1894. We seed the upper-WRAM
-            -- byte that 0xFE00 should mirror to (0xDE00 -> WRAM offset
-            -- 0x1E00) and verify byte 0 of OAM lands on it.
+            -- 'emptyBus' synthesises a no-MBC ROM with the DMG-only header, so 'fromCartridge'
+            -- picks 'HostDmg'. On DMG, an OAM DMA from source 0xFE00..0xFFFF reads through the echo
+            -- mirror at 'src & ~0x2000' (here 0xDE00..0xDFFF). We seed the upper-WRAM byte that
+            -- 0xFE00 should mirror to (0xDE00 -> WRAM offset 0x1E00) and verify byte 0 of OAM lands on it.
             b <- emptyBus
             write8 0xDE00 0x55 b -- = WRAM[0x1E00] via the upper bank
             write8 0xFF46 0xFE b -- DMA source = 0xFE00
-            advance 1 b -- consume the 1-cycle startup delay
-            advance 161 b -- finish the copy + 1 deferred-clear cycle
+            advance 1 b -- Consume the 1-cycle startup delay
+            advance 161 b -- Finish the copy + 1 deferred-clear cycle
             v0 <- read8 0xFE00 b
             v0 `shouldBe` 0x55
 
         it "DMG: source 0xFFxx mirrors WRAM via 'src & ~0x2000'" $ do
             -- Source 0xFF00..0xFFFF reads from 0xDF00..0xDFFF on DMG.
-            -- Without the fix, this region returned 0xFF for every byte
-            -- regardless of WRAM contents.
+            -- Without the fix, this region returned 0xFF for every byte regardless of WRAM contents.
             b <- emptyBus
-            write8 0xDF42 0xCD b -- = upper WRAM byte that source 0xFF42 mirrors to
+            write8 0xDF42 0xCD b -- = Upper WRAM byte that source 0xFF42 mirrors to
             write8 0xFF46 0xFF b -- DMA source = 0xFF00
             advance 1 b
             advance 161 b -- 160 copies + 1 deferred-clear cycle
@@ -181,11 +174,11 @@ spec = do
             mapM_ (\i -> write8 (0xC000 + fromIntegral i) 0xAA b) [0 .. 0x9F :: Int]
             write8 0xFF80 0x55 b -- HRAM stays accessible
             write8 0xFF46 0xC0 b
-            advance 4 b -- partway through
+            advance 4 b -- Partway through
             wramR <- read8 0xC000 b
             hramR <- read8 0xFF80 b
-            -- FF46 lives in the I/O register page, so it stays readable
-            -- during DMA and reflects the last-written source byte.
+            -- FF46 lives in the I/O register page, so it stays readable during DMA and reflects the
+            -- last-written source byte.
             regR <- read8 0xFF46 b
             wramR `shouldBe` 0xFF
             hramR `shouldBe` 0x55
@@ -216,12 +209,11 @@ spec = do
             write8 0xFF50 0x01 b
             -- Now the read goes to the cartridge.
             v0' <- read8 0x0000 b
-            v0' `shouldBe` 0x00 -- synthetic cart is mostly zero
+            v0' `shouldBe` 0x00 -- Synthetic cart is mostly zero
         it "0xFF50 is sticky: a second cleared boot mask cannot re-mask" $ do
             b <- emptyBus
             installBootRom (BS.pack (replicate 256 0xAA)) b
             write8 0xFF50 0x01 b
-            -- Subsequent reads stay at the cartridge regardless of any
-            -- attempt to re-enable.
+            -- Subsequent reads stay at the cartridge regardless of any attempt to re-enable.
             v <- read8 0x0000 b
             v `shouldBe` 0x00

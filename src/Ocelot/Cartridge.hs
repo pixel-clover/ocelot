@@ -396,9 +396,22 @@ loadRom raw =
         Right (hdr, impl0) -> do
             -- MBC2 has 512 nibbles of built-in RAM; the header reports zero
             -- RAM size for those carts, so override the allocation here.
-            let ramBytes = case hdrMbcKind hdr of
+            -- Some cart-type bytes advertise +RAM yet ship with RAM size
+            -- 0x00 (e.g. blargg 'halt_bug.gb' has cart type 0x02 = MBC1+RAM
+            -- but RAM size 0). Real-hardware MBC1+RAM cartridges always
+            -- carry at least 8 KiB of SRAM regardless of the size byte;
+            -- without that allocation the cart drops writes to 0xA000..0xBFFF
+            -- on the floor and a ROM that uses cart RAM as scratch (or as
+            -- its sole result-reporting channel) hangs silently. Default
+            -- to 8 KiB whenever the cart-type byte says +RAM so those
+            -- mis-tagged ROMs work.
+            let declared = hdrRamBytes hdr
+                hasRamCap = capRam (hdrCaps hdr)
+                ramBytes = case hdrMbcKind hdr of
                     Mbc2 -> 512
-                    _ -> hdrRamBytes hdr
+                    _
+                        | hasRamCap && declared == 0 -> 0x2000
+                        | otherwise -> declared
             ram <- MV.replicate ramBytes 0xFF
             -- MBC1 multicart detection: a cart big enough to hold a
             -- Nintendo-logo copy at offset 0x40000 with the same bytes
@@ -526,11 +539,7 @@ mbc1Read s addr c
         if not (m1RamEnabled s)
             then pure 0xFF
             else
-                let !bank =
-                        if m1Mode s
-                            then fromIntegral (m1BankHi s) :: Int
-                            else 0
-                    !off = bank * 0x2000 + fromIntegral (addr - 0xA000)
+                let !off = mbc1RamOffset s addr c
                  in if off < MV.length (cartRam c)
                         then MV.read (cartRam c) off
                         else pure 0xFF
@@ -552,13 +561,25 @@ mbc1Write s addr v c
     | addr <= 0x7FFF =
         writeIORef (cartImpl c) (Mbc1Impl s{m1Mode = testBit v 0})
     | addr >= 0xA000 && addr <= 0xBFFF && m1RamEnabled s =
-        let !bank =
-                if m1Mode s
-                    then fromIntegral (m1BankHi s) :: Int
-                    else 0
-            !off = bank * 0x2000 + fromIntegral (addr - 0xA000)
+        let !off = mbc1RamOffset s addr c
          in when (off < MV.length (cartRam c)) (MV.write (cartRam c) off v)
     | otherwise = pure ()
+
+{- | Resolve an A000..BFFF address to an offset into the cart's RAM
+buffer. Carts with 8 KiB of RAM (header 0x02) have only one bank, so
+the BANK2 register must not contribute to the offset; mooneye
+'emulator-only/mbc1/ram_64kb' fails if BANK2 is multiplied in for
+small RAM. Carts with 32 KiB use BANK2 as a 4-bank selector when
+mode=1.
+-}
+mbc1RamOffset :: Mbc1State -> Word16 -> Cartridge -> Int
+mbc1RamOffset s addr c =
+    let !ramLen = MV.length (cartRam c)
+        !bank =
+            if m1Mode s && ramLen > 0x2000
+                then fromIntegral (m1BankHi s) :: Int
+                else 0
+     in bank * 0x2000 + fromIntegral (addr - 0xA000)
 
 mbc1HighBank :: Mbc1State -> Int
 mbc1HighBank s

@@ -5,9 +5,10 @@ The ROMs themselves are not committed to this repository and are downloaded on d
 Note that the blargg test ROM collection is in `external/gb-test-roms/` as a git submodule and is not included here.
 
 > [!IMPORTANT]
-> None of these ROMs are owned by the creator of this project. They are included for educational and emulator-correctness-testing purposes
-> only. Please respect the intellectual property rights of the original authors. Any tracked binary in this directory must
-> have a license that permits redistribution.
+> None of these ROMs are owned by the creator of this project.
+> They are included for educational and emulator-correctness-testing purposes only.
+> Please respect the intellectual property rights of the original authors.
+> Any tracked binary in this directory must have a license that permits redistribution.
 
 ### ROM Files
 

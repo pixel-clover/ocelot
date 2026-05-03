@@ -1,15 +1,15 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | Per-instruction CPU trace, format-matched with @sameboy-trace@. Pipe both
-side by side through 'diff -u' (or @tools/diff-traces@) to find the first
-instruction at which Ocelot and SameBoy diverge for a given ROM.
+{- | Per-instruction CPU trace, format-matched with @sameboy-trace@. Pipe both side by side through
+'diff -u' (or @tools/diff-traces@) to find the first instruction at which Ocelot and SameBoy diverge
+for a given ROM.
 
 Output line format (matches sameboy-trace.c):
 
 > pc=XXXX af=XXXX bc=XXXX de=XXXX hl=XXXX sp=XXXX if=XX ie=XX ly=XXX lcdc=XX
 
-One line per CPU instruction. Trace starts at the cart entry point (PC=0x100,
-post-boot CGB register state) and emits the requested number of lines.
+One line per CPU instruction. Trace starts at the cart entry point (PC=0x100, post-boot CGB register state)
+and emits the requested number of lines.
 -}
 module Main (main) where
 
@@ -47,24 +47,19 @@ main = do
         _ -> putStrLn "usage: ocelot-trace <rom> <instruction-count>" >> exitFailure
     bytes <- BS.readFile path
     Right cart <- Cartridge.loadRom bytes
-    -- Run with the same minimal boot stub as @tools/sameboy-trace.c@ so
-    -- both emulators reach the cart entry point at PC=0x100 with
-    -- identical T-cycle accumulation in every peripheral. Without this
-    -- the SameBoy boot stub burns ~900 T-cycles of PPU phase that
-    -- Ocelot's 'cgbPostBoot' shortcut does not, and traces diverge in
-    -- LY by line ~30 even when the CPU/MBC are bit-identical.
+    -- Run with the same minimal boot stub as @tools/sameboy-trace.c@ so both emulators reach the
+    -- cart entry point at PC=0x100 with identical T-cycle accumulation in every peripheral.
+    -- Without this the SameBoy boot stub burns ~900 T-cycles of PPU phase that Ocelot's 'cgbPostBoot'
+    -- shortcut does not, and traces diverge in LY by line ~30 even when the CPU/MBC are bit-identical.
     m <- machineFromCartridgeWithBoot (Just bootStub) cart
     hSetBuffering stdout LineBuffering
 
-    -- SameBoy's execution callback fires only on real instruction
-    -- starts, not while the CPU is halted in the wait-for-IRQ loop or
-    -- while it's stalled on an interrupt-service entry. Mirror that by
-    -- only emitting a line when the CPU is in instruction-fetch state
-    -- (not halted). This makes line numbers in the two traces align
-    -- 1:1 even though Ocelot's `step` returns one halt-tick at a time.
-    -- Skip the boot stub instructions entirely; only start emitting
-    -- once PC reaches the cart entry at 0x100 (mirrors sameboy-trace's
-    -- 'reached_cart' gate).
+    -- SameBoy's execution callback fires only on real instruction starts, not while the CPU is
+    -- halted in the wait-for-IRQ loop or while it's stalled on an interrupt-service entry.
+    -- Mirror that by only emitting a line when the CPU is in instruction-fetch state (not halted).
+    -- This makes line numbers in the two traces align 1:1 even though Ocelot's `step` returns one
+    -- halt-tick at a time. Skip the boot stub instructions entirely; only start emitting once PC
+    -- reaches the cart entry at 0x100 (mirrors sameboy-trace's 'reached_cart' gate).
     let drive !reached !left
             | left <= 0 = pure ()
             | otherwise = do
@@ -108,8 +103,8 @@ w16 :: Word8 -> Word8 -> Word16
 w16 hi lo = (fromIntegral hi `shiftL` 8) .|. fromIntegral lo
 
 {- | Boot stub byte-identical to @boot_stub@ in @tools/sameboy-trace.c@.
-Both tools must execute the same 256 bytes so peripheral T-cycle
-accumulation matches at PC=0x100. If you edit one side, edit the other.
+Both tools must execute the same 256 bytes so peripheral T-cycle accumulation matches at PC=0x100.
+If you edit one side, edit the other.
 -}
 bootStub :: BS.ByteString
 bootStub =
@@ -159,7 +154,7 @@ bootStub =
             & set 0xF9 0x31
             & set 0xFA 0xFE
             & set 0xFB 0xFF
-            -- LD A, 0x11 ; LDH (FF50), A   -- unmap & hand off to cart at 0x100
+            -- LD A, 0x11 ; LDH (FF50), A   -- Unmap & hand off to cart at 0x100
             & set 0xFC 0x3E
             & set 0xFD 0x11
             & set 0xFE 0xE0

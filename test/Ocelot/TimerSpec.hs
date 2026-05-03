@@ -45,17 +45,15 @@ spec = do
         it "wraps to 0 immediately, then reloads from TMA one M-cycle later" $ do
             let ts0 =
                     writeTac
-                        0x05 -- enabled, fast rate
+                        0x05 -- Enabled, fast rate
                         ( writeTma
                             0x42 -- TMA = 0x42
                             (writeTima 0xFF initialTimer)
                         )
-                -- 4 M-cycles = 16 T-cycles: hits the falling edge that wraps
-                -- TIMA from 0xFF to 0x00, but the reload window has not yet
-                -- expired, so TIMA reads as 0 and IF has not fired.
+                -- 4 M-cycles = 16 T-cycles: hits the falling edge that wraps TIMA from 0xFF to 0x00,
+                -- but the reload window has not yet expired, so TIMA reads as 0 and IF has not fired.
                 (ts1, ov1) = advance 4 ts0
-                -- 1 more M-cycle (4 T-cycles) completes the reload window:
-                -- TIMA := TMA, IF fires.
+                -- 1 more M-cycle (4 T-cycles) completes the reload window: TIMA := TMA, IF fires.
                 (ts2, ov2) = advance 1 ts1
             readTima ts1 `shouldBe` 0x00
             ov1 `shouldBe` False
@@ -79,8 +77,7 @@ spec = do
                 (ts1, _) = advance 4 ts0
                 -- Sneak in a TIMA write before the reload fires.
                 ts2 = writeTima 0x99 ts1
-                -- Drain the reload window. With the cancel in effect, no IF
-                -- and TIMA stays at 0x99.
+                -- Drain the reload window. With the cancel in effect, no IF and TIMA stays at 0x99.
                 (ts3, ov) = advance 1 ts2
             readTima ts3 `shouldBe` 0x99
             ov `shouldBe` False
@@ -94,21 +91,19 @@ spec = do
                             (writeTima 0xFF initialTimer)
                         )
                 (ts1, _) = advance 4 ts0
-                ts2 = writeTma 0x77 ts1 -- new TMA before reload fires
+                ts2 = writeTma 0x77 ts1 -- New TMA before reload fires
                 (ts3, ov) = advance 1 ts2
             readTima ts3 `shouldBe` 0x77
             ov `shouldBe` True
 
         it "writing DIV that drops the AND signal high->low increments TIMA" $ do
-            -- TAC=0x05 selects bit 3 of the divider. Pre-set divider so bit 3
-            -- is 1 (so the AND signal is high). Writing DIV resets to 0 and
-            -- drops the AND signal, which is a falling edge.
+            -- TAC=0x05 selects bit 3 of the divider. Pre-set divider so bit 3 is 1 (so the AND signal is high).
+            -- Writing DIV resets to 0 and drops the AND signal, which is a falling edge.
             let ts0 = writeTac 0x05 initialTimer
                 -- Advance 8 T-cycles so divider's bit 3 becomes 1.
                 (ts1, _) = advance 2 ts0
-                -- Confirm TIMA hasn't ticked yet (bit 3 went 0->1, a rising
-                -- edge, not a falling one).
-                _ = readTima ts1 -- still 0
+                -- Confirm TIMA hasn't ticked yet (bit 3 went 0->1, a rising edge, not a falling one).
+                _ = readTima ts1 -- Still 0
                 ts2 = writeDiv ts1
             readTima ts2 `shouldBe` 0x01
 

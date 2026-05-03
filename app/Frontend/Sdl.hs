@@ -35,7 +35,8 @@ import Data.Text (Text)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Data.Vector.Storable.Mutable as VSM
 import qualified Data.Vector.Unboxed as V
-import Data.Word (Word8)
+import Data.Word (Word64, Word8)
+import GHC.Clock (getMonotonicTimeNSec)
 import qualified Ocelot.Apu as Apu
 import qualified Ocelot.Bus as Bus
 import Ocelot.Cartridge (Cartridge)
@@ -55,15 +56,10 @@ gbHeight = 144
 scale :: Int
 scale = 4
 
-mCyclesPerFrame :: Int
-mCyclesPerFrame = 17556
+frameNs :: Word64
+frameNs = 16742706
 
-frameUs :: Int
-frameUs = 16667
-
-{- | Cap the audio buffer so an emulator running ahead of the audio device
-doesn't accumulate unbounded samples.
--}
+-- | Cap the audio buffer so an emulator running ahead of the audio device doesn't accumulate unbounded samples.
 maxBufferedSamples :: Int
 maxBufferedSamples = 9600 -- ~100 ms of stereo samples at 48 kHz
 
@@ -100,8 +96,8 @@ play romPath cart bootRom title = do
         , SDL.InitAudio
         , SDL.InitGameController
         ]
-    -- Open the first connected controller, if any. Disconnect events later
-    -- are not specially handled; SDL still posts ControllerButton events.
+    -- Open the first connected controller, if any. Disconnect events later are not specially handled;
+    -- SDL still posts ControllerButton events.
     controllers <- SDLGC.availableControllers
     _maybeController <- case (toList controllers, ()) of
         (dev : _, _) -> Just <$> SDLGC.openController dev
@@ -117,7 +113,7 @@ play romPath cart bootRom title = do
         SDL.createRenderer
             window
             (-1)
-            SDL.defaultRenderer{SDL.rendererType = SDL.AcceleratedVSyncRenderer}
+            SDL.defaultRenderer{SDL.rendererType = SDL.AcceleratedRenderer}
     texture <-
         SDL.createTexture
             renderer
@@ -158,9 +154,8 @@ openAudio buf = do
     (dev, _actualSpec) <- SDL.openAudioDevice spec
     pure dev
 
-{- | Audio callback, invoked by SDL's audio thread when it needs more
-samples. Drains up to @VSM.length out@ samples from the shared buffer,
-padding with silence if the producer is behind.
+{- | Audio callback, invoked by SDL's audio thread when it needs more samples.
+Drains up to @VSM.length out@ samples from the shared buffer, padding with silence if the producer is behind.
 -}
 audioCallback ::
     forall sampleType.
@@ -216,8 +211,15 @@ loop romPath hk machineRef cart bootRom renderer texture audioBuf = do
         let frames = if fast then 4 else 1 :: Int
             shouldRun = not paused || stepOnce
 
+        frameStartNs <- getMonotonicTimeNSec
         when shouldRun $ do
-            mapM_ (\_ -> runFor mCyclesPerFrame machine') [1 .. frames]
+            mapM_
+                ( \_ -> do
+                    frameCycles <- Bus.cpuMCyclesPerLcdFrame (machineBus machine')
+                    _ <- runFor frameCycles machine'
+                    pure ()
+                )
+                [1 .. frames]
 
             samples <- Bus.drainAudioSamples (machineBus machine')
             unless (null samples) $
@@ -238,9 +240,18 @@ loop romPath hk machineRef cart bootRom renderer texture audioBuf = do
         SDL.copy renderer texture Nothing Nothing
         SDL.present renderer
 
-        -- Pace to 60 FPS unless fast-forwarding.
-        unless fast (threadDelay frameUs)
+        unless fast (paceFrame frameStartNs)
         loop romPath hk machineRef cart bootRom renderer texture audioBuf
+
+paceFrame :: Word64 -> IO ()
+paceFrame frameStartNs = do
+    now <- getMonotonicTimeNSec
+    let elapsedNs = now - frameStartNs
+    when (elapsedNs < frameNs) $
+        threadDelay
+            ( fromIntegral $
+                (frameNs - elapsedNs + 999) `div` 1000
+            )
 
 handlePending ::
     FilePath ->
@@ -344,9 +355,8 @@ mapKey s = case s of
     SDL.ScancodeRight -> Just ButtonRight
     _ -> Nothing
 
-{- | Map an SDL game-controller button to a GB joypad button. The
-controller's "A" face button maps to GB A (south = primary action),
-"B" maps to GB B, the menu pair to Start\/Select, and the D-pad to
+{- | Map an SDL game-controller button to a GB joypad button. The controller's "A" face button maps
+to GB A (south = primary action), "B" maps to GB B, the menu pair to Start\/Select, and the D-pad to
 the equivalent direction.
 -}
 mapPad :: SDLGC.ControllerButton -> Maybe Button
@@ -361,8 +371,8 @@ mapPad b = case b of
     SDLGC.ControllerButtonDpadRight -> Just ButtonRight
     _ -> Nothing
 
-{- | Streaming-update path: 'fb' is already in RGB888 with one byte per
-channel, so the SDL upload is a single 'BS.pack' away.
+{- | Streaming-update path: 'fb' is already in RGB888 with one byte per channel, so the SDL upload
+is a single 'BS.pack' away.
 -}
 updateTextureRgb :: SDL.Texture -> V.Vector Word8 -> IO ()
 updateTextureRgb tex fb = do
@@ -370,9 +380,8 @@ updateTextureRgb tex fb = do
     _ <- SDL.updateTexture tex Nothing bs (fromIntegral (gbWidth * 3))
     pure ()
 
-{- | Diagnostic: open the audio device and play a 440 Hz sine tone for two
-seconds, bypassing the APU. If you hear nothing here, the SDL audio path is
-the problem; if you hear the tone, the APU is the problem.
+{- | Diagnostic: open the audio device and play a 440 Hz sine tone for two seconds, bypassing the APU.
+If you hear nothing here, the SDL audio path is the problem; if you hear the tone, the APU is the problem.
 -}
 audioTest :: IO ()
 audioTest = do

@@ -28,6 +28,7 @@ module Ocelot.Bus (
     fromCartridgeOnHost,
     HostHardware (..),
     BootMode (..),
+    cpuMCyclesPerLcdFrame,
     read8,
     write8,
     advance,
@@ -73,8 +74,16 @@ data Bus = Bus
     , busJoypad :: !JoypadState
     , busSerialOut :: !(IORef [Word8])
     , busCgb :: !Bool
-    -- ^ True when the loaded cartridge is CGB-aware ('DmgAndCgb' or
-    -- 'CgbOnly'). Gates CGB-only registers (VBK, BCPS, etc.).
+    -- ^ True when the host hardware is CGB. Gates CGB-only registers
+    -- (VBK, BCPS, etc.). Note: this is currently host-driven, NOT
+    -- cart-driven, so a DMG-only cart on CGB hardware sees the CGB
+    -- I/O surface. See 'busCgbDmgCompat' for the DMG-compat carve-out.
+    , busCgbDmgCompat :: !Bool
+    -- ^ True when CGB hardware is running a DMG-only cart in
+    -- "DMG-compat mode". Real CGB hardware disables certain CGB-only
+    -- registers in this mode (KEY1 reads 0xFF, OPRI reads 0xFF, etc.),
+    -- which mooneye's @misc/boot_hwio-C@ and @misc/bits/unused_hwio-C@
+    -- verify. Computed as @busCgb && cart.cgbFlag == DmgOnly@.
     , busWramBank :: !(IORef Word8)
     -- ^ CGB WRAM bank select (0xFF70). Low 3 bits select banks 1..7;
     -- bank 0 is treated as bank 1 on real hardware.
@@ -171,6 +180,12 @@ fromCartridge c =
             Header.DmgAndCgb -> HostCgb
             Header.CgbOnly -> HostCgb
      in fromCartridgeOnHost host BootPostBoot c
+
+-- | CPU M-cycles needed to advance one LCD frame at the current speed.
+cpuMCyclesPerLcdFrame :: Bus -> IO Int
+cpuMCyclesPerLcdFrame b = do
+    ds <- readIORef (busDoubleSpeed b)
+    pure (if ds then 17556 * 2 else 17556)
 
 {- | Construct a bus with an explicit host-hardware choice. Lets you run
 a DMG cart on a CGB host (matching real-hardware backwards
@@ -280,6 +295,7 @@ fromCartridgeOnHost host bootMode c = do
             , busJoypad = joypad
             , busSerialOut = serial
             , busCgb = cgb
+            , busCgbDmgCompat = cgb && not cgbCart
             , busWramBank = wramBank
             , busKey1 = key1
             , busHdmaSrc = hdmaSrc
@@ -350,11 +366,29 @@ read8Raw addr b
     -- both DMG and CGB. HDMA5 reads transfer state (CGB) or 0xFF (DMG).
     | addr >= 0xFF51 && addr <= 0xFF54 = pure 0xFF
     | addr == 0xFF55 = readHdma5 b
+    -- BCPS / OCPS: index registers, accessible in CGB-DMG-compat too
+    -- (CGB boot ROM seeds them when running a DMG cart).
     | addr == 0xFF68 = if busCgb b then Ppu.read8 addr (busPpu b) else pure 0xFF
-    | addr == 0xFF69 = if busCgb b then Ppu.read8 addr (busPpu b) else pure 0xFF
     | addr == 0xFF6A = if busCgb b then Ppu.read8 addr (busPpu b) else pure 0xFF
-    | addr == 0xFF6B = if busCgb b then Ppu.read8 addr (busPpu b) else pure 0xFF
-    | addr == 0xFF6C = if busCgb b then Ppu.read8 addr (busPpu b) else pure 0xFF
+    -- BCPD / OCPD: palette-data ports. In DMG-compat mode they're
+    -- locked off (mooneye @misc/bits/unused_hwio-C@ expects 0xFF reads
+    -- via 'test_unmapped'); on full CGB they round-trip through
+    -- palette RAM at the current BCPS/OCPS index.
+    | addr == 0xFF69 =
+        if busCgb b && not (busCgbDmgCompat b)
+            then Ppu.read8 addr (busPpu b)
+            else pure 0xFF
+    | addr == 0xFF6B =
+        if busCgb b && not (busCgbDmgCompat b)
+            then Ppu.read8 addr (busPpu b)
+            else pure 0xFF
+    -- OPRI (sprite priority) on CGB-DMG-compat is unmapped (mooneye
+    -- @misc/boot_hwio-C@ expects 0xFF). On full CGB it reads through
+    -- the PPU (.|. 0xFE mask).
+    | addr == 0xFF6C =
+        if busCgb b && not (busCgbDmgCompat b)
+            then Ppu.read8 addr (busPpu b)
+            else pure 0xFF
     | addr == 0xFF70 = readWramBank b
     -- SB / SC (serial): SB stores its byte; SC's lower bits (transfer
     -- enable, internal clock) are stored, with bit 1 (clock speed) and
@@ -365,13 +399,25 @@ read8Raw addr b
     -- CGB they round-trip the last byte written, with FF75 forcing
     -- bits 0-3 and 7 to 1 (only bits 4-6 are wired). Mooneye
     -- 'misc/bits/unused_hwio-C' verifies the round-trip.
+    -- \$FF72 / $FF73: full-byte CGB R/W storage (mooneye
+    -- @misc/bits/unused_hwio-C@ verifies the round-trip).
     | addr == 0xFF72 = if busCgb b then MV.read (busIo b) 0x72 else pure 0xFF
     | addr == 0xFF73 = if busCgb b then MV.read (busIo b) 0x73 else pure 0xFF
-    | addr == 0xFF74 = if busCgb b then MV.read (busIo b) 0x74 else pure 0xFF
+    -- \$FF74: documented as unused on CGB; reads always 0xFF regardless
+    -- of writes (matches mooneye @misc/bits/unused_hwio-C@ which uses
+    -- 'test_unmapped $FF74').
+    | addr == 0xFF74 = pure 0xFF
     | addr == 0xFF75 =
         if busCgb b
             then (.|. 0x8F) <$> MV.read (busIo b) 0x75
             else pure 0xFF
+    -- PCM12 / PCM34: read-only on CGB, exposing the current 4-bit DAC
+    -- output of channels 1+2 / 3+4. We don't have per-T-cycle channel
+    -- amplitude exposed, so we approximate by returning 0 (channels off
+    -- or in their initial silent state). Mooneye @misc/bits/unused_hwio-C@
+    -- and @misc/boot_hwio-C@ expect 0x00 reads here.
+    | addr == 0xFF76 = if busCgb b then pure 0x00 else pure 0xFF
+    | addr == 0xFF77 = if busCgb b then pure 0x00 else pure 0xFF
     -- Anything else in the I/O page is an unmapped / reserved register
     -- that reads back 0xFF on hardware (mooneye 'bits/unused_hwio').
     | addr <= 0xFF7F = pure 0xFF
@@ -478,17 +524,32 @@ writeEcho within v b
 readWramBank :: Bus -> IO Word8
 readWramBank b
     | not (busCgb b) = pure 0xFF
+    -- DMG-compat: WRAM banking is locked to bank 1; the register reads
+    -- as unmapped (0xFF) per mooneye @misc/boot_hwio-C@.
+    | busCgbDmgCompat b = pure 0xFF
     | otherwise = (.|. 0xF8) <$> readIORef (busWramBank b)
 
 writeWramBank :: Word8 -> Bus -> IO ()
-writeWramBank v b = when (busCgb b) (writeIORef (busWramBank b) (v .&. 0x07))
+writeWramBank v b =
+    -- DMG-compat: WRAM banking is locked to bank 1 (matches SameBoy
+    -- 'memory.c:680' and the symmetrical read-side gate). Without this,
+    -- mooneye @misc/bits/unused_hwio-C@ writes 0xFF to FF70 as part
+    -- of 'test_unmapped', which would set bank to 7 and the very next
+    -- stack pop reads from bank-7's uninitialized area, sending PC to
+    -- 0x0000 and into the RST 38 trap.
+    when (busCgb b && not (busCgbDmgCompat b)) $
+        writeIORef (busWramBank b) (v .&. 0x07)
 
 {- | KEY1 read: bit 7 = current speed (1 = double-speed), bit 0 =
 pending switch. Bits 1..6 read as 1.
 -}
 readKey1 :: Bus -> IO Word8
 readKey1 b
+    -- DMG hardware: KEY1 doesn't exist; reads 0xFF.
     | not (busCgb b) = pure 0xFF
+    -- CGB-DMG-compat (CGB hardware running DMG-only cart): KEY1 is
+    -- disabled and reads 0xFF (mooneye @misc/boot_hwio-C@ expects this).
+    | busCgbDmgCompat b = pure 0xFF
     | otherwise = do
         prepare <- readIORef (busKey1 b)
         ds <- readIORef (busDoubleSpeed b)
@@ -616,6 +677,10 @@ triggerSpeedSwitch b
 readHdma5 :: Bus -> IO Word8
 readHdma5 b
     | not (busCgb b) = pure 0xFF
+    -- DMG-compat: HDMA disabled (matches SameBoy 'memory.c:677' where
+    -- HDMA5 returns 0xFF when not cgb_mode). mooneye
+    -- @misc/bits/unused_hwio-C@ verifies via 'test_unmapped'.
+    | busCgbDmgCompat b = pure 0xFF
     | otherwise = do
         active <- readIORef (busHdmaActive b)
         len <- readIORef (busHdmaLen b)
@@ -628,22 +693,28 @@ readHdma5 b
                     else pure 0xFF
 
 writeHdmaReg :: Word16 -> Word8 -> Bus -> IO ()
-writeHdmaReg addr v b = when (busCgb b) $ case addr of
-    0xFF51 -> do
-        cur <- readIORef (busHdmaSrc b)
-        writeIORef (busHdmaSrc b) ((fromIntegral v `shiftL` 8) .|. (cur .&. 0x00FF))
-    0xFF52 -> do
-        cur <- readIORef (busHdmaSrc b)
-        writeIORef (busHdmaSrc b) ((cur .&. 0xFF00) .|. fromIntegral (v .&. 0xF0))
-    0xFF53 -> do
-        cur <- readIORef (busHdmaDst b)
-        let !hi = (fromIntegral (v .&. 0x1F) :: Word16) `shiftL` 8
-        writeIORef (busHdmaDst b) (0x8000 .|. hi .|. (cur .&. 0x00FF))
-    0xFF54 -> do
-        cur <- readIORef (busHdmaDst b)
-        writeIORef (busHdmaDst b) ((cur .&. 0xFF00) .|. fromIntegral (v .&. 0xF0))
-    0xFF55 -> startOrStopHdma v b
-    _ -> pure ()
+writeHdmaReg addr v b =
+    -- DMG-compat: HDMA disabled (SameBoy 'memory.c:1721' returns from
+    -- HDMA writes when not cgb_mode). Without this gate, mooneye
+    -- @misc/bits/unused_hwio-C@ writes 0xFF to FF55 starting an HBlank
+    -- DMA from src=0 to VRAM, which silently corrupts VRAM tile data
+    -- and causes the test's failure-print path to hang.
+    when (busCgb b && not (busCgbDmgCompat b)) $ case addr of
+        0xFF51 -> do
+            cur <- readIORef (busHdmaSrc b)
+            writeIORef (busHdmaSrc b) ((fromIntegral v `shiftL` 8) .|. (cur .&. 0x00FF))
+        0xFF52 -> do
+            cur <- readIORef (busHdmaSrc b)
+            writeIORef (busHdmaSrc b) ((cur .&. 0xFF00) .|. fromIntegral (v .&. 0xF0))
+        0xFF53 -> do
+            cur <- readIORef (busHdmaDst b)
+            let !hi = (fromIntegral (v .&. 0x1F) :: Word16) `shiftL` 8
+            writeIORef (busHdmaDst b) (0x8000 .|. hi .|. (cur .&. 0x00FF))
+        0xFF54 -> do
+            cur <- readIORef (busHdmaDst b)
+            writeIORef (busHdmaDst b) ((cur .&. 0xFF00) .|. fromIntegral (v .&. 0xF0))
+        0xFF55 -> startOrStopHdma v b
+        _ -> pure ()
 
 {- | Handle a write to HDMA5. Three cases:
 

@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {- | Run a ROM and dump VRAM tile data, BG tilemap, BG attribute map (CGB bank 1), and BG palette
-RAM in hex. Useful for verifying the cart wrote data to the right place.
+RAM in hex. This is useful for verifying the cart wrote data to the right place.
 -}
 module Main (main) where
 

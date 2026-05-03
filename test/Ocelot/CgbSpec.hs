@@ -2,9 +2,8 @@
 
 {- | CGB foundation: VRAM/WRAM banking and CGB palette register I/O.
 
-These tests don't yet cover CGB-specific rendering (tile attributes,
-RGB555 palettes feeding the framebuffer); they verify only the bus and
-PPU register plumbing for VBK, BCPS\/BCPD, OCPS\/OCPD, WBK, and KEY1.
+These tests don't yet cover CGB-specific rendering (tile attributes, RGB555 palettes feeding the framebuffer);
+they verify only the bus and PPU register plumbing for VBK, BCPS\/BCPD, OCPS\/OCPD, WBK, and KEY1.
 -}
 module Ocelot.CgbSpec (spec) where
 
@@ -63,9 +62,8 @@ mkBus rom = do
     Right cart <- Cartridge.loadRom rom
     Bus.fromCartridge cart
 
-{- | Force a CGB host (the SDL frontend's choice for compat-mode tests),
-even when the cart is DMG-only. Used by tests that exercise the
-DMG-on-CGB auto-palette pipeline.
+{- | Force a CGB host (the SDL frontend's choice for compat-mode tests), even when the cart is
+DMG-only. Used by tests that exercise the DMG-on-CGB auto-palette pipeline.
 -}
 mkBusOnCgbHost :: BS.ByteString -> IO Bus.Bus
 mkBusOnCgbHost rom = do
@@ -84,15 +82,14 @@ spec = do
             Bus.busCgb b `shouldBe` False
 
     describe "DMG host gates CGB-only registers" $ do
-        -- All addresses in this set are CGB-only registers; reads on a
-        -- DMG host (the default for a DMG cart) must return 0xFF and
-        -- writes are ignored.
+        -- All addresses in this set are CGB-only registers; reads on a DMG host
+        -- (the default for a DMG cart) must return 0xFF and writes are ignored.
         it "FF4D (KEY1), FF4F (VBK), FF55 (HDMA5), FF68/69/6A/6B (palettes), FF70 (SVBK) read 0xFF" $ do
             b <- mkBus mkDmgRom
             mapM_
                 ( \addr -> do
-                    -- Stuff the register first to make sure the gate is
-                    -- intercepting reads, not just observing zeros.
+                    -- Stuff the register first to make sure the gate is intercepting reads,
+                    -- not just observing zeros.
                     Bus.write8 addr 0x42 b
                     v <- Bus.read8 addr b
                     (addr, v) `shouldBe` (addr, 0xFF)
@@ -192,13 +189,12 @@ spec = do
 
         it "BCPS auto-increment advances on write when bit 7 is set" $ do
             b <- mkBus mkCgbRom
-            Bus.write8 0xFF68 0x80 b -- index 0, auto-increment
+            Bus.write8 0xFF68 0x80 b -- Index 0, auto-increment
             Bus.write8 0xFF69 0x11 b
             Bus.write8 0xFF69 0x22 b
             Bus.write8 0xFF69 0x33 b
             -- Index should now be 0x83 (auto-inc bit kept, low 6 bits = 3).
-            -- Real hardware reads BCPS with bit 6 set (always reads 1), so
-            -- the observed value is 0x83 | 0x40 = 0xC3.
+            -- Real hardware reads BCPS with bit 6 set (always reads 1), so the observed value is 0x83 | 0x40 = 0xC3.
             ix <- Bus.read8 0xFF68 b
             ix `shouldBe` 0xC3
             -- Walk the entries back at offsets 0..2.
@@ -212,10 +208,10 @@ spec = do
 
         it "auto-increment wraps at offset 0x3F" $ do
             b <- mkBus mkCgbRom
-            Bus.write8 0xFF68 0xBF b -- index 0x3F, auto-increment
+            Bus.write8 0xFF68 0xBF b -- Index 0x3F, auto-increment
             Bus.write8 0xFF69 0xFE b
             ix <- Bus.read8 0xFF68 b
-            ix `shouldBe` 0xC0 -- wrapped to 0, auto-inc preserved, bit 6 reads as 1
+            ix `shouldBe` 0xC0 -- Wrapped to 0, auto-inc preserved, bit 6 reads as 1
     describe "CGB OBJ palette RAM (0xFF6A / 0xFF6B)" $ do
         it "OCPD writes land in OBJ palette RAM" $ do
             b <- mkBus mkCgbRom
@@ -231,9 +227,8 @@ spec = do
 
         it "post-boot OBJ palette RAM is grayscaleAuto for CGB-Full carts (Wario Land 3 read pattern)" $ do
             -- Wario Land 3 walks OCPS 0..63 and reads OCPD into a buffer.
-            -- Without the OBJ palette pre-load, every read returns 0xFF,
-            -- and the cart's logic later turns the LCD off and never
-            -- re-enables it. This test guards the pre-load.
+            -- Without the OBJ palette pre-load, every read returns 0xFF, and the cart's logic later
+            -- turns the LCD off and never re-enables it. This test guards the pre-load.
             b <- mkBus mkCgbRom
             -- Iterate: write OCPS=N (no auto-inc), read OCPD; collect.
             vs <-
@@ -243,7 +238,7 @@ spec = do
                         Bus.read8 0xFF6B b
                     )
                     [0 .. 7 :: Word8]
-            -- grayscaleAuto pattern: ff 7f 52 4a a9 29 00 00 (one palette).
+            -- The grayscaleAuto pattern: ff 7f 52 4a a9 29 00 00 (one palette).
             vs `shouldBe` [0xFF, 0x7F, 0x52, 0x4A, 0xA9, 0x29, 0x00, 0x00]
 
     describe "KEY1 (0xFF4D) and double-speed" $ do
@@ -252,6 +247,11 @@ spec = do
             Bus.write8 0xFF4D 0x01 b
             v <- Bus.read8 0xFF4D b
             v `shouldBe` 0x7F -- bit 0 set + bits 1..6 read as 1, bit 7 = 0
+        it "uses 17556 CPU M-cycles per LCD frame before the speed switch" $ do
+            b <- mkBus mkCgbRom
+            frameCycles <- Bus.cpuMCyclesPerLcdFrame b
+            frameCycles `shouldBe` 17556
+
         it "is 0xFF on a DMG-only cart" $ do
             b <- mkBus mkDmgRom
             v <- Bus.read8 0xFF4D b
@@ -263,8 +263,16 @@ spec = do
             switched <- Bus.triggerSpeedSwitch b
             switched `shouldBe` True
             v <- Bus.read8 0xFF4D b
-            -- bit 7 = 1 (double-speed), bit 0 = 0, others read as 1.
+            -- Bit 7 = 1 (double-speed), bit 0 = 0, others read as 1.
             v `shouldBe` 0xFE
+
+        it "uses 35112 CPU M-cycles per LCD frame after the speed switch" $ do
+            b <- mkBus mkCgbRom
+            Bus.write8 0xFF4D 0x01 b
+            switched <- Bus.triggerSpeedSwitch b
+            switched `shouldBe` True
+            frameCycles <- Bus.cpuMCyclesPerLcdFrame b
+            frameCycles `shouldBe` 35112
 
         it "ignores triggerSpeedSwitch when prepare bit is clear" $ do
             b <- mkBus mkCgbRom
@@ -274,39 +282,32 @@ spec = do
             v `shouldBe` 0x7E
 
         it "OAM DMA stays at CPU M-cycle rate in double-speed (160 cycles, not 320)" $ do
-            -- Regression: OAM DMA used to scale with the peripheral
-            -- clock, so in double-speed mode a 160 M-cycle CPU wait
-            -- only finished 80 of 160 bytes. CGB carts that do
-            -- 'LDH (FF46),A; LD A,40; .: DEC A; JR NZ,.; RET' (Wario
-            -- Land 3 / SMB Deluxe / Zelda DX, all of which install this
-            -- exact stub at HRAM 0xFFE8) would RET while the bus was
-            -- still locked, pop 0xFFFF off the stack, and watchdog-
-            -- reset back to a white-screen reboot loop.
+            -- Regression: OAM DMA used to scale with the peripheral clock, so in double-speed mode
+            -- a 160 M-cycle CPU wait only finished 80 of 160 bytes.
+            -- CGB carts that do 'LDH (FF46),A; LD A,40; .: DEC A; JR NZ,.; RET'
+            -- (Wario Land 3 / SMB Deluxe / Zelda DX, all of which install this exact stub at HRAM 0xFFE8)
+            -- would RET while the bus was still locked, pop 0xFFFF off the stack, and watchdog-reset
+            -- back to a white-screen reboot loop.
             b <- mkBus mkCgbRom
             -- Switch to double-speed.
             Bus.write8 0xFF4D 0x01 b
             switched <- Bus.triggerSpeedSwitch b
             switched `shouldBe` True
-            -- Seed source bytes 0..159 at 0xC000 so the DMA copies
-            -- something we can verify.
+            -- Seed source bytes 0..159 at 0xC000 so the DMA copies something we can verify.
             mapM_
                 (\i -> Bus.write8 (0xC000 + fromIntegral i) (fromIntegral i) b)
                 [0 .. 159 :: Int]
             -- Trigger DMA from 0xC000.
             Bus.write8 0xFF46 0xC0 b
-            -- 'oamDma' sets the starting-debit flag, which is held high
-            -- for the duration of the next 'Bus.advance' (modelling the
-            -- 1-cycle startup the cart's LDH (FF46),A burns before
-            -- copies begin). Burn that with a 1-cycle advance so the
-            -- following 160 cycles all copy bytes.
+            -- 'oamDma' sets the starting-debit flag, which is held high for the duration of the next
+            -- 'Bus.advance' (modelling the 1-cycle startup the cart's LDH (FF46),A burns before copies begin).
+            -- Burn that with a 1-cycle advance so the following 160 cycles all copy bytes.
             Bus.advance 1 b
-            -- 160 CPU M-cycles is exactly the documented transfer
-            -- length, plus 1 deferred-clear cycle for the lockout to
-            -- transition from active to inactive (mooneye
-            -- 'oam_dma_timing'). After this, real hardware reports DMA
-            -- inactive regardless of speed mode. With the pre-fix
-            -- 'pCycles' scaling, this window only finished 80 bytes in
-            -- double-speed and the assertion below would fail.
+            -- 160 CPU M-cycles is exactly the documented transfer length, plus 1 deferred-clear
+            -- cycle for the lockout to transition from active to inactive (mooneye 'oam_dma_timing').
+            -- After this, real hardware reports DMA inactive regardless of speed mode.
+            -- With the pre-fix 'pCycles' scaling, this window only finished 80 bytes in double-speed
+            -- and the assertion below would fail.
             Bus.advance 161 b
             active <- readIORef (Bus.busOamDmaActive b)
             active `shouldBe` False
@@ -317,9 +318,8 @@ spec = do
             byte9F `shouldBe` 0x9F
 
         it "in double-speed, peripherals tick at half the M-cycle rate" $ do
-            -- In single-speed, 20 M-cycles = 80 T-cycles is exactly the
-            -- Mode 2 -> Mode 3 boundary. In double-speed, the PPU sees
-            -- only half the M-cycles passed to Bus.advance, so we need
+            -- In single-speed, 20 M-cycles = 80 T-cycles is exactly the Mode 2 -> Mode 3 boundary.
+            -- In double-speed, the PPU sees only half the M-cycles passed to Bus.advance, so we need
             -- to advance 40 M-cycles to hit the same boundary.
             b <- mkBus mkCgbRom
             Bus.write8 0xFF4D 0x01 b
@@ -329,8 +329,7 @@ spec = do
             writeIORef (Ppu.ppuMode ps) Ppu.ModeOamScan
             writeIORef (Ppu.ppuDot ps) 0
             writeIORef (Ppu.ppuLy ps) 0
-            -- 20 M-cycles in double-speed = 10 PPU M-cycles = 40 T-cycles;
-            -- still in Mode 2.
+            -- 20 M-cycles in double-speed = 10 PPU M-cycles = 40 T-cycles; still in Mode 2.
             Bus.advance 20 b
             mode <- readIORef (Ppu.ppuMode ps)
             mode `shouldBe` Ppu.ModeOamScan
@@ -350,8 +349,8 @@ spec = do
             -- Tilemap entry at 0x9800 = tile 0 (already 0).
             -- Bank 1 attribute at the same offset = palette 0, no flips, bank 0.
             MV.write (Ppu.ppuVram ps) (0x2000 + 0x1800) 0x00
-            -- Palette 0 color 0 = pure red (RGB555 = 0x001F), color 1 = pure
-            -- green (RGB555 = 0x03E0). Encoded little-endian.
+            -- Palette 0 color 0 = pure red (RGB555 = 0x001F), color 1 = pure green (RGB555 = 0x03E0).
+            -- Encoded little-endian.
             mapM_
                 (uncurry (MV.write (Ppu.ppuBgPalRam ps)))
                 [(0, 0x1F), (1, 0x00), (2, 0xE0), (3, 0x03)]
@@ -370,10 +369,9 @@ spec = do
             (rgb V.! 3, rgb V.! 4, rgb V.! 5) `shouldBe` (0x00, 0xFF, 0x00)
 
         it "DMG cart on CGB host renders through the compat auto-palette" $ do
-            -- Forced to a CGB host so a DMG-only cart selects
-            -- RenderCgbCompat. The default (no-title-match) auto-palette
-            -- is grayscale; shade 1 decodes to RGB (0x94, 0x94, 0x94).
-            -- Default 'mkBus' would now pick a DMG host for a DMG cart.
+            -- Forced to a CGB host so a DMG-only cart selects RenderCgbCompat.
+            -- The default (no-title-match) auto-palette is grayscale; shade 1 decodes to
+            -- RGB (0x94, 0x94, 0x94). Default 'mkBus' would now pick a DMG host for a DMG cart.
             b <- mkBusOnCgbHost mkDmgRom
             let ps = Bus.busPpu b
             MV.write (Ppu.ppuVram ps) 0 0xFF
@@ -388,9 +386,8 @@ spec = do
             (rgb V.! 0, rgb V.! 1, rgb V.! 2) `shouldBe` (0x94, 0x94, 0x94)
 
         it "forcing RenderDmg gives the hardcoded greenish-DMG palette" $ do
-            -- Same setup as above, but explicitly switch the render mode
-            -- to RenderDmg (what a pure DMG host would do): shade 1 ->
-            -- (0x88, 0xC0, 0x70) per the DMG shade ramp.
+            -- Same setup as above, but explicitly switch the render mode to RenderDmg
+            -- (what a pure DMG host would do): shade 1 -> (0x88, 0xC0, 0x70) per the DMG shade ramp.
             b <- mkBus mkDmgRom
             let ps = Bus.busPpu b
             Ppu.setCgbRenderMode Ppu.RenderDmg ps
@@ -429,12 +426,11 @@ spec = do
         it "draws CGB sprites through OBJ palette RAM" $ do
             b <- mkBus mkCgbRom
             let ps = Bus.busPpu b
-            -- Sprite tile 1 (bank 0): all bits set in low byte (color 1
-            -- across the row). Tile data at 0x10..0x1F.
+            -- Sprite tile 1 (bank 0): all bits set in low byte (color 1 across the row). Tile data at 0x10..0x1F.
             MV.write (Ppu.ppuVram ps) 0x10 0xFF
             MV.write (Ppu.ppuVram ps) 0x11 0x00
             -- Sprite at OAM 0: y=16, x=8 (so it shows at line 0, pixel 0..7).
-            -- attr = 0x02 (palette 2, no flip, bank 0, low priority).
+            -- Attr = 0x02 (palette 2, no flip, bank 0, low priority).
             MV.write (Ppu.ppuOam ps) 0 16
             MV.write (Ppu.ppuOam ps) 1 8
             MV.write (Ppu.ppuOam ps) 2 0x01
@@ -463,7 +459,7 @@ spec = do
             MV.write (Ppu.ppuOam ps) 0 16
             MV.write (Ppu.ppuOam ps) 1 8
             MV.write (Ppu.ppuOam ps) 2 0x01
-            -- attr = 0x08: palette 0, bank 1.
+            -- Attr = 0x08: palette 0, bank 1.
             MV.write (Ppu.ppuOam ps) 3 0x08
             -- OBJ palette 0 color 1 = pure red.
             MV.write (Ppu.ppuObjPalRam ps) 2 0x1F
@@ -483,9 +479,9 @@ spec = do
             -- Source = 0xC000, dest = 0x9000, length = 16 (HDMA5 lo = 0).
             Bus.write8 0xFF51 0xC0 b
             Bus.write8 0xFF52 0x00 b
-            Bus.write8 0xFF53 0x10 b -- dest hi: 0x9000 = 0x8000 | (0x10 << 8)
+            Bus.write8 0xFF53 0x10 b -- Dest hi: 0x9000 = 0x8000 | (0x10 << 8)
             Bus.write8 0xFF54 0x00 b
-            Bus.write8 0xFF55 0x00 b -- start general DMA, length = 1 chunk
+            Bus.write8 0xFF55 0x00 b -- Start general DMA, length = 1 chunk
             -- Read back via VRAM.
             vs <- mapM (\i -> Bus.read8 (0x9000 + fromIntegral i) b) [0 .. 15 :: Int]
             vs `shouldBe` [0 .. 15]
@@ -494,48 +490,42 @@ spec = do
             v55 `shouldBe` 0xFF
 
         it "HDMA general-mode advances peripherals during the copy block" $ do
-            -- Regression: general DMA used to be instant. The fix advances
-            -- peripherals for length / 2 M-cycles in single-speed so the
-            -- PPU continues to tick instead of jumping forward only on the
-            -- next instruction. Verify by checking the divider moves.
+            -- Regression: general DMA used to be instant. The fix advances peripherals for
+            -- length / 2 M-cycles in single-speed so the PPU continues to tick instead of jumping
+            -- forward only on the next instruction. Verify by checking the divider moves.
             b <- mkBus mkCgbRom
             let initialDiv = 0
-            -- 4 chunks = 64 bytes; in single-speed that's 32 M-cycles of
-            -- block time, which advances the timer's internal counter by
-            -- 128 T-cycles (32 * 4).
+            -- 4 chunks = 64 bytes; in single-speed that's 32 M-cycles of block time, which advances
+            -- the timer's internal counter by 128 T-cycles (32 * 4).
             Bus.write8 0xFF51 0xC0 b
             Bus.write8 0xFF52 0x00 b
             Bus.write8 0xFF53 0x10 b
             Bus.write8 0xFF54 0x00 b
-            Bus.write8 0xFF55 0x03 b -- general DMA, 4 chunks
+            Bus.write8 0xFF55 0x03 b -- General DMA, 4 chunks
             divAfter <- Bus.read8 0xFF04 b
-            -- DIV exposes bits 8..15 of the 16-bit counter; after 128
-            -- T-cycles the counter is 128, so DIV is still 0. Push more
-            -- via a larger transfer to confirm the counter actually moves.
+            -- DIV exposes bits 8..15 of the 16-bit counter; after 128 T-cycles the counter is 128,
+            -- so DIV is still 0. Push more via a larger transfer to confirm the counter actually moves.
             Bus.write8 0xFF51 0xC0 b
             Bus.write8 0xFF52 0x00 b
             Bus.write8 0xFF53 0x10 b
             Bus.write8 0xFF54 0x00 b
             Bus.write8 0xFF55 0x7F b -- 128 chunks = 2048 bytes -> 1024 M-cycles -> 4096 T-cycles
             divAfter2 <- Bus.read8 0xFF04 b
-            divAfter `shouldBe` initialDiv -- still 0
+            divAfter `shouldBe` initialDiv -- Still 0
             -- 4096 T-cycles + 128 prior = 4224 = 0x1080 -> upper byte 0x10.
             divAfter2 `shouldBe` 0x10
 
         it "HDMA general-mode reads through the OAM-DMA bus lockout" $ do
-            -- Regression: 'copyHdmaBytes' used 'read8', which honors the
-            -- 'busOamDmaActive' lockout and returns 0xFF for non-HRAM
-            -- addresses while OAM DMA is in progress. HDMA is its own
-            -- bus master and should not be gated by the CPU-side OAM
-            -- DMA lock; copying 16 bytes from WRAM during OAM DMA must
-            -- land the real source bytes in VRAM, not 0xFF.
+            -- Regression: 'copyHdmaBytes' used 'read8', which honors the 'busOamDmaActive' lockout
+            -- and returns 0xFF for non-HRAM addresses while OAM DMA is in progress. HDMA is its own
+            -- bus master and should not be gated by the CPU-side OAM DMA lock; copying 16 bytes
+            -- from WRAM during OAM DMA must land the real source bytes in VRAM, not 0xFF.
             b <- mkBus mkCgbRom
             mapM_
                 (\i -> Bus.write8 (0xC100 + fromIntegral i) (fromIntegral (0x40 + i)) b)
                 [0 .. 15 :: Int]
-            -- Start an OAM DMA from 0xC000 (160 bytes). One M-cycle of
-            -- advance burns the startup-debit so the controller is
-            -- actively copying when we trigger HDMA below.
+            -- Start an OAM DMA from 0xC000 (160 bytes). One M-cycle of advance burns the
+            -- startup-debit so the controller is actively copying when we trigger HDMA below.
             Bus.write8 0xFF46 0xC0 b
             Bus.advance 1 b
             -- HDMA src = 0xC100, dst = 0x9000, len = 16 bytes.
@@ -543,9 +533,8 @@ spec = do
             Bus.write8 0xFF52 0x00 b
             Bus.write8 0xFF53 0x10 b
             Bus.write8 0xFF54 0x00 b
-            Bus.write8 0xFF55 0x00 b -- general mode, 1 chunk
-            -- Read VRAM via the PPU directly so the OAM-DMA lockout on
-            -- the bus read path doesn't shadow the assertion.
+            Bus.write8 0xFF55 0x00 b -- General mode, 1 chunk
+            -- Read VRAM via the PPU directly so the OAM-DMA lockout on the bus read path doesn't shadow the assertion.
             vs <-
                 mapM
                     (\i -> Ppu.read8 (0x9000 + fromIntegral i) (Bus.busPpu b))
@@ -596,9 +585,8 @@ spec = do
             MV.write (Ppu.ppuOam ps) 1 8 -- x=8 (rightmost in DMG terms)
             MV.write (Ppu.ppuOam ps) 2 0x01
             MV.write (Ppu.ppuOam ps) 3 0x00 -- palette 0
-            -- Sprite 1: tile 2 = blue, but at x=8 (would have higher
-            -- priority on DMG by sort-by-X if X were lower; same X
-            -- here so OAM index alone matters).
+            -- Sprite 1: tile 2 = blue, but at x=8 (would have higher priority on DMG by sort-by-X
+            -- if X were lower; same X here so OAM index alone matters).
             MV.write (Ppu.ppuVram ps) 0x20 0xFF
             MV.write (Ppu.ppuVram ps) 0x21 0x00
             MV.write (Ppu.ppuOam ps) 4 16
@@ -609,9 +597,9 @@ spec = do
             mapM_
                 (uncurry (MV.write (Ppu.ppuObjPalRam ps)))
                 [ (2, 0x1F)
-                , (3, 0x00) -- pal 0 col 1 = red
+                , (3, 0x00) -- Pal 0 col 1 = red
                 , (10, 0x00)
-                , (11, 0x7C) -- pal 1 col 1 = blue
+                , (11, 0x7C) -- Pal 1 col 1 = blue
                 ]
             writeIORef (Ppu.ppuLcdc ps) 0x93
             writeIORef (Ppu.ppuMode ps) Ppu.ModeOamScan
@@ -624,8 +612,8 @@ spec = do
 
         it "OPRI register at 0xFF6C round-trips" $ do
             b <- mkBus mkCgbRom
-            -- After 'fromCartridge' on a CGB cart with CGB host the
-            -- render mode is RenderCgbFull, so OPRI=0 (OAM priority).
+            -- After 'fromCartridge' on a CGB cart with CGB host the render mode is RenderCgbFull,
+            -- so OPRI=0 (OAM priority).
             v0 <- Bus.read8 0xFF6C b
             v0 `shouldBe` 0xFE -- bit 0 = 0, others read as 1
             -- Write OPRI=1 (X priority) and read back.
@@ -638,22 +626,19 @@ spec = do
             v2 `shouldBe` 0xFE
 
         it "OPRI seeded to 1 in DMG-on-CGB compat mode" $ do
-            -- A DMG cart on a CGB host runs through 'RenderCgbCompat',
-            -- which seeds OPRI=1 to keep DMG sprite priority. Without
-            -- this, the post-boot sprite Z-ordering for unmodified DMG
+            -- A DMG cart on a CGB host runs through 'RenderCgbCompat', which seeds OPRI=1 to keep
+            -- DMG sprite priority. Without this, the post-boot sprite Z-ordering for unmodified DMG
             -- carts would silently flip vs. real CGB hardware.
             b <- mkBusOnCgbHost mkDmgRom
             v <- Bus.read8 0xFF6C b
-            v `shouldBe` 0xFF -- bit 0 = 1
+            v `shouldBe` 0xFF -- Bit 0 = 1
         it "OPRI flip mid-frame swaps the sprite priority rule" $ do
-            -- A CGB cart that writes OPRI=1 should immediately see
-            -- DMG-style leftmost-X priority on the next frame.
+            -- A CGB cart that writes OPRI=1 should immediately see DMG-style leftmost-X priority on the next frame.
             b <- mkBus mkCgbRom
             let ps = Bus.busPpu b
-            -- Two solid-color sprites overlapping at pixel 4..7. Sprite
-            -- 0 (lower OAM index) at x=12, sprite 1 (higher OAM index)
-            -- at x=8. With OPRI=0: sprite 0 wins (OAM order). With
-            -- OPRI=1: sprite 1 wins (lower X).
+            -- Two solid-color sprites overlapping at pixel 4..7. Sprite 0 (lower OAM index) at x=12,
+            -- sprite 1 (higher OAM index) at x=8. With OPRI=0: sprite 0 wins (OAM order).
+            -- With OPRI=1: sprite 1 wins (lower X).
             MV.write (Ppu.ppuVram ps) 0x10 0xFF
             MV.write (Ppu.ppuVram ps) 0x11 0x00
             MV.write (Ppu.ppuVram ps) 0x20 0xFF
@@ -668,10 +653,10 @@ spec = do
             MV.write (Ppu.ppuOam ps) 7 0x01 -- OBJ pal 1
             mapM_
                 (uncurry (MV.write (Ppu.ppuObjPalRam ps)))
-                [(2, 0x1F), (3, 0x00)] -- pal 0 col 1 = red
+                [(2, 0x1F), (3, 0x00)] -- Pal 0 col 1 = red
             mapM_
                 (uncurry (MV.write (Ppu.ppuObjPalRam ps)))
-                [(10, 0x00), (11, 0x7C)] -- pal 1 col 1 = blue
+                [(10, 0x00), (11, 0x7C)] -- Pal 1 col 1 = blue
             writeIORef (Ppu.ppuLcdc ps) 0x93
             writeIORef (Ppu.ppuMode ps) Ppu.ModeOamScan
             writeIORef (Ppu.ppuDot ps) 0
@@ -695,21 +680,16 @@ spec = do
 
         it "DMG-on-CGB compat: sprite priority sorts by X (DMG behavior)" $ do
             -- A DMG cart on a CGB host runs through 'RenderCgbCompat'.
-            -- The CGB boot ROM sets OPRI=1 in this case, restoring DMG
-            -- priority (leftmost-X wins) so DMG games keep their sprite
-            -- ordering. We don't model OPRI as a writable register yet,
-            -- but the rendering path still has to follow the leftmost-X
-            -- rule for compat mode. Without this, DMG games on a CGB
-            -- host would render overlapping sprites in OAM order, which
-            -- can flip Z-ordering of e.g. Mario standing in front of
-            -- enemies.
+            -- The CGB boot ROM sets OPRI=1 in this case, restoring DMG priority (leftmost-X wins)
+            -- so DMG games keep their sprite ordering. We don't model OPRI as a writable register yet,
+            -- but the rendering path still has to follow the leftmost-X rule for compat mode.
+            -- Without this, DMG games on a CGB host would render overlapping sprites in OAM order,
+            -- which can flip Z-ordering of e.g. Mario standing in front of enemies.
             b <- mkBusOnCgbHost mkDmgRom
             let ps = Bus.busPpu b
-            -- Two sprites, both visible at line 0. Sprite 0 has higher
-            -- OAM index priority but a *higher* X. Sprite 1 has lower X,
-            -- so on DMG (and DMG-on-CGB compat) it should win pixel 8.
-            -- Tile 1 = solid color 1, tile 2 = solid color 1 (different
-            -- palettes used to distinguish).
+            -- Two sprites, both visible at line 0. Sprite 0 has higher OAM index priority but a
+            -- \*higher* X. Sprite 1 has lower X, so on DMG (and DMG-on-CGB compat) it should win pixel 8.
+            -- Tile 1 = solid color 1, tile 2 = solid color 1 (different palettes used to distinguish).
             MV.write (Ppu.ppuVram ps) 0x10 0xFF
             MV.write (Ppu.ppuVram ps) 0x11 0x00
             MV.write (Ppu.ppuVram ps) 0x20 0xFF
@@ -724,15 +704,13 @@ spec = do
             MV.write (Ppu.ppuOam ps) 5 8
             MV.write (Ppu.ppuOam ps) 6 0x02
             MV.write (Ppu.ppuOam ps) 7 0x10
-            -- BGP/OBP0/OBP1: identity palette so the compat-mode CGB
-            -- palette routing picks the right OBJ palette for shade 1.
+            -- BGP/OBP0/OBP1: identity palette so the compat-mode CGB palette routing picks the right OBJ palette for shade 1.
             writeIORef (Ppu.ppuBgp ps) 0xE4
             writeIORef (Ppu.ppuObp0 ps) 0xE4
             writeIORef (Ppu.ppuObp1 ps) 0xE4
-            -- Compat-mode palette RAM was pre-seeded by 'fromCartridge'
-            -- with the grayscale auto-palette. Override OBJ pal 0 to red
-            -- and OBJ pal 1 to blue so the test can tell which sprite
-            -- "wins" pixel 4..7 (the overlap region).
+            -- Compat-mode palette RAM was pre-seeded by 'fromCartridge' with the grayscale auto-palette.
+            -- Override OBJ pal 0 to red and OBJ pal 1 to blue so the test can tell which sprite "wins"
+            -- pixel 4..7 (the overlap region).
             mapM_
                 (uncurry (MV.write (Ppu.ppuObjPalRam ps)))
                 [(2, 0x1F), (3, 0x00)] -- OBJ pal 0 col 1 = red
@@ -745,9 +723,8 @@ spec = do
             writeIORef (Ppu.ppuLy ps) 0
             _ <- Ppu.advance 114 (Bus.busPpu b)
             rgb <- Ppu.framebufferRgb (Bus.busPpu b)
-            -- Pixel 4 is the overlap. DMG/X-priority: sprite 1 wins
-            -- (lower X = 8), so blue. CGB OAM-priority would pick
-            -- sprite 0 (red).
+            -- Pixel 4 is the overlap. DMG/X-priority: sprite 1 wins (lower X = 8), so blue.
+            -- CGB OAM-priority would pick sprite 0 (red).
             (rgb V.! (4 * 3), rgb V.! (4 * 3 + 1), rgb V.! (4 * 3 + 2))
                 `shouldBe` (0x00, 0x00, 0xFF)
 
@@ -820,10 +797,10 @@ spec = do
             Bus.write8 0xFF54 0x00 b
             Bus.write8 0xFF55 0x83 b -- HBlank DMA, 4 chunks
             mid <- Bus.read8 0xFF55 b
-            mid `shouldBe` 0x03 -- bit 7 = 0 (active), remaining = 4-1
-            -- Cancel by writing bit 7 = 0. Real hardware: HDMA5 then reads
-            -- as bit 7 = 1 (transfer no longer active) | (remaining/16 - 1)
-            -- in the low 7 bits, so the cart can pick up where it left off.
+            mid `shouldBe` 0x03 -- Bit 7 = 0 (active), remaining = 4-1
+            -- Cancel by writing bit 7 = 0. Real hardware: HDMA5 then reads as
+            -- bit 7 = 1 (transfer no longer active) | (remaining/16 - 1) in the low 7 bits,
+            -- so the cart can pick up where it left off.
             Bus.write8 0xFF55 0x00 b
             after <- Bus.read8 0xFF55 b
             after `shouldBe` 0x83
@@ -846,8 +823,7 @@ spec = do
             writeIORef (Ppu.ppuLy ps) 0
             _ <- Ppu.advance 114 (Bus.busPpu b)
             rgb <- Ppu.framebufferRgb (Bus.busPpu b)
-            -- Without hflip the red pixel would be at pixel 0; with hflip
-            -- it should be at pixel 7.
+            -- Without hflip the red pixel would be at pixel 0; with hflip it should be at pixel 7.
             let pixelRgb i = (rgb V.! (i * 3), rgb V.! (i * 3 + 1), rgb V.! (i * 3 + 2))
             pixelRgb 0 `shouldBe` (0xFF, 0xFF, 0xFF)
             pixelRgb 7 `shouldBe` (0xFF, 0x00, 0x00)

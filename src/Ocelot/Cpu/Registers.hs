@@ -12,7 +12,13 @@ module Ocelot.Cpu.Registers (
     Flag (..),
     zeroRegisters,
     dmgPostBoot,
+    dmg0PostBoot,
+    mgbPostBoot,
+    sgbPostBoot,
+    sgb2PostBoot,
     cgbPostBoot,
+    cgbAPostBoot,
+    cgbDmgCompatPostBoot,
     getAF,
     setAF,
     getBC,
@@ -83,6 +89,125 @@ cgbPostBoot =
         , regE = 0x56
         , regH = 0x00
         , regL = 0x0D
+        , regSP = 0xFFFE
+        , regPC = 0x0100
+        }
+
+{- | Register state immediately after the DMG0 boot ROM (the very early
+DMG hardware revision, before the "ABC" silicon stepping) hands off
+to the cartridge. Distinct from 'dmgPostBoot' in B, E, H, L, and F:
+the DMG0 boot ROM leaves the carry flag clear (F=0x00) and seeds
+@HL=0x8403@ instead of @HL=0x014D@. Drives mooneye
+@acceptance/boot_regs-dmg0@.
+-}
+dmg0PostBoot :: Registers
+dmg0PostBoot =
+    Registers
+        { regA = 0x01
+        , regF = 0x00
+        , regB = 0xFF
+        , regC = 0x13
+        , regD = 0x00
+        , regE = 0xC1
+        , regH = 0x84
+        , regL = 0x03
+        , regSP = 0xFFFE
+        , regPC = 0x0100
+        }
+
+{- | Register state immediately after the MGB (Game Boy Pocket) boot
+ROM hands off. Identical to 'dmgPostBoot' except @A = 0xFF@ instead
+of @A = 0x01@. Drives mooneye @acceptance/boot_regs-mgb@.
+-}
+mgbPostBoot :: Registers
+mgbPostBoot =
+    Registers
+        { regA = 0xFF
+        , regF = 0xB0
+        , regB = 0x00
+        , regC = 0x13
+        , regD = 0x00
+        , regE = 0xD8
+        , regH = 0x01
+        , regL = 0x4D
+        , regSP = 0xFFFE
+        , regPC = 0x0100
+        }
+
+{- | Register state immediately after the SGB (Super Game Boy) boot
+ROM hands off. Drives mooneye @acceptance/boot_regs-sgb@.
+-}
+sgbPostBoot :: Registers
+sgbPostBoot =
+    Registers
+        { regA = 0x01
+        , regF = 0x00
+        , regB = 0x00
+        , regC = 0x14
+        , regD = 0x00
+        , regE = 0x00
+        , regH = 0xC0
+        , regL = 0x60
+        , regSP = 0xFFFE
+        , regPC = 0x0100
+        }
+
+{- | Register state immediately after the SGB2 boot ROM hands off.
+Identical to 'sgbPostBoot' except @A = 0xFF@. Drives mooneye
+@acceptance/boot_regs-sgb2@.
+-}
+sgb2PostBoot :: Registers
+sgb2PostBoot =
+    Registers
+        { regA = 0xFF
+        , regF = 0x00
+        , regB = 0x00
+        , regC = 0x14
+        , regD = 0x00
+        , regE = 0x00
+        , regH = 0xC0
+        , regL = 0x60
+        , regSP = 0xFFFE
+        , regPC = 0x0100
+        }
+
+{- | Register state on a CGB chip revision A running a DMG-only
+cartridge ("DMG-compat mode"). Distinct from 'cgbPostBoot' (which
+covers the CGB-aware-cart handoff): when a DMG-only cart boots on
+CGB hardware the boot ROM seeds different register values to keep
+the cart compatible. Drives mooneye @misc/boot_regs-A@.
+-}
+cgbAPostBoot :: Registers
+cgbAPostBoot =
+    Registers
+        { regA = 0x11
+        , regF = 0x00
+        , regB = 0x01
+        , regC = 0x00
+        , regD = 0x00
+        , regE = 0x08
+        , regH = 0x00
+        , regL = 0x7C
+        , regSP = 0xFFFE
+        , regPC = 0x0100
+        }
+
+{- | Register state on a regular CGB (revisions B-E) running a DMG-only
+cartridge ("DMG-compat mode"). Distinct from 'cgbPostBoot' (which
+covers the CGB-aware-cart handoff). Drives mooneye
+@misc/boot_regs-cgb@.
+-}
+cgbDmgCompatPostBoot :: Registers
+cgbDmgCompatPostBoot =
+    Registers
+        { regA = 0x11
+        , regF = 0x80
+        , regB = 0x00
+        , regC = 0x00
+        , regD = 0x00
+        , regE = 0x08
+        , regH = 0x00
+        , regL = 0x7C
         , regSP = 0xFFFE
         , regPC = 0x0100
         }

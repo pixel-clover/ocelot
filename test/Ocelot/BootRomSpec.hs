@@ -2,13 +2,12 @@
 
 {- | Boot-ROM handoff semantics.
 
-When a boot ROM is installed via 'machineFromCartridgeWithBoot', peripheral
-state at PC=0 must reflect real-hardware power-on, not Ocelot's post-boot
-shortcut. Specifically the LCD must be off (LCDC bit 7 clear) so the PPU's
-LY register stays at 0 until the boot ROM itself writes a non-zero LCDC.
-Without this, every boot-ROM-driven differential trace drifts in PPU state
-within a few hundred T-cycles of cart entry, and a hypothetical real boot
-ROM run on Ocelot would observe its LCD already on before it asked for it.
+When a boot ROM is installed via 'machineFromCartridgeWithBoot', peripheral state at PC=0 must
+reflect real-hardware power-on, not Ocelot's post-boot shortcut. Specifically the LCD must be off
+(LCDC bit 7 clear) so the PPU's LY register stays at 0 until the boot ROM itself writes a non-zero LCDC.
+Without this, every boot-ROM-driven differential trace drifts in PPU state within a few hundred
+T-cycles of cart entry, and a hypothetical real boot ROM run on Ocelot would observe its LCD
+already on before it asked for it.
 -}
 module Ocelot.BootRomSpec (spec) where
 

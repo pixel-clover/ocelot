@@ -1102,39 +1102,79 @@ advance mCycles apu = do
         [] -> pure ()
         _ -> modifyIORef' (apuSamples apu) (emitted ++)
 
+{- | Step the APU forward by @totalT@ T-cycles. Internally batches by
+the next-event horizon: each iteration advances by @chunk@ T-cycles
+where @chunk@ is the smallest of the four channel timers, the frame
+sequencer timer, the sample-emission countdown, and the requested
+remaining time. This keeps event ordering identical to the
+per-T-cycle implementation (channel events fire at chunk-end, then
+the frame event, then the sample event) but cuts allocation by
+~10-100× for typical workloads where channel periods are in the
+hundreds and the sample-emission stride (~88 T-cycles for 48 kHz)
+dominates.
+-}
 stepCycles :: Int -> ApuInternal -> (ApuInternal, [Int16])
 stepCycles totalT s0 = go totalT s0 []
   where
     go !remaining !s !acc
         | remaining <= 0 = (s, acc)
         | otherwise =
-            let !s1 = tickChannels 1 s
-                -- Frame timer
-                !ft = apuFrameTimer s1 - 1
-                !s2 =
-                    if ft <= 0
-                        then
-                            let !step = (apuFrameStep s1 + 1) `mod` 8
-                                !s2a =
-                                    s1
-                                        { apuFrameStep = step
-                                        , apuFrameTimer = frameSequencerPeriod
-                                        }
-                             in stepFrame (apuFrameStep s1) s2a
-                        else s1{apuFrameTimer = ft}
-                -- Sample accumulator
-                !sa = apuSampleAcc s2 + sampleRate
-                (!s3, !sampMaybe) =
-                    if sa >= gbTCycleRate
-                        then
-                            let !s3a = s2{apuSampleAcc = sa - gbTCycleRate}
-                                (!l, !r) = mixSample s3a
-                             in (s3a, Just (l, r))
-                        else (s2{apuSampleAcc = sa}, Nothing)
-                !acc' = case sampMaybe of
-                    Nothing -> acc
-                    Just (l, r) -> r : l : acc
-             in go (remaining - 1) s3 acc'
+            let !chunk = computeChunk remaining s
+                !s1 = batchAdvance chunk s
+                !s2 = handleFrameEvent s1
+                (!s3, !samples) = handleSamples s2
+                !acc' = samples ++ acc
+             in go (remaining - chunk) s3 acc'
+
+    -- Smallest cycle count until any timer fires its event.
+    computeChunk !remaining !s =
+        let !c1 = sqFreqTimer (apuCh1 s)
+            !c2 = sqFreqTimer (apuCh2 s)
+            !c3 = wvFreqTimer (apuCh3 s)
+            !c4 = noFreqTimer (apuCh4 s)
+            !cf = apuFrameTimer s
+            -- ceil((gbTCycleRate - sa) / sampleRate): cycles until the
+            -- accumulator first crosses the emission threshold.
+            !sa = apuSampleAcc s
+            !cs = (gbTCycleRate - sa + sampleRate - 1) `div` sampleRate
+         in max 1 $
+                min remaining $
+                    min c1 $
+                        min c2 $
+                            min c3 $
+                                min c4 $
+                                    min cf cs
+
+    batchAdvance !t !s =
+        let !ch1 = tickSquare t (apuCh1 s)
+            !ch2 = tickSquare t (apuCh2 s)
+            !ch3 = tickWave t (apuCh3 s)
+            !ch4 = tickNoise t (apuCh4 s)
+            !ft = apuFrameTimer s - t
+            !sa = apuSampleAcc s + t * sampleRate
+         in s
+                { apuCh1 = ch1
+                , apuCh2 = ch2
+                , apuCh3 = ch3
+                , apuCh4 = ch4
+                , apuFrameTimer = ft
+                , apuSampleAcc = sa
+                }
+
+    handleFrameEvent !s
+        | apuFrameTimer s <= 0 =
+            let !step = apuFrameStep s
+                !nextStep = (step + 1) `mod` 8
+                !s' = s{apuFrameTimer = frameSequencerPeriod, apuFrameStep = nextStep}
+             in stepFrame step s'
+        | otherwise = s
+
+    handleSamples !s
+        | apuSampleAcc s >= gbTCycleRate =
+            let !s' = s{apuSampleAcc = apuSampleAcc s - gbTCycleRate}
+                (!l, !r) = mixSample s'
+             in (s', [r, l]) -- prepended in reverse so caller's `acc' = samples ++ acc` keeps order
+        | otherwise = (s, [])
 
 -- | Tick each channel's frequency timer by one T-cycle.
 tickChannels :: Int -> ApuInternal -> ApuInternal
@@ -1146,60 +1186,86 @@ tickChannels !t s =
         , apuCh4 = tickNoise t (apuCh4 s)
         }
 
+{- | Tick the square channel by @t@ T-cycles. Handles multi-cycle ticks
+correctly: when @t@ crosses one or more period boundaries, advances
+@sqDutyPos@ by the number of crossings and computes the residual
+timer. Allows the outer @stepCycles@ loop to batch many T-cycles
+into one allocation per channel instead of one per cycle.
+-}
 tickSquare :: Int -> Square -> Square
-tickSquare !t sq =
-    let !timer = sqFreqTimer sq - t
-     in if timer > 0
-            then sq{sqFreqTimer = timer}
-            else
-                let !period = max 1 ((2048 - sqFreq sq) * 4)
-                    !pos' = (sqDutyPos sq + 1) `mod` 8
-                 in sq{sqFreqTimer = period, sqDutyPos = pos'}
+tickSquare !t sq
+    | t == 0 = sq
+    | t < curr = sq{sqFreqTimer = curr - t}
+    | otherwise =
+        let !period = max 1 ((2048 - sqFreq sq) * 4)
+            !overshoot = t - curr
+            !crossings = 1 + overshoot `div` period
+            !pos' = (sqDutyPos sq + crossings) `mod` 8
+            !timer' = period - overshoot `mod` period
+         in sq{sqFreqTimer = timer', sqDutyPos = pos'}
+  where
+    !curr = sqFreqTimer sq
 
+{- | Tick the wave channel by @t@ T-cycles. Like 'tickSquare' plus the
+@wvJustRead@ pulse: the flag is True for 4 T-cycles after each
+period crossing. For multi-cycle ticks where one or more crossings
+happen, the residual countdown is @max 0 (4 - remainder)@ where
+@remainder@ is the cycles since the last crossing.
+-}
 tickWave :: Int -> Wave -> Wave
-tickWave !t w =
-    -- 'wvJustRead' is set True at the T-cycle the channel reads its
-    -- sample byte and stays True for one M-cycle (4 T-cycles); that
-    -- window covers the case where the CPU's wave-RAM access and the
-    -- wave channel's sample read fall in the same M-cycle but at
-    -- different T-cycle offsets. We approximate the per-T-cycle
-    -- wave_form_just_read flag with this 4-T-cycle pulse since the
-    -- CPU model only resolves accesses to M-cycle boundaries.
-    let !timer = wvFreqTimer w - t
-        !justReadCountdown = max 0 (wvJustReadCountdown w - t)
-     in if timer > 0
-            then
-                w
-                    { wvFreqTimer = timer
-                    , wvJustReadCountdown = justReadCountdown
-                    , wvJustRead = justReadCountdown > 0
-                    }
-            else
-                let !period = max 1 ((2048 - wvFreq w) * 2)
-                    !pos' = (wvPos w + 1) `mod` 32
-                 in w
-                        { wvFreqTimer = period
-                        , wvPos = pos'
-                        , wvJustRead = True
-                        , wvJustReadCountdown = 4
-                        }
+tickWave !t w
+    | t == 0 = w
+    | t < curr =
+        let !cd = max 0 (wvJustReadCountdown w - t)
+         in w
+                { wvFreqTimer = curr - t
+                , wvJustReadCountdown = cd
+                , wvJustRead = cd > 0
+                }
+    | otherwise =
+        let !period = max 1 ((2048 - wvFreq w) * 2)
+            !overshoot = t - curr
+            !crossings = 1 + overshoot `div` period
+            !pos' = (wvPos w + crossings) `mod` 32
+            !remainder = overshoot `mod` period
+            !timer' = period - remainder
+            -- Last crossing happened `remainder` cycles before chunk end.
+            !cd = max 0 (4 - remainder)
+         in w
+                { wvFreqTimer = timer'
+                , wvPos = pos'
+                , wvJustRead = cd > 0
+                , wvJustReadCountdown = cd
+                }
+  where
+    !curr = wvFreqTimer w
 
+{- | Tick the noise channel by @t@ T-cycles. The LFSR advances one step
+per period crossing; for multi-cycle ticks we loop the LFSR forward
+by the crossing count (cheap word ops, no allocation) and only
+allocate one new 'Noise' record at the end.
+-}
 tickNoise :: Int -> Noise -> Noise
-tickNoise !t n =
-    let !timer = noFreqTimer n - t
-     in if timer > 0
-            then n{noFreqTimer = timer}
-            else
-                let !period = max 1 (noiseTimerPeriod n)
-                    -- Advance LFSR.
-                    !lfsr = noLfsr n
-                    !bit01 = (lfsr `xor` (lfsr `shiftR` 1)) .&. 0x01
-                    !lfsr' = (lfsr `shiftR` 1) .|. (bit01 `shiftL` 14)
-                    !lfsr''
-                        | noWidthMode7 n =
-                            (lfsr' .&. complement 0x40) .|. (bit01 `shiftL` 6)
-                        | otherwise = lfsr'
-                 in n{noFreqTimer = period, noLfsr = lfsr''}
+tickNoise !t n
+    | t == 0 = n
+    | t < curr = n{noFreqTimer = curr - t}
+    | otherwise =
+        let !period = max 1 (noiseTimerPeriod n)
+            !overshoot = t - curr
+            !crossings = 1 + overshoot `div` period
+            !lfsr' = stepLfsrN (noLfsr n) (noWidthMode7 n) crossings
+            !timer' = period - overshoot `mod` period
+         in n{noFreqTimer = timer', noLfsr = lfsr'}
+  where
+    !curr = noFreqTimer n
+    stepLfsrN !lfsr _ 0 = lfsr
+    stepLfsrN !lfsr !mode7 !k =
+        let !bit01 = (lfsr `xor` (lfsr `shiftR` 1)) .&. 0x01
+            !lfsr' = (lfsr `shiftR` 1) .|. (bit01 `shiftL` 14)
+            !lfsr''
+                | mode7 = (lfsr' .&. complement 0x40) .|. (bit01 `shiftL` 6)
+                | otherwise = lfsr'
+         in stepLfsrN lfsr'' mode7 (k - 1)
 
 ----------------------------------------------------------------------
 -- Frame sequencer

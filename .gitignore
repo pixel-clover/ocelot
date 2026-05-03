@@ -133,6 +133,7 @@ docs/api/
 .codex
 .claude/
 roms/
+*.prof
 
 # Fetched third-party test ROMs (downloaded by `make test-roms`).
 # Hand-authored regression ROMs under test/testroms/ are still tracked.

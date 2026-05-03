@@ -172,27 +172,23 @@ spec = do
             fb V.! 0 `shouldBe` 0x01
 
         it "DMG: leftmost X wins among 3+ sprites in non-monotonic OAM order" $ do
-            -- Regression for a 'span'-based stableSortByX that only
-            -- partitioned the longest prefix matching 'x.X < pivot.X',
-            -- so e.g. sprites in OAM order [x=10, x=14, x=8] sorted to
-            -- [x=10, x=8, x=14] instead of [x=8, x=10, x=14]. With the
-            -- broken sort, OAM 0 (color 1) used to win the overlap
-            -- pixel; the fix restores the leftmost-X (OAM 2, color 3)
-            -- winner.
+            -- Regression for a 'span'-based stableSortByX that only partitioned the longest prefix
+            -- matching 'x.X < pivot.X', so e.g. sprites in OAM order [x=10, x=14, x=8] sorted to
+            -- [x=10, x=8, x=14] instead of [x=8, x=10, x=14]. With the broken sort, OAM 0 (color 1)
+            -- used to win the overlap pixel; the fix restores the leftmost-X (OAM 2, color 3) winner.
             ps <- freshOn
-            -- Three solid-color tiles. Each tile is two bytes per row,
-            -- 8 rows = 16 bytes. Tile N starts at VRAM 16*N.
+            -- Three solid-color tiles. Each tile is two bytes per row, 8 rows = 16 bytes.
+            -- Tile N starts at VRAM 16*N.
             writeVram
                 ps
-                [ (16, 0xFF) -- tile 1, row 0 lo: color 1 across the row
+                [ (16, 0xFF) -- Tile 1, row 0 lo: color 1 across the row
                 , (17, 0x00)
-                , (32, 0x00) -- tile 2, row 0
-                , (33, 0xFF) -- color 2
-                , (48, 0xFF) -- tile 3, row 0
-                , (49, 0xFF) -- color 3
+                , (32, 0x00) -- Tile 2, row 0
+                , (33, 0xFF) -- Color 2
+                , (48, 0xFF) -- Tile 3, row 0
+                , (49, 0xFF) -- Color 3
                 ]
-            -- All three sprites at scanline 0. X coords chosen so they
-            -- all cover screen pixel 14:
+            -- All three sprites at scanline 0. X coords chosen so they all cover screen pixel 14:
             --   OAM 0: byte1=18 -> sprite X=10, range [10,17]
             --   OAM 1: byte1=22 -> sprite X=14, range [14,21]
             --   OAM 2: byte1=16 -> sprite X=8,  range [8,15]
@@ -212,12 +208,12 @@ spec = do
                 , (11, 0x00)
                 ]
             writeIORef (ppuLcdc ps) 0x93
-            writeIORef (ppuObp0 ps) 0xE4 -- identity
+            writeIORef (ppuObp0 ps) 0xE4 -- Identity
             writeIORef (ppuBgp ps) 0xE4
             _ <- advance ((80 + 172) `div` 4) ps
             fb <- framebuffer ps
-            -- Pixel 14 is covered by all three sprites. With leftmost-X
-            -- priority, OAM 2 (X=8, tile 3 -> color 3) must win.
+            -- Pixel 14 is covered by all three sprites. With leftmost-X priority,
+            -- OAM 2 (X=8, tile 3 -> color 3) must win.
             fb V.! 14 `shouldBe` 0x03
 
 readMode :: PpuState -> IO PpuMode

@@ -49,7 +49,7 @@ Ocelot is licensed under the MIT License (see [LICENSE](LICENSE)).
     * [mooneye-test-suite](https://github.com/Gekkio/mooneye-test-suite)
     * [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) and [cgb-acid2](https://github.com/mattcurrie/cgb-acid2)
 
-### Reference Implementations
+#### Reference Implementations
 
 Ocelot's implementation logic was checked with the following reference material for finding errors and verifying correctness:
 * [Pan Docs](https://gbdev.io/pandocs/)

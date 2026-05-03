@@ -78,10 +78,10 @@ spec = do
                 Right h -> hdrCgbFlag h `shouldBe` CgbOnly
                 Left e -> expectationFailure (show e)
 
-{- | Build a 32 KiB ROM with the requested header fields. The header checksum
-byte at 0x014D is computed from the surrounding bytes so the resulting ROM
-always parses cleanly. ROM size code is restricted to 0x00 (32 KiB) to keep
-the helper small; tests that need larger ROMs can patch and refixup.
+{- | Build a 32 KiB ROM with the requested header fields. The header checksum byte at 0x014D is
+computed from the surrounding bytes so the resulting ROM always parses cleanly. ROM size code is
+restricted to 0x00 (32 KiB) to keep the helper small; tests that need larger ROMs can patch and
+refixup.
 -}
 mkSyntheticRom :: Word8 -> Word8 -> Word8 -> String -> ByteString
 mkSyntheticRom cartType romCode ramCode title =
@@ -100,8 +100,8 @@ mkSyntheticRom cartType romCode ramCode title =
             , (0x0147, cartType)
             , (0x0148, romCode)
             , (0x0149, ramCode)
-            , (0x014A, 0x00) -- destination
-            , (0x014B, 0x33) -- old licensee = "use new licensee"
+            , (0x014A, 0x00) -- Destination
+            , (0x014B, 0x33) -- Old licensee = "use new licensee"
             , (0x014C, 0x00) -- ROM version
             ]
                 <> titleBytes
@@ -114,8 +114,8 @@ patchByte :: Int -> Word8 -> ByteString -> ByteString
 patchByte i v bs =
     BS.take i bs `BS.append` BS.singleton v `BS.append` BS.drop (i + 1) bs
 
-{- | Recompute the header checksum byte for a ROM after manual edits to bytes
-in the @0x0134..0x014C@ range.
+{- | Recompute the header checksum byte for a ROM after manual edits to bytes in the
+ @0x0134..0x014C@ range.
 -}
 fixupChecksum :: ByteString -> ByteString
 fixupChecksum bs = patchByte 0x014D (expectedHeaderChecksum bs) bs

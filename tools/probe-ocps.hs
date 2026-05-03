@@ -1,8 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- One-off: load a ROM, run for N instructions, then write OCPS=k / read OCPD
--- for k=0..7, and print results. Used to verify CGB OBJ palette read path
--- against the live Wario Land 3 boot state where the cart reads 0xFF
+-- One-off: load a ROM, run for N instructions, then write OCPS=k/read OCPD for k=0..7, and print results.
+-- Used to verify CGB OBJ palette read path against the live Wario Land 3 boot state where the cart reads 0xFF
 -- regardless of OCPS value.
 
 module Main (main) where

@@ -96,9 +96,9 @@ spec = do
             regPC regs `shouldBe` 0x0001
 
         it "HALT bug: with IME=0 and IF&IE != 0, HALT does not halt" $ do
-            -- Without the bug fix the CPU halts and never resumes (because
-            -- service requires IME). After the fix, HALT in this state is
-            -- a no-op and execution continues with the next instruction.
+            -- Without the bug fix the CPU halts and never resumes (because service requires IME).
+            -- After the fix, HALT in this state is a no-op and execution continues with the next
+            -- instruction.
             m <- mkProg [0x76, 0x00, 0x00]
             setIfIe 0x04 0x04 m
             -- IME is False by default.
@@ -116,20 +116,18 @@ spec = do
             cpuHalted cpu `shouldBe` True
 
         it "HALT bug: byte after HALT is decoded twice" $ do
-            -- HALT (0x76) at PC=0; INC A (0x3C) at PC=1; INC A again at
-            -- PC=2 just so we have something to execute next. With IME=0
-            -- and a pending+enabled IRQ, HALT must not halt and the byte
-            -- following it is read twice, so A increments twice from 0x00
-            -- before the loop continues past PC=2.
+            -- HALT (0x76) at PC=0; INC A (0x3C) at PC=1; INC A again at PC=2 just so we have
+            -- something to execute next. With IME=0 and a pending+enabled IRQ, HALT must not halt
+            -- and the byte following it is read twice, so A increments twice from 0x00 before the
+            -- loop continues past PC=2.
             m <- mkProg [0x76, 0x3C, 0x3C, 0x00]
             setIfIe 0x04 0x04 m
-            -- HALT itself, plus the duplicated INC A, plus the second
-            -- INC A: 3 instructions to execute.
+            -- HALT itself, plus the duplicated INC A, plus the second INC A: 3 instructions to execute.
             _ <- runFor 3 m
             regs <- getCpuRegs m
-            -- After HALT (1st step) + INC A (twice) we should be at PC=2
-            -- with A = 2. With the bug fix, the INC at PC=1 ran, PC stayed
-            -- at 1, then the same INC ran again advancing PC to 2.
+            -- After HALT (1st step) + INC A (twice) we should be at PC=2 with A = 2. With the
+            -- bug fix, the INC at PC=1 ran, PC stayed at 1, then the same INC ran again advancing
+            -- PC to 2.
             regPC regs `shouldBe` 0x0002
             regA regs `shouldBe` 0x02
 

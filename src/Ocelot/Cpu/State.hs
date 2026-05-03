@@ -4,12 +4,30 @@ bits that live alongside (interrupt-enable master, halt, cycle counter).
 module Ocelot.Cpu.State (
     CpuState (..),
     dmgPostBootCpu,
+    dmg0PostBootCpu,
+    mgbPostBootCpu,
+    sgbPostBootCpu,
+    sgb2PostBootCpu,
     cgbPostBootCpu,
+    cgbAPostBootCpu,
+    cgbDmgCompatPostBootCpu,
     freshCpu,
 ) where
 
 import Data.Word (Word64)
-import Ocelot.Cpu.Registers (Registers, cgbPostBoot, dmgPostBoot, regSP, zeroRegisters)
+import Ocelot.Cpu.Registers (
+    Registers,
+    cgbAPostBoot,
+    cgbDmgCompatPostBoot,
+    cgbPostBoot,
+    dmg0PostBoot,
+    dmgPostBoot,
+    mgbPostBoot,
+    regSP,
+    sgb2PostBoot,
+    sgbPostBoot,
+    zeroRegisters,
+ )
 
 data CpuState = CpuState
     { cpuRegs :: !Registers
@@ -32,9 +50,33 @@ data CpuState = CpuState
 dmgPostBootCpu :: CpuState
 dmgPostBootCpu = CpuState dmgPostBoot False False False False 0
 
+-- | CPU state immediately after the DMG0 boot ROM hands off.
+dmg0PostBootCpu :: CpuState
+dmg0PostBootCpu = CpuState dmg0PostBoot False False False False 0
+
+-- | CPU state immediately after the MGB boot ROM hands off.
+mgbPostBootCpu :: CpuState
+mgbPostBootCpu = CpuState mgbPostBoot False False False False 0
+
+-- | CPU state immediately after the SGB boot ROM hands off.
+sgbPostBootCpu :: CpuState
+sgbPostBootCpu = CpuState sgbPostBoot False False False False 0
+
+-- | CPU state immediately after the SGB2 boot ROM hands off.
+sgb2PostBootCpu :: CpuState
+sgb2PostBootCpu = CpuState sgb2PostBoot False False False False 0
+
 -- | CPU state immediately after the CGB boot ROM hands off to the cartridge.
 cgbPostBootCpu :: CpuState
 cgbPostBootCpu = CpuState cgbPostBoot False False False False 0
+
+-- | CPU state on a CGB chip revision A booting a DMG-only cartridge.
+cgbAPostBootCpu :: CpuState
+cgbAPostBootCpu = CpuState cgbAPostBoot False False False False 0
+
+-- | CPU state on a regular CGB booting a DMG-only cartridge.
+cgbDmgCompatPostBootCpu :: CpuState
+cgbDmgCompatPostBootCpu = CpuState cgbDmgCompatPostBoot False False False False 0
 
 {- | All registers cleared, SP at @0xFFFE@, PC at @0x0000@. Convenient starting
 point for unit tests that drop a hand-written program at offset 0.

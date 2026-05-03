@@ -13,14 +13,14 @@ Priorities, in order:
 4. Idiomatic, well-typed Haskell that the author can learn from.
 5. Performance, but only after correctness is covered by tests.
 
-This is also a learning project: prefer designs that make Haskell concepts (pure functions, `ST`, `Data.Vector.Unboxed`, strictness, typeclasses)
-explicit and instructive over clever or terse alternatives.
+This is also a learning project, so prefer designs that make Haskell concepts (pure functions, `ST`, `Data.Vector.Unboxed`, strictness, and
+typeclasses) explicit and instructive over clever or terse alternatives.
 
 ## Core Rules
 
 - Use English for code, comments, docs, and tests.
 - Prefer small, focused changes over broad rewrites.
-- Keep the project modular: separate the SM83 CPU, memory map (MMU), PPU, APU, timer, joypad, and cartridge/MBC into their own modules with clean
+- Keep the project modular with separate the SM83 CPU, memory map (MMU), PPU, APU, timer, joypad, and cartridge/MBC into their own modules with clean
   APIs.
 - Keep the emulator state explicit and instance-bound. A `Machine` (or per-subsystem `CpuState`, `PpuState`, etc.) record is the carrier; mutate via
   `ST`/`IORef`/`Data.Vector.Unboxed.Mutable` inside a subsystem, not via top-level globals.
@@ -49,8 +49,8 @@ Quick examples:
 
 ## Repository Layout
 
-The current tree is small; this layout describes the target structure as the project grows. Do not invent modules that do not yet exist when answering
-questions, but do place new modules according to this map.
+The current tree is small; this layout describes the target structure as the project grows.
+Do not invent modules that do not yet exist when answering questions, but do place new modules according to this map.
 
 - `app/Main.hs`: executable entry point. Argument parsing, ROM loading from disk, headless terminal mode, and the SDL frontend dispatch live here.
 - `app/Frontend/Sdl.hs`: SDL2-backed frontend with video, audio, and hotkeys (pause, fast-forward, save state, load state, screenshot).
@@ -114,12 +114,12 @@ questions, but do place new modules according to this map.
     - `Apu.advance` (frame sequencer steps tied to DIV)
 - Cartridge MBC behavior is owned by `Ocelot.Cartridge`. The bus calls into the cartridge for `0x0000-0x7FFF` and `0xA000-0xBFFF`; do not bypass it
   from elsewhere.
-- Keep frontend concerns (windowing, audio output device, key mapping concrete codes) separate from emulation concerns.
+- Keep frontend concerns (like windowing, audio output device, key mapping concrete codes, etc.) separate from emulation concerns.
 
 ## Component APIs
 
-Each subsystem (`Cpu`, `Ppu`, `Apu`, `Timer`, `Joypad`, `Cartridge`) owns its own state record and exposes a narrow function-level API. Other
-subsystems and the bus interact through these functions only; they do not poke each other's `IORef`s or `IOVector`s directly (with two narrow
+Each subsystem (`Cpu`, `Ppu`, `Apu`, `Timer`, `Joypad`, and `Cartridge`) owns its own state record and exposes a narrow function-level API.
+Other subsystems and the bus interact through these functions only; they do not poke each other's `IORef`s or `IOVector`s directly (with two narrow
 exceptions called out below: PpuState fields are exported so `Bus` can route memory windows, and the Snapshot module reaches into PpuState and
 BusState for save/load). The bus is the one place that knows the full address map.
 
@@ -143,7 +143,7 @@ WBK, KEY1, HDMA1-5) to the right peer.
 
 ### `Ocelot.Cpu`
 
-- `Ocelot.Cpu.Execute.step :: Machine -> IO MCycles` (one instruction; reads/writes go through `Bus`)
+- `Ocelot.Cpu.Execute.step :: Machine -> IO ()` (one instruction; reads/writes go through `Bus`; cycle accounting is stored on the CPU state)
 - `Ocelot.Cpu.Execute.runFor :: Int -> Machine -> IO Int` and `runUntilHalt :: Int -> Machine -> IO Int` (test/headless helpers)
 - Interrupt servicing is folded into `step`; there is no separately exposed entry point.
 
@@ -154,12 +154,14 @@ Reading or writing CPU registers from outside `Ocelot.Cpu` is allowed only for t
 ### `Ocelot.Ppu`
 
 - Memory windows and registers: `read8 :: Word16 -> PpuState -> IO Word8`, `write8 :: Word16 -> Word8 -> PpuState -> IO ()` (covers VRAM, OAM,
-  the LCDC/STAT register surface at `0xFF40-0xFF4B`, plus CGB-only `0xFF4F`, `0xFF68-0xFF6B`)
+  the LCDC/STAT register surface at `0xFF40-0xFF4B`, plus CGB-only `0xFF4F`, `0xFF68-0xFF6C`)
 - Time advance: `advance :: Int -> PpuState -> IO Word8` (returns a flag bitmask: bit 0 = VBlank IRQ, bit 1 = STAT IRQ, bit 2 = HBlank-entered
   for HDMA stepping)
 - Framebuffer accessors: `framebuffer :: PpuState -> IO (Vector Word8)` (DMG palette indices) and `framebufferRgb :: PpuState -> IO (Vector Word8)`
   (RGB888 bytes; what the SDL frontend uses)
 - CGB hookup: `setCgbMode :: Bool -> PpuState -> IO ()` (called by the bus once at startup)
+- CGB render-mode hookup: `setCgbRenderMode :: CgbRenderMode -> PpuState -> IO ()`
+- STAT write-edge hookup: `takePendingStatIrq :: PpuState -> IO Bool` (called by the bus after PPU register writes that can raise STAT)
 
 `PpuState` exports its field record so `Bus` can route memory accesses and so `Snapshot` can serialize the IORefs and IOVectors directly. Treat
 the surface listed above as the contract; do not call other PpuState fields from outside `Ocelot.Ppu` outside Snapshot.
@@ -170,6 +172,8 @@ the surface listed above as the contract; do not call other PpuState fields from
   RAM at `0xFF30-0xFF3F`)
 - Time advance: `advance :: Int -> ApuState -> IO ()` (queues stereo samples; the bus drains them)
 - Sample drain: `drainSamples :: ApuState -> IO [Int16]`
+- CGB hookup: `setCgbMode :: Bool -> ApuState -> IO ()`
+- Host sample rate: `sampleRate :: Int`
 - Snapshot hooks: `dumpState :: ApuState -> IO ByteString`, `loadState :: ByteString -> ApuState -> IO ()`
 
 `ApuState` is exported as an opaque type; the channel and frame-sequencer types stay internal.
@@ -200,13 +204,14 @@ The timer is the one peripheral that is still pure. The bus owns the `IORef Time
   `extractRam`/`loadRam`
 - Snapshot hooks: `dumpMbc :: Cartridge -> IO ByteString`, `loadMbc :: ByteString -> Cartridge -> IO ()` (MBC bank-select state)
 
-MBC variant selection (no-MBC, MBC1, MBC3 with RTC, MBC5) is internal. The bus sees only `read8` and `write8`. RTC persistence uses the
+MBC variant selection (no-MBC, MBC1, MBC2, MBC3 with RTC, MBC5, and HuC1) is internal. The bus sees only `read8` and `write8`. RTC persistence uses
+the
 VBA-M-compatible 48-byte suffix appended to the RAM bytes in `extractSave`/`loadSave`.
 
 ### `Ocelot.Snapshot`
 
 - `save :: Machine -> IO ByteString` and `load :: ByteString -> Machine -> IO (Either SnapshotError ())`
-- Versioned binary format (`OCS1` magic + LE u32 version, currently 3). When the format changes incompatibly, bump the version; old blobs are
+- Versioned binary format (`OCS1` magic + LE u32 version, currently 8). When the format changes incompatibly, bump the version; old blobs are
   rejected with `UnsupportedVersion`.
 - Reaches across subsystems via the per-module `dumpState`/`loadState` hooks listed above and via direct PpuState/Bus field access where the
   state is in IORefs and IOVectors that the per-module hooks would just wrap.
@@ -281,7 +286,7 @@ Optimize-mode guidance:
 Review output should be concise and only include critical issues.
 
 - `P0`: must-fix defects (incorrect emulation behavior, severe regression, broken build or test workflow).
-- `P1`: high-priority defects (likely timing bug, incorrect subsystem coupling, missing validation for a risky change).
+- `P1`: high-priority defects (like possible timing bug, incorrect subsystem coupling, missing validation for a risky change).
 
 Use this review format:
 
