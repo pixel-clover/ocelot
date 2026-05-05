@@ -9,10 +9,11 @@
 [![Tests](https://img.shields.io/github/actions/workflow/status/pixel-clover/ocelot/tests.yml?label=tests&style=flat&labelColor=282c34&logo=github)](https://github.com/pixel-clover/ocelot/actions/workflows/tests.yml)
 [![Lints](https://img.shields.io/github/actions/workflow/status/pixel-clover/ocelot/lints.yml?label=lints&style=flat&labelColor=282c34&logo=github)](https://github.com/pixel-clover/ocelot/actions/workflows/lints.yml)
 [![Code Coverage](https://img.shields.io/codecov/c/github/pixel-clover/ocelot?label=coverage&style=flat&labelColor=282c34&logo=codecov)](https://codecov.io/gh/pixel-clover/ocelot)
-[![Play Online](https://img.shields.io/badge/play%20online-browser-007ec6?style=flat&labelColor=282c34&logo=webassembly)](https://pixel-clover.github.io/ocelot/)
 [![License](https://img.shields.io/badge/license-MIT-007ec6?label=license&style=flat&labelColor=282c34&logo=open-source-initiative)](https://github.com/pixel-clover/ocelot/blob/main/LICENSE)
+[![Play Online](https://img.shields.io/badge/play%20online-browser-007ec6?style=flat&labelColor=282c34&logo=webassembly)](https://pixel-clover.github.io/ocelot/)
+<br>
+[![Docker](https://img.shields.io/badge/docker-ghcr.io-007ec6?style=flat&labelColor=282c34&logo=docker)](https://github.com/orgs/pixel-clover/packages/container/package/ocelot-web)
 [![Release](https://img.shields.io/github/release/pixel-clover/ocelot.svg?label=release&style=flat&labelColor=282c34&logo=github)](https://github.com/pixel-clover/ocelot/releases/latest)
-
 
 A Nintendo Gameboy and Gameboy Color emulator in Haskell λ
 
@@ -22,15 +23,102 @@ A Nintendo Gameboy and Gameboy Color emulator in Haskell λ
 
 Ocelot is a Gameboy (DMG) and Gameboy Color (CGB) emulator written in Haskell.
 
+### Key Features
+
+- Accurate Gameboy and Gameboy Color emulation
+- Very portable; run on Windows, Linux, and macOS, and also in the browser via WebAssembly
+- Very configurable, including gameplay input, frontend hotkeys, and rendering settings
+- Has a permissive license that allows commercial use
+
+See [ROADMAP.md](ROADMAP.md) for the list of implemented and planned features.
+
+> [!IMPORTANT]
+> This project is still in early development, so compatibility is not perfect.
+> Bugs and breaking changes are also expected.
+> Please use the [issues page](https://github.com/pixel-clover/ocelot/issues) to report bugs or request features.
+
 ---
 
 ### Quickstart
 
-#### Building from Source
+#### Download the Latest Release
+
+##### A. Desktop
+
+You can download the latest pre-built binaries from the project's [release page](https://github.com/pixel-clover/ocelot/releases).
+
+##### B. Web
+
+You can download and use the latest pre-built Docker image for the web version of Ocelot from the
+[GCR](https://github.com/orgs/pixel-clover/packages/container/package/ocelot-web):
 
 ```bash
+docker run -d -p 8085:80 --rm ghcr.io/pixel-clover/ocelot-web:latest
+```
+
+Then open http://localhost:8085 in your browser.
+
+#### Build Ocelot from Source
+
+Alternatively, you can build the emulator from source by following the steps below.
+
+##### 1. Clone the repository
+
+```bash
+git clone --depth=1 https://github.com/pixel-clover/ocelot.git
+cd ocelot
+```
+
+> [!NOTE]
+> If you want to run the tests and develop Ocelot further, you may want to clone the repository with
+> `git clone --recursive https://github.com/pixel-clover/ocelot.git`.
+> Test ROMs can then be fetched with `make test-roms`.
+
+##### 2. Build the Ocelot Binary
+
+```bash
+# This can take some time
 make release
-stack run -- play path/to/game.gb
+```
+
+If the build is successful, you can find the built binary at `$(stack path --local-install-root)/bin/ocelot`.
+
+#### Run the Emulator
+
+Run the `ocelot` binary to start the emulator GUI:
+
+```bash
+ocelot
+```
+
+Run `ocelot --help` to see the list of available command-line options.
+
+Example output:
+
+```
+Ocelot 0.1.0.0 (main@c636b) - Gameboy (DMG) and Gameboy Color (CGB) emulator in Haskell
+
+Usage: ocelot [-V|--version] COMMAND
+
+Available options:
+  -h,--help                Show this help text
+  -V,--version             Print the version and exit
+
+Available commands:
+  play                     Run the ROM in the SDL frontend (default mode). Pass
+                           --boot-rom to start from a DMG/CGB boot ROM instead
+                           of the post-boot register state.
+  headless                 Step the CPU for a fixed number of instructions and
+                           dump the final state (registers, serial output,
+                           disassembly, memory hex dump, VRAM tile preview,
+                           framebuffer) to the terminal.
+  audio-test               Play a 440 Hz sine tone for 2 seconds via SDL. No ROM
+                           needed; verifies the SDL audio path.
+  info                     Print the ROM's cartridge header and exit.
+
+SDL key bindings (play): Z=A, X=B, Enter=Start, RShift=Select, Arrows=D-pad,
+Space=pause, F1=help overlay, .=frame step, Tab=fast-fwd (held), R=reset,
+F5=save state, F7=load state, F12=screenshot, Escape=quit.
 ```
 
 ---
@@ -46,7 +134,7 @@ Ocelot is licensed under the MIT License (see [LICENSE](LICENSE)).
 ### Acknowledgements
 
 * The logo is made of [image 1](https://www.svgrepo.com/svg/28849/old-gameboy-console) and [image 2](https://www.svgrepo.com/svg/373660/haskell).
-* This project uses the following test ROMs for regression testing and and verifying correctness of the implementation:
+* This project uses the following test ROMs for regression testing and verifying correctness of the implementation:
     * [gb-test-roms](https://github.com/retrio/gb-test-roms)
     * [mooneye-test-suite](https://github.com/Gekkio/mooneye-test-suite)
     * [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) and [cgb-acid2](https://github.com/mattcurrie/cgb-acid2)
@@ -54,6 +142,7 @@ Ocelot is licensed under the MIT License (see [LICENSE](LICENSE)).
 #### Reference Implementations
 
 Ocelot's implementation logic was checked with the following reference material for finding errors and verifying correctness:
+
 * [Pan Docs](https://gbdev.io/pandocs/)
 * [SameBoy](https://github.com/LIJI32/SameBoy)
 * [Gameboy: Complete Technical Reference](https://gekkio.fi/files/gb-docs/gbctr.pdf)

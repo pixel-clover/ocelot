@@ -15,7 +15,8 @@ DOC_OUT       := docs/haskell
 ################################################################################
 
 .PHONY: all build rebuild run test cov lint format format-check doc clean install-deps release help coverage \
- repl setup-hooks test-hooks mooneye-roms acid2-roms test-roms tools sameboy-core sameboy-trace web-build
+ repl setup-hooks test-hooks mooneye-roms acid2-roms test-roms tools sameboy-core sameboy-trace web-build \
+ docker-build docker-run
 
 .DEFAULT_GOAL := help
 
@@ -168,7 +169,13 @@ $(TOOLS_OUT)/sameboy-trace: tools/sameboy-trace.c $(SAMEBOY_DIR)/build/obj/Core/
 
 sameboy-trace: $(TOOLS_OUT)/sameboy-trace ## Build the SameBoy-side differential trace driver
 
-web-build: ## Build the browser host and wasm module (requires wasm32-wasi-cabal)
+docker-build: ## Build the Docker image for the web frontend
+	docker build -t ocelot-web .
+
+docker-run: ## Run the Docker image locally on port 8085
+	docker run --rm -p 8085:80 ocelot-web
+
+web-build: ## Build the browser host and wasm module (needs wasm32-wasi-cabal)
 	@command -v $(WASM_CABAL) >/dev/null 2>&1 || { \
 		echo "Missing $(WASM_CABAL). Install the GHC wasm toolchain first."; \
 		exit 1; \

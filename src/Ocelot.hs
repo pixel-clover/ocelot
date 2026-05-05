@@ -1,5 +1,10 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
+#ifndef wasm32_HOST_ARCH
 {-# LANGUAGE TemplateHaskell #-}
+#endif
+
+{- HLINT ignore "Unused LANGUAGE pragma" -}
 
 {- | Public facade for the Ocelot emulator.
 
@@ -31,7 +36,9 @@ module Ocelot (
 
 import Data.Text (Text)
 import qualified Data.Text as T
+#ifndef wasm32_HOST_ARCH
 import GitHash (giBranch, giHash, tGitInfoCwdTry)
+#endif
 import Ocelot.Cartridge (
     Cartridge,
     CartridgeError (..),
@@ -55,8 +62,12 @@ import Ocelot.Cartridge.Header (
 
 -- | Human-readable version string, including branch and short commit hash baked in at compile time.
 version :: Text
+#ifdef wasm32_HOST_ARCH
+version = "Ocelot 0.1.0.0"
+#else
 version = "Ocelot 0.1.0.0" <> T.pack meta
   where
     meta = case $$tGitInfoCwdTry of
         Left _ -> ""
         Right gi -> " (" <> giBranch gi <> "@" <> take 5 (giHash gi) <> ")"
+#endif

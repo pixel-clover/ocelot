@@ -13,7 +13,10 @@
 // run `make -C external/SameBoy tester` first to populate
 // `external/SameBoy/build/obj/Core/*.o`).
 
+#ifndef GB_INTERNAL
 #define GB_INTERNAL
+#endif
+
 #include <Core/gb.h>
 #include <stdint.h>
 #include <stdio.h>

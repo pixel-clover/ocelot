@@ -100,6 +100,10 @@ data ApuInternal = ApuInternal
     , apuNr10 :: !Word8
     , apuNr30 :: !Word8
     -- ^ Cached register bytes for read-back of unused bits.
+    , apuHpCapL :: !Double
+    , apuHpCapR :: !Double
+    -- ^ High-pass filter capacitor state (one per stereo channel).
+    -- Removes DC offset; models the GB DAC's analog coupling capacitor.
     }
 
 {- | Square channel (used for ch1 and ch2). The sweep fields are only used by
@@ -257,6 +261,8 @@ initialApuInternal =
         , apuWaveRam = V.replicate 16 0
         , apuNr10 = 0x80
         , apuNr30 = 0x7F
+        , apuHpCapL = 0.0
+        , apuHpCapR = 0.0
         }
 
 initial :: IO ApuState
@@ -349,6 +355,8 @@ decodeApu = do
             , apuWaveRam = V.fromList (BS.unpack wave)
             , apuNr10 = nr10
             , apuNr30 = nr30
+            , apuHpCapL = 0.0
+            , apuHpCapR = 0.0
             }
 
 encodeSquare :: Square -> BB.Builder
@@ -1172,8 +1180,8 @@ stepCycles totalT s0 = go totalT s0 []
     handleSamples !s
         | apuSampleAcc s >= gbTCycleRate =
             let !s' = s{apuSampleAcc = apuSampleAcc s - gbTCycleRate}
-                (!l, !r) = mixSample s'
-             in (s', [r, l]) -- prepended in reverse so caller's `acc' = samples ++ acc` keeps order
+                (!s'', !l, !r) = mixSample s'
+             in (s'', [r, l]) -- prepended in reverse so caller's `acc' = samples ++ acc` keeps order
         | otherwise = (s, [])
 
 -- | Tick each channel's frequency timer by one T-cycle.
@@ -1442,8 +1450,14 @@ tickSweep s
 -- Mixer
 ----------------------------------------------------------------------
 
--- | Compute one stereo sample (Int16 each) from the current channel state.
-mixSample :: ApuInternal -> (Int16, Int16)
+{- | Compute one stereo sample (Int16 each) from the current channel state.
+| Charge factor for the high-pass filter (~6 Hz cutoff at 48 kHz).
+Models the GB DAC's analog coupling capacitor that removes DC offset.
+-}
+hpCharge :: Double
+hpCharge = 0.999215
+
+mixSample :: ApuInternal -> (ApuInternal, Int16, Int16)
 mixSample s =
     let !c1 = squareSample (apuCh1 s)
         !c2 = squareSample (apuCh2 s)
@@ -1464,10 +1478,20 @@ mixSample s =
         -- Master volume is 0..7; effective gain is (volL+1)/8 (and same for R).
         !leftScaled = leftSum * (fromIntegral (apuVolL s) + 1)
         !rightScaled = rightSum * (fromIntegral (apuVolR s) + 1)
-        -- Convert to Int16 with headroom.
-        !lFinal = clampI16 (leftScaled * 64)
-        !rFinal = clampI16 (rightScaled * 64)
-     in (lFinal, rFinal)
+        -- Scale to Int16 range before filtering.
+        !rawL = fromIntegral (leftScaled * 64) :: Double
+        !rawR = fromIntegral (rightScaled * 64) :: Double
+        -- High-pass filter: out = in - cap; cap tracks DC with a leaky integrator.
+        !capL = apuHpCapL s
+        !capR = apuHpCapR s
+        !outL = rawL - capL
+        !outR = rawR - capR
+        !capL' = hpCharge * capL + (1.0 - hpCharge) * rawL
+        !capR' = hpCharge * capR + (1.0 - hpCharge) * rawR
+        !lFinal = clampI16 (round outL)
+        !rFinal = clampI16 (round outR)
+        !s' = s{apuHpCapL = capL', apuHpCapR = capR'}
+     in (s', lFinal, rFinal)
 
 clampI16 :: Int -> Int16
 clampI16 x

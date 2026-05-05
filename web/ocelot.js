@@ -14,7 +14,7 @@ let gainNode = null;
 let audioEnabled = true;
 let masterVolume = 70;
 let audioBufferLevel = 0;
-let audioBufferCapacity = 1;
+let audioBufferCapacity = 0;
 let audioFrameCounter = 0;
 
 // Storage
@@ -46,6 +46,7 @@ let lastFrameTime = 0;
 let frameInterval = 1000 / 59.7275;
 let fpsFrames = 0;
 let fpsWindowStart = 0;
+let lastFrameMs = 0;
 
 const textDecoder = new TextDecoder();
 const BATTERY_SAVE_INTERVAL_MS = 15000;
@@ -800,6 +801,7 @@ function tickEmulator(now) {
 
     pollGamepads();
 
+    const t0 = performance.now();
     const e = wasm.instance.exports;
     if (!e.ocelot_run_frame(emu)) {
         showError(getLastError());
@@ -820,6 +822,7 @@ function tickEmulator(now) {
         pixels[dst + 3] = 255;
     }
     ctx.putImageData(imageData, 0, 0);
+    lastFrameMs = performance.now() - t0;
     updateFps(now);
 }
 
@@ -830,7 +833,7 @@ function updateFps(now) {
         const fps = (fpsFrames * 1000) / elapsed;
         document.getElementById("fps-display").textContent = `${fps.toFixed(1)} FPS`;
         document.getElementById("perf-fps").textContent = `${fps.toFixed(1)} FPS`;
-        document.getElementById("perf-frame-ms").textContent = `${(1000 / fps).toFixed(2)} ms`;
+        document.getElementById("perf-frame-ms").textContent = `${lastFrameMs.toFixed(2)} ms`;
         fpsFrames = 0;
         fpsWindowStart = now;
     }
@@ -979,7 +982,8 @@ function updatePerf() {
         emu ? (wasm.instance.exports.ocelot_is_cgb(emu) ? "CGB" : "DMG") : "N/A";
     document.getElementById("perf-audio").textContent =
         audioCtx && audioNode
-            ? `${audioCtx.state} @ ${audioCtx.sampleRate} Hz (${audioBufferLevel}/${audioBufferCapacity})`
+            ? `${audioCtx.state}` +
+              (audioBufferCapacity > 0 ? ` ${audioBufferLevel}/${audioBufferCapacity}` : "")
             : "OFF";
     document.getElementById("perf-wasm-mem").textContent =
         wasm ? `${(wasm.instance.exports.memory.buffer.byteLength / 1048576).toFixed(1)} MB` : "--";

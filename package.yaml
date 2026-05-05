@@ -49,6 +49,10 @@ ghc-options:
 
 library:
   source-dirs: src
+  when:
+    - condition: flag(wasm-reactor)
+      ghc-options:
+        - -fexternal-interpreter
 
 executables:
   ocelot:
