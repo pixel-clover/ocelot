@@ -339,9 +339,9 @@ read8Raw addr b
     | addr <= 0x7FFF = bootRomOrCart addr b
     | addr <= 0x9FFF = Ppu.read8 addr (busPpu b)
     | addr <= 0xBFFF = Cartridge.read8 addr (busCart b)
-    | addr <= 0xCFFF = MV.read (busWram b) (fromIntegral (addr - 0xC000))
-    | addr <= 0xDFFF = readUpperWram (addr - 0xD000) b
-    | addr <= 0xFDFF = readEcho (addr - 0xE000) b
+    | addr <= 0xCFFF = MV.read (busWram b) (fromIntegral addr .&. 0x0FFF)
+    | addr <= 0xDFFF = readUpperWram addr b
+    | addr <= 0xFDFF = readEcho addr b
     | addr <= 0xFE9F = Ppu.read8 addr (busPpu b)
     | addr <= 0xFEFF = pure 0xFF
     | addr == 0xFF00 = Joypad.readP1 (busJoypad b)
@@ -421,7 +421,7 @@ read8Raw addr b
     -- Anything else in the I/O page is an unmapped / reserved register
     -- that reads back 0xFF on hardware (mooneye 'bits/unused_hwio').
     | addr <= 0xFF7F = pure 0xFF
-    | addr <= 0xFFFE = MV.read (busHram b) (fromIntegral (addr - 0xFF80))
+    | addr <= 0xFFFE = MV.read (busHram b) (fromIntegral addr .&. 0x7F)
     | otherwise = readIORef (busIe b)
 
 {- | CPU-side bus write. Like 'read8', this is gated by the OAM DMA
@@ -451,9 +451,9 @@ write8Raw addr !v b
     | addr <= 0x7FFF = Cartridge.write8 addr v (busCart b)
     | addr <= 0x9FFF = Ppu.write8 addr v (busPpu b)
     | addr <= 0xBFFF = Cartridge.write8 addr v (busCart b)
-    | addr <= 0xCFFF = MV.write (busWram b) (fromIntegral (addr - 0xC000)) v
-    | addr <= 0xDFFF = writeUpperWram (addr - 0xD000) v b
-    | addr <= 0xFDFF = writeEcho (addr - 0xE000) v b
+    | addr <= 0xCFFF = MV.write (busWram b) (fromIntegral addr .&. 0x0FFF) v
+    | addr <= 0xDFFF = writeUpperWram addr v b
+    | addr <= 0xFDFF = writeEcho addr v b
     | addr <= 0xFE9F = Ppu.write8 addr v (busPpu b)
     | addr <= 0xFEFF = pure ()
     | addr == 0xFF00 = Joypad.writeP1 v (busJoypad b)
@@ -475,8 +475,8 @@ write8Raw addr !v b
     | addr == 0xFF6C = when (busCgb b) (Ppu.write8 addr v (busPpu b))
     | addr == 0xFF50 = writeBootRomLock v b
     | addr == 0xFF70 = writeWramBank v b
-    | addr <= 0xFF7F = MV.write (busIo b) (fromIntegral (addr - 0xFF00)) v
-    | addr <= 0xFFFE = MV.write (busHram b) (fromIntegral (addr - 0xFF80)) v
+    | addr <= 0xFF7F = MV.write (busIo b) (fromIntegral addr .&. 0x7F) v
+    | addr <= 0xFFFE = MV.write (busHram b) (fromIntegral addr .&. 0x7F) v
     | otherwise = writeIORef (busIe b) v
 
 handleSerialControl :: Word8 -> Bus -> IO ()
@@ -489,37 +489,37 @@ handleSerialControl v b
 
 {- | Resolve the active upper-WRAM bank: bank 0 is treated as bank 1 on
 real hardware, so the lower 4 KiB (always bank 0) is mirrored only when
-the selector is 0. Returns the byte offset into 'busWram' for offset
-@within = (addr - 0xD000)@.
+the selector is 0. Returns the byte offset into 'busWram' for raw
+@addr@ in the @0xD000-0xDFFF@ range.
 -}
 upperWramOffset :: Word16 -> Bus -> IO Int
-upperWramOffset within b = do
+upperWramOffset addr b = do
     sel <- readIORef (busWramBank b)
     let bank = let n = fromIntegral (sel .&. 0x07) in if n == 0 then 1 else n
-    pure (bank * 0x1000 + fromIntegral within)
+    pure (bank * 0x1000 + (fromIntegral addr .&. 0x0FFF))
 
 readUpperWram :: Word16 -> Bus -> IO Word8
-readUpperWram within b = do
-    off <- upperWramOffset within b
+readUpperWram addr b = do
+    off <- upperWramOffset addr b
     MV.read (busWram b) off
 
 writeUpperWram :: Word16 -> Word8 -> Bus -> IO ()
-writeUpperWram within v b = do
-    off <- upperWramOffset within b
+writeUpperWram addr v b = do
+    off <- upperWramOffset addr b
     MV.write (busWram b) off v
 
 {- | Echo region @0xE000-0xFDFF@ mirrors @0xC000-0xDDFF@ (the lower 8 KiB
 of WRAM, with the upper half routed through the active CGB bank).
 -}
 readEcho :: Word16 -> Bus -> IO Word8
-readEcho within b
-    | within < 0x1000 = MV.read (busWram b) (fromIntegral within)
-    | otherwise = readUpperWram (within - 0x1000) b
+readEcho addr b
+    | addr < 0xF000 = MV.read (busWram b) (fromIntegral addr .&. 0x0FFF)
+    | otherwise = readUpperWram (addr - 0x2000) b
 
 writeEcho :: Word16 -> Word8 -> Bus -> IO ()
-writeEcho within v b
-    | within < 0x1000 = MV.write (busWram b) (fromIntegral within) v
-    | otherwise = writeUpperWram (within - 0x1000) v b
+writeEcho addr v b
+    | addr < 0xF000 = MV.write (busWram b) (fromIntegral addr .&. 0x0FFF) v
+    | otherwise = writeUpperWram (addr - 0x2000) v b
 
 readWramBank :: Bus -> IO Word8
 readWramBank b
@@ -865,9 +865,9 @@ readDmaSource addr b
     | addr <= 0x7FFF = bootRomOrCart addr b
     | addr <= 0x9FFF = Ppu.read8 addr (busPpu b)
     | addr <= 0xBFFF = Cartridge.read8 addr (busCart b)
-    | addr <= 0xCFFF = MV.read (busWram b) (fromIntegral (addr - 0xC000))
-    | addr <= 0xDFFF = readUpperWram (addr - 0xD000) b
-    | addr <= 0xFDFF = readEcho (addr - 0xE000) b
+    | addr <= 0xCFFF = MV.read (busWram b) (fromIntegral addr .&. 0x0FFF)
+    | addr <= 0xDFFF = readUpperWram addr b
+    | addr <= 0xFDFF = readEcho addr b
     -- 0xFE00-0xFFFF: out-of-range source addresses. Real hardware splits
     -- on host model (matches SameBoy 'GB_dma_run' lines 1890-1895):
     --   * CGB: every byte reads as 0xFF.

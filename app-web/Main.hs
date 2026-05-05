@@ -1,9 +1,9 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-{-# ANN module ("HLint: ignore Use camelCase" :: String) #-}
-
 module Main (main) where
+
+{- HLINT ignore "Use camelCase" -}
 
 import Control.Exception (SomeException, displayException, try)
 import Control.Monad (when)
@@ -11,6 +11,7 @@ import qualified Data.ByteString as BS
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Int (Int16)
 import qualified Data.IntMap.Strict as IntMap
+import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector.Unboxed as V
@@ -197,7 +198,9 @@ ocelot_create :: Ptr Word8 -> CSize -> IO CInt
 ocelot_create ptr len = do
     result <- try createSession :: IO (Either SomeException CInt)
     case result of
-        Right sid -> clearLastError >> pure sid
+        Right sid
+            | sid /= 0 -> clearLastError >> pure sid
+            | otherwise -> pure 0
         Left err -> setLastError (displayException err) >> pure 0
   where
     createSession = do
@@ -230,7 +233,7 @@ ocelot_run_frame sid = do
                 appendAudio handle newSamples
                 clearLastError
                 pure 1
-    pure (maybe 0 id result)
+    pure (fromMaybe 0 result)
 
 ocelot_set_button :: CInt -> CInt -> CInt -> IO ()
 ocelot_set_button sid buttonCode down =
@@ -272,7 +275,7 @@ ocelot_save_state sid = do
         case saved of
             Left err -> setLastError (displayException err) >> pure 0
             Right blob -> replaceBuffer (shStateBuffer handle) blob >> clearLastError >> pure 1
-    pure (maybe 0 id result)
+    pure (fromMaybe 0 result)
 
 ocelot_save_state_ptr :: CInt -> IO (Ptr Word8)
 ocelot_save_state_ptr sid = do
@@ -296,7 +299,7 @@ ocelot_load_state sid ptr len = do
         case loaded of
             Left err -> setLastError (show err) >> pure 0
             Right () -> clearLastError >> pure 1
-    pure (maybe 0 id result)
+    pure (fromMaybe 0 result)
 
 ocelot_extract_save :: CInt -> IO CInt
 ocelot_extract_save sid = do
@@ -305,7 +308,7 @@ ocelot_extract_save sid = do
         replaceBuffer (shSaveBuffer handle) blob
         clearLastError
         pure 1
-    pure (maybe 0 id result)
+    pure (fromMaybe 0 result)
 
 ocelot_save_buffer_ptr :: CInt -> IO (Ptr Word8)
 ocelot_save_buffer_ptr sid = do
@@ -328,7 +331,7 @@ ocelot_load_save sid ptr len = do
         Web.loadSaveData blob (shSession handle)
         clearLastError
         pure 1
-    pure (maybe 0 id result)
+    pure (fromMaybe 0 result)
 
 ocelot_rom_title_ptr :: CInt -> IO (Ptr Word8)
 ocelot_rom_title_ptr sid = maybe nullPtr shTitlePtr <$> lookupSession sid

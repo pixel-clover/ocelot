@@ -55,7 +55,7 @@ class OcelotAudioProcessor extends AudioWorkletProcessor {
                 this.readPos += this.step;
                 const newInt = Math.floor(this.readPos);
                 const consumed = (newInt - intFrame) * 2;
-                if (consumed > 0) this.count -= consumed;
+                if (consumed > 0) this.count = Math.max(0, this.count - consumed);
                 if (this.readPos >= bufFrames) this.readPos -= bufFrames;
             } else {
                 if (this.fadeGain > 0.0) {

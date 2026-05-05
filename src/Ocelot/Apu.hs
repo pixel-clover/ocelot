@@ -555,7 +555,7 @@ readRegister cgb addr s = case addr of
     0xFF26 -> nr52Byte s
     a
         | a >= 0xFF30 && a <= 0xFF3F ->
-            waveRamRead cgb s (fromIntegral (a - 0xFF30))
+            waveRamRead cgb s (fromIntegral a .&. 0x0F)
     _ -> 0xFF
 
 {- | Wave RAM read while ch3 is playing. Real hardware aliases the
@@ -626,7 +626,7 @@ writeRegister :: Bool -> Word16 -> Word8 -> ApuInternal -> ApuInternal
 writeRegister cgb addr v s
     | addr == 0xFF26 = handleNr52 cgb v s
     | addr >= 0xFF30 && addr <= 0xFF3F =
-        waveRamWrite cgb (fromIntegral (addr - 0xFF30)) v s
+        waveRamWrite cgb (fromIntegral addr .&. 0x0F) v s
     | not (apuPower s) = writeWhilePoweredOff cgb addr v s
     | otherwise = case addr of
         0xFF10 -> writeNr10 v s

@@ -500,7 +500,7 @@ noMbcRead addr c
         let i = fromIntegral addr
          in pure $ if i < BS.length (cartRom c) then BS.index (cartRom c) i else 0xFF
     | addr >= 0xA000 && addr <= 0xBFFF =
-        let i = fromIntegral (addr - 0xA000)
+        let i = fromIntegral addr .&. 0x1FFF
          in if i < MV.length (cartRam c)
                 then MV.read (cartRam c) i
                 else pure 0xFF
@@ -509,7 +509,7 @@ noMbcRead addr c
 noMbcWrite :: Word16 -> Word8 -> Cartridge -> IO ()
 noMbcWrite addr v c
     | addr >= 0xA000 && addr <= 0xBFFF =
-        let i = fromIntegral (addr - 0xA000)
+        let i = fromIntegral addr .&. 0x1FFF
          in when (i < MV.length (cartRam c)) (MV.write (cartRam c) i v)
     | otherwise = pure ()
 
@@ -579,7 +579,7 @@ mbc1RamOffset s addr c =
             if m1Mode s && ramLen > 0x2000
                 then fromIntegral (m1BankHi s) :: Int
                 else 0
-     in bank * 0x2000 + fromIntegral (addr - 0xA000)
+     in bank * 0x2000 + (fromIntegral addr .&. 0x1FFF)
 
 mbc1HighBank :: Mbc1State -> Int
 mbc1HighBank s
@@ -634,7 +634,7 @@ mbc2Read s addr c
             then pure 0xFF
             else do
                 -- MBC2 RAM is 512 nibbles; addresses mirror every 0x200.
-                let i = fromIntegral (addr - 0xA000) `mod` 512
+                let i = fromIntegral addr .&. 0x1FF
                 v <- MV.read (cartRam c) i
                 pure (0xF0 .|. (v .&. 0x0F))
     | otherwise = pure 0xFF
@@ -655,7 +655,7 @@ mbc2Write s addr v c
                  in writeIORef (cartImpl c) (Mbc2Impl s{m2RomBank = adj})
             else writeIORef (cartImpl c) (Mbc2Impl s{m2RamEnabled = (v .&. 0x0F) == 0x0A})
     | addr >= 0xA000 && addr <= 0xBFFF && m2RamEnabled s =
-        let i = fromIntegral (addr - 0xA000) `mod` 512
+        let i = fromIntegral addr .&. 0x1FF
          in MV.write (cartRam c) i (v .&. 0x0F)
     | otherwise = pure ()
 
@@ -677,7 +677,7 @@ mbc3Read s addr c
                 b
                     | b < 4 ->
                         let !bank = fromIntegral b :: Int
-                            !off = bank * 0x2000 + fromIntegral (addr - 0xA000)
+                            !off = bank * 0x2000 + (fromIntegral addr .&. 0x1FFF)
                          in if off < MV.length (cartRam c)
                                 then MV.read (cartRam c) off
                                 else pure 0xFF
@@ -708,7 +708,7 @@ mbc3Write s addr v c
             b
                 | b < 4 ->
                     let !bank = fromIntegral b :: Int
-                        !off = bank * 0x2000 + fromIntegral (addr - 0xA000)
+                        !off = bank * 0x2000 + (fromIntegral addr .&. 0x1FFF)
                      in when (off < MV.length (cartRam c)) (MV.write (cartRam c) off v)
             b | b >= 0x08 && b <= 0x0C -> do
                 s' <- writeRtcReg b v s
@@ -924,7 +924,7 @@ mbc5Read s addr c
             then pure 0xFF
             else
                 let !bank = fromIntegral (m5RamBank s) :: Int
-                    !off = bank * 0x2000 + fromIntegral (addr - 0xA000)
+                    !off = bank * 0x2000 + (fromIntegral addr .&. 0x1FFF)
                  in if off < MV.length (cartRam c)
                         then MV.read (cartRam c) off
                         else pure 0xFF
@@ -943,7 +943,7 @@ mbc5Write s addr v c
     | addr <= 0x7FFF = pure ()
     | addr >= 0xA000 && addr <= 0xBFFF && m5RamEnabled s =
         let !bank = fromIntegral (m5RamBank s) :: Int
-            !off = bank * 0x2000 + fromIntegral (addr - 0xA000)
+            !off = bank * 0x2000 + (fromIntegral addr .&. 0x1FFF)
          in when (off < MV.length (cartRam c)) (MV.write (cartRam c) off v)
     | otherwise = pure ()
 
@@ -967,7 +967,7 @@ huc1Read s addr c
             then pure 0xC0 -- Approximation of IR-mode reads (no IR data).
             else
                 let !bank = fromIntegral (hcRamBank s) :: Int
-                    !off = bank * 0x2000 + fromIntegral (addr - 0xA000)
+                    !off = bank * 0x2000 + (fromIntegral addr .&. 0x1FFF)
                  in if off < MV.length (cartRam c)
                         then MV.read (cartRam c) off
                         else pure 0xFF
@@ -985,6 +985,6 @@ huc1Write s addr v c
     | addr <= 0x7FFF = pure ()
     | addr >= 0xA000 && addr <= 0xBFFF && hcRamEnabled s =
         let !bank = fromIntegral (hcRamBank s) :: Int
-            !off = bank * 0x2000 + fromIntegral (addr - 0xA000)
+            !off = bank * 0x2000 + (fromIntegral addr .&. 0x1FFF)
          in when (off < MV.length (cartRam c)) (MV.write (cartRam c) off v)
     | otherwise = pure ()

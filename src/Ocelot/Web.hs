@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 {- | Browser-friendly emulator session helpers.
 
 This module keeps the desktop SDL frontend out of the loop and exposes the

@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html data-theme="dark" lang="en">
+<html data-theme="light" lang="en">
 <head>
     <meta charset="utf-8">
     <meta content="width=device-width, initial-scale=1" name="viewport">
-    <title>Ocelot Web</title>
+    <title>OCELOT - Game Boy and Game Boy Color Emulator</title>
     <style>
         * {
             box-sizing: border-box;
@@ -12,6 +12,33 @@
         }
 
         :root {
+            --radius-sm: 4px;
+            --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.12);
+            --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.15);
+            --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.2);
+            --transition-fast: 0.15s ease;
+            --transition-normal: 0.25s ease;
+            --font-ui: "JetBrains Mono", "SFMono-Regular", ui-monospace, monospace;
+            --font-mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, monospace;
+        }
+
+        @font-face {
+            font-family: "JetBrains Mono";
+            src: url("fonts/JetBrainsMono-Regular.ttf") format("truetype");
+            font-weight: 400;
+            font-style: normal;
+            font-display: swap;
+        }
+
+        @font-face {
+            font-family: "JetBrains Mono";
+            src: url("fonts/JetBrainsMono-Medium.ttf") format("truetype");
+            font-weight: 500;
+            font-style: normal;
+            font-display: swap;
+        }
+
+        :root[data-theme="dark"] {
             --bg: #08080e;
             --bg-panel: #101018;
             --bg-input: #0c0c14;
@@ -21,6 +48,7 @@
             --text: #d0d4e0;
             --text-muted: #6a6e88;
             --text-accent: #c8a830;
+            --text-link: #4488cc;
             --text-heading: #0080d0;
             --toast-bg: #101018;
             --toast-border: #c8a830;
@@ -29,23 +57,43 @@
             --group-bg: #0e0e18;
             --error-bg: rgba(200, 40, 40, 0.14);
             --error-border: #cc3030;
-            --overlay-bg: rgba(4, 4, 8, 0.82);
-            --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.12);
-            --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.15);
-            --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.2);
-            --font-ui: "JetBrains Mono", "SFMono-Regular", ui-monospace, monospace;
+            --overlay-bg: rgba(4, 4, 8, 0.85);
+        }
+
+        :root[data-theme="light"] {
+            --bg: #f0ede6;
+            --bg-panel: #faf8f4;
+            --bg-input: #ebe8e0;
+            --bg-btn-hover: #e0ddd4;
+            --border: #c0bca8;
+            --border-accent: #004c90;
+            --text: #18181e;
+            --text-muted: #58585e;
+            --text-accent: #9a7810;
+            --text-link: #004c90;
+            --text-heading: #003870;
+            --toast-bg: #faf8f4;
+            --toast-border: #9a7810;
+            --toast-text: #9a7810;
+            --screen-bg: #080810;
+            --group-bg: #e8e4da;
+            --error-bg: rgba(200, 40, 40, 0.08);
+            --error-border: #cc3030;
+            --overlay-bg: rgba(8, 8, 14, 0.5);
         }
 
         body {
             background: var(--bg);
             color: var(--text);
             font-family: var(--font-ui);
+            font-weight: 400;
             min-height: 100vh;
             padding: 20px 16px 32px;
             display: flex;
             flex-direction: column;
             align-items: center;
             gap: 10px;
+            transition: background var(--transition-normal), color var(--transition-normal);
         }
 
         header {
@@ -57,26 +105,32 @@
             color: var(--text-accent);
             font-size: 1.8rem;
             letter-spacing: 0.22em;
-            font-weight: 600;
+            font-weight: 500;
+            margin-bottom: 2px;
+            text-shadow: 0 1px 0 rgba(0, 0, 0, 0.3);
         }
 
         header .subtitle {
             color: var(--text-heading);
-            font-size: 0.68rem;
-            letter-spacing: 0.24em;
+            font-size: 0.62rem;
+            font-family: var(--font-mono);
+            letter-spacing: 0.3em;
             text-transform: uppercase;
+            font-weight: 500;
         }
 
         header .era-tag {
             display: inline-block;
-            margin-top: 6px;
             color: var(--text-accent);
+            font-size: 0.55rem;
+            font-family: var(--font-mono);
+            font-weight: 500;
+            letter-spacing: 0.15em;
             border: 1px solid var(--text-accent);
             border-radius: 2px;
-            font-size: 0.55rem;
-            letter-spacing: 0.14em;
-            padding: 2px 7px;
-            opacity: 0.8;
+            padding: 1px 6px;
+            margin-top: 4px;
+            opacity: 0.7;
         }
 
         #error-banner {
@@ -91,14 +145,16 @@
             background: var(--error-bg);
             border: 1px solid var(--error-border);
             border-left: 4px solid var(--error-border);
-            border-radius: 4px;
+            border-radius: var(--radius-sm);
             padding: 10px 16px;
             font-size: 0.78rem;
             color: var(--error-border);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
             box-shadow: var(--shadow-md);
             opacity: 0;
             pointer-events: none;
-            transition: opacity 0.15s ease;
+            transition: opacity var(--transition-fast);
             max-width: 90vw;
         }
 
@@ -110,9 +166,11 @@
         #error-banner button {
             background: none;
             border: none;
-            color: inherit;
+            color: var(--error-border);
+            font-size: 1.1rem;
             cursor: pointer;
-            font-size: 1rem;
+            padding: 0 4px;
+            line-height: 1;
         }
 
         #drop-zone {
@@ -123,7 +181,7 @@
             cursor: pointer;
             max-width: 660px;
             width: 100%;
-            transition: all 0.15s ease;
+            transition: all var(--transition-fast);
         }
 
         #drop-zone:hover,
@@ -150,8 +208,9 @@
             background: var(--bg-panel);
             color: var(--text);
             border: 1px solid var(--border);
-            border-radius: 3px;
+            border-radius: var(--radius-sm);
             font-size: 0.8rem;
+            cursor: pointer;
         }
 
         #screen-container {
@@ -162,6 +221,7 @@
             overflow: hidden;
             box-shadow: 0 0 0 1px var(--border-accent), var(--shadow-md), inset 0 0 20px rgba(0, 0, 0, 0.4);
             width: min(100%, 640px);
+            margin-bottom: 6px;
         }
 
         #screen {
@@ -174,21 +234,26 @@
             background: #000;
         }
 
+        /* Toast */
         #toast {
-            position: absolute;
-            right: 12px;
-            bottom: 12px;
+            position: fixed;
+            top: 16px;
+            right: 16px;
             background: var(--toast-bg);
-            color: var(--toast-text);
             border: 1px solid var(--toast-border);
-            border-radius: 3px;
-            padding: 8px 12px;
-            font-size: 0.72rem;
+            border-radius: 2px;
+            padding: 8px 16px;
+            font-size: 0.78rem;
+            letter-spacing: 0.05em;
+            color: var(--toast-text);
+            box-shadow: var(--shadow-md);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
             opacity: 0;
-            transform: translateY(6px);
-            transition: opacity 0.15s ease, transform 0.15s ease;
+            transform: translateY(-8px);
+            transition: opacity 0.25s ease, transform 0.25s ease;
             pointer-events: none;
-            z-index: 3;
+            z-index: 100;
         }
 
         #toast.visible {
@@ -196,73 +261,151 @@
             transform: translateY(0);
         }
 
-        .overlay {
-            position: absolute;
+        /* Full-viewport overlays */
+        #help-overlay,
+        #about-overlay {
+            position: fixed;
             inset: 0;
+            z-index: 50;
             background: var(--overlay-bg);
-            display: none;
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            display: flex;
             align-items: center;
             justify-content: center;
-            z-index: 2;
-            padding: 18px;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity var(--transition-normal);
         }
 
-        .overlay.visible {
-            display: flex;
+        #help-overlay.visible,
+        #about-overlay.visible {
+            opacity: 1;
+            pointer-events: all;
         }
 
-        .overlay-card {
-            width: min(100%, 560px);
+        .help-panel {
             background: var(--bg-panel);
-            border: 1px solid var(--border);
-            border-top: 3px solid var(--text-accent);
-            border-radius: 4px;
+            border: 2px solid var(--text-heading);
+            border-radius: 3px;
+            padding: 20px 28px;
+            max-width: 540px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
             box-shadow: var(--shadow-lg);
-            padding: 16px 18px;
+            animation: modalPop 0.25s ease-out;
         }
 
-        .overlay-card h2 {
+        .help-panel h3 {
             color: var(--text-accent);
             font-size: 1rem;
-            letter-spacing: 0.12em;
-            margin-bottom: 10px;
-        }
-
-        .overlay-card p {
-            color: var(--text-muted);
-            font-size: 0.78rem;
+            letter-spacing: 0.15em;
             margin-bottom: 12px;
-            line-height: 1.45;
+            text-align: center;
+            font-weight: 500;
         }
 
-        .help-grid {
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 12px 20px;
-        }
-
-        .help-section h3 {
+        .help-panel h4 {
             color: var(--text-heading);
-            font-size: 0.72rem;
-            letter-spacing: 0.1em;
-            margin-bottom: 8px;
+            font-size: 0.75rem;
+            margin: 10px 0 5px;
+            font-weight: 500;
         }
 
-        .help-section ul {
-            list-style: none;
-            display: flex;
-            flex-direction: column;
-            gap: 5px;
-            font-size: 0.72rem;
+        .help-columns {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px 24px;
         }
 
-        .help-section li {
+        .help-row {
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            margin-bottom: 2px;
+        }
+
+        .help-row .key {
+            display: inline-block;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            padding: 1px 5px;
             color: var(--text);
+            font-size: 0.68rem;
+            min-width: 2.2em;
+            text-align: center;
+            font-family: var(--font-mono);
+        }
+
+        .help-footer {
+            margin: 12px 0 0;
+            font-size: 0.68rem;
+            color: var(--text-muted);
+            text-align: center;
+        }
+
+        .help-footer a {
+            color: var(--text-link);
+            text-decoration: none;
+        }
+
+        .help-footer a:hover {
+            color: var(--text-accent);
+        }
+
+        #help-close,
+        #about-close {
+            display: block;
+            margin: 14px auto 0;
+            background: var(--bg);
+            color: var(--text-accent);
+            border: 1px solid var(--text-accent);
+            border-radius: var(--radius-sm);
+            padding: 5px 20px;
+            font-family: var(--font-ui);
+            font-size: 0.78rem;
+            cursor: pointer;
+            transition: all var(--transition-fast);
+        }
+
+        #help-close:hover,
+        #about-close:hover {
+            background: color-mix(in srgb, var(--text-accent) 12%, var(--bg));
+            transform: translateY(-1px);
+        }
+
+        .help-panel::-webkit-scrollbar { width: 6px; }
+        .help-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+        .help-panel::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+        /* About overlay */
+        #about-overlay .help-panel {
+            max-width: 360px;
+        }
+
+        .about-content {
+            text-align: center;
+        }
+
+        .about-info {
+            text-align: left;
+            margin: 0 auto 14px;
+        }
+
+        .about-row {
             display: flex;
             justify-content: space-between;
-            gap: 12px;
+            font-size: 0.72rem;
+            padding: 3px 0;
+            border-bottom: 1px solid var(--border);
+            font-family: var(--font-mono);
         }
 
+        .about-row span:first-child { color: var(--text-muted); }
+        .about-row span:last-child { color: var(--text); }
+
+        /* Action bar */
         .action-bar {
             display: flex;
             align-items: center;
@@ -275,6 +418,7 @@
             width: 100%;
             flex-wrap: wrap;
             box-shadow: var(--shadow-sm);
+            transition: background var(--transition-normal);
         }
 
         .btn-group {
@@ -285,12 +429,14 @@
             border: 1px solid color-mix(in srgb, var(--group-accent) 30%, var(--border));
             border-radius: 3px;
             padding: 5px 6px;
+            transition: background var(--transition-normal);
         }
 
-        .btn-group.tone-audio { --group-accent: #0070b8; }
-        .btn-group.tone-save { --group-accent: #b89820; }
-        .btn-group.tone-view { --group-accent: #0070b8; }
-        .btn-group.tone-info { --group-accent: #606880; }
+        .btn-group.tone-audio  { --group-accent: #0070b8; }
+        .btn-group.tone-save   { --group-accent: #b89820; }
+        .btn-group.tone-view   { --group-accent: #0070b8; }
+        .btn-group.tone-system { --group-accent: #606880; }
+        .btn-group.tone-info   { --group-accent: #606880; opacity: 0.92; }
 
         .btn-group-label {
             color: color-mix(in srgb, var(--group-accent) 88%, var(--text-muted));
@@ -299,7 +445,7 @@
             text-transform: uppercase;
             letter-spacing: 0.12em;
             white-space: nowrap;
-            font-weight: 600;
+            font-weight: 500;
         }
 
         .action-bar button,
@@ -313,7 +459,7 @@
             font-size: 0.68rem;
             cursor: pointer;
             white-space: nowrap;
-            transition: all 0.15s ease;
+            transition: all var(--transition-fast);
         }
 
         .action-bar button:hover,
@@ -323,6 +469,27 @@
             transform: translateY(-1px);
         }
 
+        .action-bar button:active {
+            transform: scale(0.97) translateY(0);
+        }
+
+        .vol-slider {
+            width: 60px;
+            height: 14px;
+            cursor: pointer;
+            accent-color: var(--text-accent);
+        }
+
+        .vol-label {
+            color: var(--text-muted);
+            font-size: 0.6rem;
+            min-width: 2.5em;
+            text-align: right;
+            padding-right: 2px;
+            font-family: var(--font-mono);
+        }
+
+        /* Status bar */
         .status-bar {
             display: flex;
             align-items: center;
@@ -332,6 +499,7 @@
             padding: 4px 10px;
             font-size: 0.68rem;
             color: var(--text-muted);
+            font-family: var(--font-mono);
         }
 
         .status-left {
@@ -341,52 +509,178 @@
             white-space: nowrap;
         }
 
-        #perf-hud {
+        /* Settings panel */
+        #settings-panel {
             max-width: 660px;
             width: 100%;
             background: var(--bg-panel);
             border: 1px solid var(--border);
             border-radius: 3px;
-            padding: 10px 12px;
+            padding: 14px 18px;
             box-shadow: var(--shadow-sm);
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 6px 14px;
-            font-size: 0.72rem;
+            transition: background var(--transition-normal), border-color var(--transition-normal);
+            animation: slideDown 0.2s ease-out;
         }
 
-        #perf-hud.hidden {
+        #settings-panel.hidden {
             display: none;
         }
 
-        .perf-item {
+        #settings-panel h3 {
+            color: var(--text-heading);
+            font-size: 0.78rem;
+            margin-bottom: 10px;
+            font-weight: 500;
+        }
+
+        /* Keyboard remap */
+        .remap-section {
+            margin-top: 4px;
+        }
+
+        .remap-section h4 {
+            color: var(--text-heading);
+            font-size: 0.72rem;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+
+        .remap-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+            gap: 4px 10px;
+            font-size: 0.72rem;
+        }
+
+        .remap-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .remap-row label {
+            color: var(--text-muted);
+            min-width: 44px;
+        }
+
+        .remap-btn {
+            flex: 1;
+            background: var(--bg-input);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            padding: 3px 6px;
+            font-family: inherit;
+            font-size: 0.68rem;
+            cursor: pointer;
+            text-align: center;
+            transition: border-color var(--transition-fast), background var(--transition-fast);
+        }
+
+        .remap-btn:hover { border-color: var(--text-accent); }
+
+        .remap-btn.listening {
+            border-color: var(--text-accent);
+            background: var(--text-accent);
+            color: #fff;
+            animation: pulse 0.8s ease-in-out infinite alternate;
+        }
+
+        .remap-reset {
+            margin-top: 8px;
+            background: none;
+            color: var(--text-muted);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            padding: 3px 10px;
+            font-family: inherit;
+            font-size: 0.68rem;
+            cursor: pointer;
+        }
+
+        .remap-reset:hover { color: var(--text); border-color: var(--text-accent); }
+
+        /* Performance HUD */
+        #perf-hud {
+            position: fixed;
+            top: 50px;
+            left: 10px;
+            z-index: 40;
+            background: rgba(10, 14, 26, 0.88);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 6px 10px;
+            font-size: 0.62rem;
+            color: #a0a880;
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            min-width: 180px;
+            font-family: var(--font-mono);
+        }
+
+        #perf-hud.hidden { display: none; }
+
+        .perf-row {
             display: flex;
             justify-content: space-between;
             gap: 12px;
+            padding: 1px 0;
         }
 
-        .perf-item strong {
-            color: var(--text-heading);
-            font-weight: 600;
+        .perf-row span:first-child { color: #707860; }
+
+        .perf-row span:last-child {
+            color: #c8d0a0;
+            font-variant-numeric: tabular-nums;
+            max-width: 160px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
-        @media (max-width: 720px) {
-            .help-grid,
-            #perf-hud {
-                grid-template-columns: 1fr;
-            }
+        /* Animations */
+        @keyframes modalPop {
+            from { opacity: 0; transform: scale(0.95); }
+            to   { opacity: 1; transform: scale(1); }
+        }
+
+        @keyframes slideDown {
+            from { opacity: 0; transform: translateY(-8px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes pulse {
+            from { opacity: 0.8; }
+            to   { opacity: 1; }
+        }
+
+        /* Responsive */
+        @media (max-width: 700px) {
+            body { padding-left: 12px; padding-right: 12px; }
+            .action-bar { justify-content: flex-start; gap: 6px; padding: 6px; }
+            #screen-container { width: 100%; }
+            .status-bar { font-size: 0.62rem; }
+        }
+
+        @media (max-width: 500px) {
+            #drop-zone { padding-left: 16px; padding-right: 16px; }
+            .help-columns { grid-template-columns: 1fr; }
+            .btn-group-label { display: none; }
+            .btn-group { padding: 4px; }
+            .action-bar { gap: 4px; }
         }
     </style>
 </head>
 <body>
+
 <div id="error-banner">
     <span id="error-text"></span>
-    <button id="error-dismiss" type="button">x</button>
+    <button id="error-dismiss" type="button">&times;</button>
 </div>
 
 <header>
     <h1>OCELOT</h1>
-    <div class="subtitle">Game Boy Web Runtime</div>
+    <div class="subtitle">Game Boy and Game Boy Color Emulator</div>
     <div class="era-tag">DMG / CGB</div>
 </header>
 
@@ -394,7 +688,7 @@
     <label for="rom-input">Drop a .gb or .gbc ROM here, or click to choose one</label>
     <input id="rom-input" type="file" accept=".gb,.gbc,application/octet-stream">
     <div>
-        <select id="recent-roms">
+        <select id="recent-roms" style="display:none">
             <option value="">Recent ROMs</option>
         </select>
     </div>
@@ -402,78 +696,129 @@
 
 <div id="screen-container">
     <canvas height="144" id="screen" width="160"></canvas>
-    <div class="overlay" id="help-overlay">
-        <div class="overlay-card">
-            <h2>Help</h2>
-            <p>This web host follows the Sandopolis browser template, but it is tailored to Ocelot's Game Boy core.</p>
-            <div class="help-grid">
-                <div class="help-section">
-                    <h3>Emulation</h3>
-                    <ul>
-                        <li><span>Pause / Resume</span><span>Space</span></li>
-                        <li><span>Help</span><span>F1</span></li>
-                        <li><span>Fullscreen</span><span>F11</span></li>
-                        <li><span>Quick Save</span><span>F5</span></li>
-                        <li><span>Quick Load</span><span>F8</span></li>
-                    </ul>
-                </div>
-                <div class="help-section">
-                    <h3>Game Boy Input</h3>
-                    <ul>
-                        <li><span>D-pad</span><span>Arrows</span></li>
-                        <li><span>A / B</span><span>Z / X</span></li>
-                        <li><span>Start / Select</span><span>Enter / Right Shift</span></li>
-                        <li><span>Save Slot</span><span>Selector below</span></li>
-                    </ul>
-                </div>
-            </div>
-        </div>
-    </div>
-    <div id="toast"></div>
 </div>
 
 <div class="action-bar">
     <div class="btn-group tone-audio">
         <div class="btn-group-label">Audio</div>
-        <button id="audio-toggle" type="button">ON</button>
+        <button id="audio-toggle" title="Toggle audio on or off" type="button">ON</button>
+        <input class="vol-slider" id="master-volume" max="100" min="0" step="5" title="Master volume" type="range" value="70">
+        <span class="vol-label" id="master-volume-label">70%</span>
     </div>
     <div class="btn-group tone-save">
-        <div class="btn-group-label">Save</div>
-        <button id="btn-quick-save" type="button">Quick Save</button>
-        <button id="btn-quick-load" type="button">Quick Load</button>
-        <button id="btn-save" type="button">Save Slot</button>
-        <button id="btn-load" type="button">Load Slot</button>
-        <select id="slot-select">
-            <option value="1">Slot 1</option>
-            <option value="2">Slot 2</option>
-            <option value="3">Slot 3</option>
-            <option value="4">Slot 4</option>
+        <div class="btn-group-label">Quick Save</div>
+        <button id="btn-quick-save" title="Quick save [F5]" type="button">Save</button>
+        <button id="btn-quick-load" title="Quick load [F8]" type="button">Load</button>
+    </div>
+    <div class="btn-group tone-save">
+        <div class="btn-group-label">State Slot</div>
+        <select id="slot-select" title="Select save slot">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
         </select>
+        <button id="btn-save" title="Save to slot" type="button">Save</button>
+        <button id="btn-load" title="Load from slot" type="button">Load</button>
     </div>
     <div class="btn-group tone-view">
         <div class="btn-group-label">View</div>
-        <button id="btn-fullscreen" type="button">Fullscreen</button>
-        <button id="help-btn" type="button">Help</button>
-        <button id="perf-toggle" type="button">Perf</button>
+        <button id="btn-fullscreen" title="Fullscreen [F11]" type="button">Fullscreen</button>
+        <button id="theme-toggle" title="Toggle light/dark theme" type="button">Dark</button>
+    </div>
+    <div class="btn-group tone-system">
+        <div class="btn-group-label">System</div>
+        <button id="settings-toggle" title="Settings" type="button">Settings</button>
+        <button id="perf-toggle" title="Performance HUD" type="button">Perf</button>
     </div>
     <div class="btn-group tone-info">
-        <div class="btn-group-label">Runtime</div>
-        <button id="btn-pause" type="button">Pause</button>
+        <div class="btn-group-label">Info</div>
+        <button id="btn-pause" title="Pause / Resume [Space]" type="button">Pause</button>
+        <button id="help-btn" title="Help [F1]" type="button">Help</button>
+        <button id="about-btn" title="About Ocelot" type="button">About</button>
     </div>
 </div>
 
 <div class="status-bar">
-    <div class="status-left" id="status">Loading Ocelot web runtime...</div>
+    <div class="status-left" id="status">Loading OCELOT Game Boy Web Runtime...</div>
     <div class="status-right" id="fps-display">-- FPS</div>
 </div>
 
+<div class="hidden" id="settings-panel">
+    <h3>SETTINGS</h3>
+    <div class="remap-section">
+        <h4>KEYBOARD</h4>
+        <div class="remap-grid" id="remap-grid"></div>
+        <button class="remap-reset" id="remap-reset" title="Restore default key bindings">Reset Defaults</button>
+    </div>
+</div>
+
+<div id="toast"></div>
+
+<div id="help-overlay">
+    <div class="help-panel">
+        <h3>OCELOT WEB HELP</h3>
+        <div class="help-columns">
+            <div>
+                <h4>KEYBOARD</h4>
+                <div class="help-row"><span class="key">↑↓←→</span> D-Pad</div>
+                <div class="help-row"><span class="key">Z</span> A &nbsp;<span class="key">X</span> B</div>
+                <div class="help-row"><span class="key">Enter</span> Start</div>
+                <div class="help-row"><span class="key">R-Shift</span> Select</div>
+                <h4>HOTKEYS</h4>
+                <div class="help-row"><span class="key">Space</span> Pause / Resume</div>
+                <div class="help-row"><span class="key">F5</span> Quick Save</div>
+                <div class="help-row"><span class="key">F8</span> Quick Load</div>
+                <div class="help-row"><span class="key">F11</span> Fullscreen</div>
+                <div class="help-row"><span class="key">F1</span> Help</div>
+            </div>
+            <div>
+                <h4>GAMEPAD</h4>
+                <div class="help-row">(D-Pad / L-Stick) D-Pad</div>
+                <div class="help-row">(A) B &nbsp;(B) A</div>
+                <div class="help-row">(Start) Start</div>
+                <div class="help-row">(Select / Back) Select</div>
+                <h4>FEATURES</h4>
+                <div class="help-row">4 save state slots</div>
+                <div class="help-row">Battery save (auto)</div>
+                <div class="help-row">DMG &amp; CGB support</div>
+                <div class="help-row">Click screen to pause</div>
+            </div>
+        </div>
+        <p class="help-footer">
+            Found a bug? <a href="https://github.com/pixel-clover/ocelot/issues" rel="noopener" target="_blank">Open an issue</a>.
+        </p>
+        <button id="help-close">CLOSE</button>
+    </div>
+</div>
+
+<!-- Performance HUD (fixed overlay) -->
 <div class="hidden" id="perf-hud">
-    <div class="perf-item"><strong>ROM</strong><span id="perf-rom">N/A</span></div>
-    <div class="perf-item"><strong>Mode</strong><span id="perf-mode">N/A</span></div>
-    <div class="perf-item"><strong>Frame Time</strong><span id="perf-frame-ms">--</span></div>
-    <div class="perf-item"><strong>Audio</strong><span id="perf-audio">OFF</span></div>
-    <div class="perf-item"><strong>FPS</strong><span id="perf-fps">--</span></div>
-    <div class="perf-item"><strong>Wasm Memory</strong><span id="perf-wasm-mem">--</span></div>
+    <div class="perf-row"><span>ROM</span><span id="perf-rom">N/A</span></div>
+    <div class="perf-row"><span>Mode</span><span id="perf-mode">N/A</span></div>
+    <div class="perf-row"><span>FPS</span><span id="perf-fps">--</span></div>
+    <div class="perf-row"><span>Frame</span><span id="perf-frame-ms">--</span></div>
+    <div class="perf-row"><span>Audio</span><span id="perf-audio">OFF</span></div>
+    <div class="perf-row"><span>WASM Mem</span><span id="perf-wasm-mem">--</span></div>
+    <div class="perf-row"><span>Gamepads</span><span id="perf-gamepads">--</span></div>
+</div>
+
+<!-- About modal -->
+<div id="about-overlay">
+    <div class="help-panel">
+        <h3>ABOUT OCELOT</h3>
+        <div class="about-content">
+            <div class="about-info">
+                <div class="about-row"><span>Version</span><span id="about-version">--</span></div>
+                <div class="about-row"><span>ROM</span><span id="about-rom">--</span></div>
+                <div class="about-row"><span>Mode</span><span id="about-mode">--</span></div>
+                <div class="about-row"><span>Audio</span><span id="about-audio">--</span></div>
+                <div class="about-row"><span>WASM Size</span><span id="about-wasm-size">--</span></div>
+                <div class="about-row"><span>License</span><span>MIT</span></div>
+            </div>
+        </div>
+        <button id="about-close">CLOSE</button>
+    </div>
 </div>
 
 <script src="ocelot.js"></script>

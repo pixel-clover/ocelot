@@ -9,7 +9,7 @@
    id="Capa_1"
    viewBox="0 0 511.995 511.995"
    xml:space="preserve"
-   sodipodi:docname="old-gameboy-console-svgrepo-com.svg"
+   sodipodi:docname="logo.svg"
    inkscape:version="1.2.2 (b0a8486541, 2022-12-01)"
    xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
    xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
@@ -26,8 +26,8 @@
    inkscape:deskcolor="#d1d1d1"
    showgrid="false"
    inkscape:zoom="0.295"
-   inkscape:cx="401.69492"
-   inkscape:cy="401.69492"
+   inkscape:cx="408.47458"
+   inkscape:cy="405.08475"
    inkscape:window-width="1862"
    inkscape:window-height="1131"
    inkscape:window-x="58"
@@ -66,4 +66,20 @@
    id="path14"
    style="fill:#000080" />
 </g>
-</svg>
+<polygon
+   points="2,6.118 6.941,6.118 13.529,16 6.941,25.882 2,25.882 8.588,16 "
+   style="fill:#453a62"
+   id="polygon242"
+   transform="matrix(7.2648024,0,0,7.9638394,142.2182,30.904317)" /><polygon
+   points="8.588,25.882 15.177,16 8.588,6.118 13.529,6.118 26.706,25.882 21.765,25.882 17.647,19.706 13.529,25.882 "
+   style="fill:#5e5086"
+   id="polygon244"
+   transform="matrix(7.2648024,0,0,7.9638394,142.2182,30.904317)" /><polygon
+   points="24.51,20.118 22.314,16.824 30,16.823 30,20.118 "
+   style="fill:#8f4e8b"
+   id="polygon246"
+   transform="matrix(7.2648024,0,0,7.9638394,142.2182,30.904317)" /><polygon
+   points="21.216,15.177 19.02,11.883 30,11.882 30,15.177 "
+   style="fill:#8f4e8b"
+   id="polygon248"
+   transform="matrix(7.2648024,0,0,7.9638394,142.2182,30.904317)" /></svg>

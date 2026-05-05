@@ -136,6 +136,7 @@ TOOLS_SRCS := $(wildcard tools/*.hs)
 TOOLS_BINS := $(patsubst tools/%.hs,$(TOOLS_OUT)/%,$(TOOLS_SRCS))
 WEB_OUT := dist/web
 WASM_CABAL ?= wasm32-wasi-cabal
+WASM_FLAGS := -f -desktop -f wasm-reactor
 
 tools: $(TOOLS_BINS) $(TOOLS_OUT)/sameboy-trace ## Build the developer diagnostic tools under `tools/` into `bin/tools`
 
@@ -174,7 +175,7 @@ web-build: ## Build the browser host and wasm module (requires wasm32-wasi-cabal
 	}
 	@echo "Building ocelot-web with $(WASM_CABAL)..."
 	@mkdir -p $(WEB_OUT)
-	@$(WASM_CABAL) build exe:ocelot-web
+	@$(WASM_CABAL) build exe:ocelot-web $(WASM_FLAGS)
 	@cp -R web/. $(WEB_OUT)/
-	@cp "$$($(WASM_CABAL) list-bin exe:ocelot-web)" "$(WEB_OUT)/ocelot.wasm"
+	@cp "$$($(WASM_CABAL) list-bin exe:ocelot-web $(WASM_FLAGS))" "$(WEB_OUT)/ocelot.wasm"
 	@echo "Web build ready in $(WEB_OUT). Serve that directory over HTTP."

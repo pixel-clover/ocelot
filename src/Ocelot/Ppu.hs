@@ -281,9 +281,9 @@ read8 :: Word16 -> PpuState -> IO Word8
 read8 addr ps
     | addr <= 0x9FFF = do
         bank <- vramBankIndex ps
-        MV.read (ppuVram ps) (bank + fromIntegral (addr - 0x8000))
+        MV.read (ppuVram ps) (bank + (fromIntegral addr .&. 0x1FFF))
     | addr >= 0xFE00 && addr <= 0xFE9F =
-        MV.read (ppuOam ps) (fromIntegral (addr - 0xFE00))
+        MV.read (ppuOam ps) (fromIntegral addr .&. 0xFF)
     | addr == 0xFF40 = readIORef (ppuLcdc ps)
     | addr == 0xFF41 = do
         stat <- readIORef (ppuStat ps)
@@ -322,9 +322,9 @@ write8 :: Word16 -> Word8 -> PpuState -> IO ()
 write8 addr !v ps
     | addr <= 0x9FFF = do
         bank <- vramBankIndex ps
-        MV.write (ppuVram ps) (bank + fromIntegral (addr - 0x8000)) v
+        MV.write (ppuVram ps) (bank + (fromIntegral addr .&. 0x1FFF)) v
     | addr >= 0xFE00 && addr <= 0xFE9F =
-        MV.write (ppuOam ps) (fromIntegral (addr - 0xFE00)) v
+        MV.write (ppuOam ps) (fromIntegral addr .&. 0xFF) v
     | addr == 0xFF40 = handleLcdcWrite v ps
     | addr == 0xFF41 = do
         modifyIORef' (ppuStat ps) (\s -> (v .&. 0x78) .|. (s .&. 0x07))

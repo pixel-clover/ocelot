@@ -15,6 +15,16 @@ synopsis: A Game Boy and Game Boy Color emulator in Haskell
 category: Emulator
 description: Please see the README on GitHub at <https://github.com/pixel-clover/ocelot#readme>
 
+flags:
+  desktop:
+    description: Build the SDL desktop executable
+    manual: true
+    default: true
+  wasm-reactor:
+    description: Build the web executable as a WASI reactor module
+    manual: true
+    default: false
+
 dependencies:
   - base >= 4.14 && < 5
   - bytestring >= 0.11 && < 0.13
@@ -49,14 +59,63 @@ executables:
       - -with-rtsopts=-N
     dependencies:
       - ocelot
-      - optparse-applicative >= 0.18 && < 0.20
-      - sdl2 >= 2.5 && < 2.6
+    when:
+      - condition: flag(desktop)
+        dependencies:
+          - optparse-applicative >= 0.18 && < 0.20
+          - sdl2 >= 2.5 && < 2.6
+      - condition: "!flag(desktop)"
+        buildable: false
 
   ocelot-web:
     main: Main.hs
     source-dirs: app-web
     dependencies:
       - ocelot
+    when:
+      - condition: flag(wasm-reactor)
+        ghc-options:
+          - -no-hs-main
+          - -optl-mexec-model=reactor
+          - -optl-Wl,--export=hs_init
+          - -optl-Wl,--export=ocelot_alloc
+          - -optl-Wl,--export=ocelot_free
+          - -optl-Wl,--export=ocelot_create
+          - -optl-Wl,--export=ocelot_destroy
+          - -optl-Wl,--export=ocelot_run_frame
+          - -optl-Wl,--export=ocelot_set_button
+          - -optl-Wl,--export=ocelot_framebuffer_ptr
+          - -optl-Wl,--export=ocelot_framebuffer_len
+          - -optl-Wl,--export=ocelot_audio_buffer_ptr
+          - -optl-Wl,--export=ocelot_audio_buffer_len
+          - -optl-Wl,--export=ocelot_clear_audio_buffer
+          - -optl-Wl,--export=ocelot_save_state
+          - -optl-Wl,--export=ocelot_save_state_ptr
+          - -optl-Wl,--export=ocelot_save_state_len
+          - -optl-Wl,--export=ocelot_load_state
+          - -optl-Wl,--export=ocelot_extract_save
+          - -optl-Wl,--export=ocelot_save_buffer_ptr
+          - -optl-Wl,--export=ocelot_save_buffer_len
+          - -optl-Wl,--export=ocelot_load_save
+          - -optl-Wl,--export=ocelot_rom_title_ptr
+          - -optl-Wl,--export=ocelot_rom_title_len
+          - -optl-Wl,--export=ocelot_cartridge_has_battery
+          - -optl-Wl,--export=ocelot_is_cgb
+          - -optl-Wl,--export=ocelot_version_ptr
+          - -optl-Wl,--export=ocelot_version_len
+          - -optl-Wl,--export=ocelot_last_error_ptr
+          - -optl-Wl,--export=ocelot_last_error_len
+          - -optl-Wl,--export=ocelot_framebuffer_width
+          - -optl-Wl,--export=ocelot_framebuffer_height
+          - -optl-Wl,--export=ocelot_audio_sample_rate
+          - -optl-Wl,--export=ocelot_button_up
+          - -optl-Wl,--export=ocelot_button_down
+          - -optl-Wl,--export=ocelot_button_left
+          - -optl-Wl,--export=ocelot_button_right
+          - -optl-Wl,--export=ocelot_button_a
+          - -optl-Wl,--export=ocelot_button_b
+          - -optl-Wl,--export=ocelot_button_start
+          - -optl-Wl,--export=ocelot_button_select
 
 tests:
   ocelot-test:
