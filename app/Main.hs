@@ -70,7 +70,7 @@ cliInfo =
             <> header "Ocelot - Game Boy (DMG) and Game Boy Color (CGB) emulator in Haskell"
             <> footer
                 ( "SDL key bindings (play): Z=A, X=B, Enter=Start, RShift=Select, "
-                    <> "Arrows=D-pad, Space=pause, .=frame step, Tab=fast-fwd (held), "
+                    <> "Arrows=D-pad, Space=pause, F1=help overlay, .=frame step, Tab=fast-fwd (held), "
                     <> "R=reset, F5=save state, F7=load state, F12=screenshot, Escape=quit."
                 )
         )
