@@ -25,11 +25,47 @@ Ocelot is a Game Boy (DMG) and Game Boy Color (CGB) emulator written in Haskell.
 
 ### Quickstart
 
-To be added.
+#### Desktop
+
+```bash
+make build
+stack run -- play path/to/game.gb
+```
+
+#### Web
+
+Ocelot now includes a browser host under `web/`, modeled after the Sandopolis web frontend.
+The desktop SDL frontend stays separate; the web version uses a dedicated wasm entrypoint.
+
+Building the web version requires the **GHC wasm toolchain** (`wasm32-wasi-cabal`), not the
+regular Stack compiler:
+
+```bash
+make web-build
+```
+
+That writes the browser-ready files to `dist/web/`, including:
+
+- `index.html`
+- `ocelot.js`
+- `audio-worklet.js`
+- `ocelot.wasm`
+
+Serve `dist/web/` over HTTP with any static file server, then open it in a browser.
+The web host supports:
+
+- ROM drag-and-drop and recent-ROM caching
+- Canvas video output
+- Web Audio playback through an AudioWorklet
+- Save states in IndexedDB
+- Battery-backed save RAM persistence in IndexedDB
 
 ### Documentation
 
-To be added.
+- `app/Frontend/Sdl.hs`: desktop SDL frontend
+- `app-web/Main.hs`: wasm entrypoint exports for the browser host
+- `src/Ocelot/Web.hs`: browser-friendly emulator session API
+- `web/`: browser UI, runtime glue, and audio worklet
 
 ---
 

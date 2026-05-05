@@ -9,6 +9,7 @@ copyright: "2026 Hassan Abedi"
 extra-source-files:
   - README.md
   - LICENSE
+  - web/**
 
 synopsis: A Game Boy and Game Boy Color emulator in Haskell
 category: Emulator
@@ -50,6 +51,12 @@ executables:
       - ocelot
       - optparse-applicative >= 0.18 && < 0.20
       - sdl2 >= 2.5 && < 2.6
+
+  ocelot-web:
+    main: Main.hs
+    source-dirs: app-web
+    dependencies:
+      - ocelot
 
 tests:
   ocelot-test:

@@ -1,6 +1,6 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.35.2.
+-- This file has been generated from package.yaml by hpack version 0.36.1.
 --
 -- see: https://github.com/sol/hpack
 
@@ -20,6 +20,9 @@ build-type:     Simple
 extra-source-files:
     README.md
     LICENSE
+    web/audio-worklet.js
+    web/index.html
+    web/ocelot.js
 
 source-repository head
   type: git
@@ -44,6 +47,7 @@ library
       Ocelot.Snapshot.Binary
       Ocelot.Testing
       Ocelot.Timer
+      Ocelot.Web
   other-modules:
       Paths_ocelot
   hs-source-dirs:
@@ -80,6 +84,24 @@ executable ocelot
     , vector ==0.13.*
   default-language: Haskell2010
 
+executable ocelot-web
+  main-is: Main.hs
+  other-modules:
+      Paths_ocelot
+  hs-source-dirs:
+      app-web
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -O2
+  build-depends:
+      base >=4.14 && <5
+    , bytestring >=0.11 && <0.13
+    , containers >=0.6 && <0.8
+    , ocelot
+    , text >=1.2 && <3
+    , time >=1.11 && <1.13
+    , transformers >=0.5 && <0.7
+    , vector ==0.13.*
+  default-language: Haskell2010
+
 test-suite ocelot-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
@@ -104,6 +126,7 @@ test-suite ocelot-test
       Ocelot.PpuSpec
       Ocelot.SnapshotSpec
       Ocelot.TimerSpec
+      Ocelot.WebSpec
       Paths_ocelot
   hs-source-dirs:
       test

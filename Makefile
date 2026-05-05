@@ -5,6 +5,7 @@ STACK         ?= stack
 JOBS          ?= $(shell nproc || echo 2)
 SRC_DIR       := src
 APP_DIR       := app
+APP_WEB_DIR   := app-web
 TEST_DIR      := test
 BUILD_DIR     := .stack-work
 DOC_OUT       := docs/haskell
@@ -14,7 +15,7 @@ DOC_OUT       := docs/haskell
 ################################################################################
 
 .PHONY: all build rebuild run test cov lint format format-check doc clean install-deps release help coverage \
- repl setup-hooks test-hooks mooneye-roms acid2-roms test-roms tools sameboy-core sameboy-trace
+ repl setup-hooks test-hooks mooneye-roms acid2-roms test-roms tools sameboy-core sameboy-trace web-build
 
 .DEFAULT_GOAL := help
 
@@ -48,15 +49,15 @@ clean: ## Remove build artifacts, cache directories, etc.
 
 lint: ## Run linter checks on Haskell source files
 	@echo "Running HLint..."
-	$(STACK) exec -- hlint $(SRC_DIR) $(APP_DIR) $(TEST_DIR)
+	$(STACK) exec -- hlint $(SRC_DIR) $(APP_DIR) $(APP_WEB_DIR) $(TEST_DIR)
 
 format: ## Format Haskell source files in-place
 	@echo "Formatting Haskell files..."
-	$(STACK) exec -- fourmolu -i $(SRC_DIR) $(APP_DIR) $(TEST_DIR)
+	$(STACK) exec -- fourmolu -i $(SRC_DIR) $(APP_DIR) $(APP_WEB_DIR) $(TEST_DIR)
 
 format-check: ## Check formatting without modifying files
 	@echo "Checking Haskell formatting..."
-	$(STACK) exec -- fourmolu --mode check $(SRC_DIR) $(APP_DIR) $(TEST_DIR)
+	$(STACK) exec -- fourmolu --mode check $(SRC_DIR) $(APP_DIR) $(APP_WEB_DIR) $(TEST_DIR)
 
 doc: ## Generate Haddock documentation for the project
 	@echo "Generating documentation to $(DOC_OUT)..."
@@ -133,6 +134,8 @@ test-roms: mooneye-roms acid2-roms ## Fetch all third-party test ROMs into `test
 TOOLS_OUT := bin/tools
 TOOLS_SRCS := $(wildcard tools/*.hs)
 TOOLS_BINS := $(patsubst tools/%.hs,$(TOOLS_OUT)/%,$(TOOLS_SRCS))
+WEB_OUT := dist/web
+WASM_CABAL ?= wasm32-wasi-cabal
 
 tools: $(TOOLS_BINS) $(TOOLS_OUT)/sameboy-trace ## Build the developer diagnostic tools under `tools/` into `bin/tools`
 
@@ -163,3 +166,15 @@ $(TOOLS_OUT)/sameboy-trace: tools/sameboy-trace.c $(SAMEBOY_DIR)/build/obj/Core/
 	@gcc -o $@ $(TOOLS_OUT)/sameboy-trace.o $(SAMEBOY_DIR)/build/obj/Core/*.o -lm -lpthread
 
 sameboy-trace: $(TOOLS_OUT)/sameboy-trace ## Build the SameBoy-side differential trace driver
+
+web-build: ## Build the browser host and wasm module (requires wasm32-wasi-cabal)
+	@command -v $(WASM_CABAL) >/dev/null 2>&1 || { \
+		echo "Missing $(WASM_CABAL). Install the GHC wasm toolchain first."; \
+		exit 1; \
+	}
+	@echo "Building ocelot-web with $(WASM_CABAL)..."
+	@mkdir -p $(WEB_OUT)
+	@$(WASM_CABAL) build exe:ocelot-web
+	@cp -R web/. $(WEB_OUT)/
+	@cp "$$($(WASM_CABAL) list-bin exe:ocelot-web)" "$(WEB_OUT)/ocelot.wasm"
+	@echo "Web build ready in $(WEB_OUT). Serve that directory over HTTP."
