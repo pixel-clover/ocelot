@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 {- | Public facade for the Ocelot emulator.
 
@@ -29,6 +30,8 @@ module Ocelot (
 ) where
 
 import Data.Text (Text)
+import qualified Data.Text as T
+import GitHash (giBranch, giHash, tGitInfoCwdTry)
 import Ocelot.Cartridge (
     Cartridge,
     CartridgeError (..),
@@ -50,6 +53,10 @@ import Ocelot.Cartridge.Header (
     parseHeader,
  )
 
--- | Human-readable version string for the emulator library.
+-- | Human-readable version string, including branch and short commit hash baked in at compile time.
 version :: Text
-version = "Ocelot 0.1.0.0"
+version = "Ocelot 0.1.0.0" <> T.pack meta
+  where
+    meta = case $$tGitInfoCwdTry of
+        Left _ -> ""
+        Right gi -> " (" <> giBranch gi <> "@" <> take 5 (giHash gi) <> ")"

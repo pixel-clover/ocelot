@@ -1,5 +1,5 @@
 {
-  description = "Ocelot: a Game Boy and Game Boy Color emulator in Haskell";
+  description = "Ocelot: a Gameboy and Gameboy Color emulator in Haskell";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 

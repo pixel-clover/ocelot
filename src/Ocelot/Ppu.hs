@@ -1,7 +1,7 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TupleSections #-}
 
-{- | Game Boy Picture Processing Unit (DMG only).
+{- | Gameboy Picture Processing Unit (DMG only).
 
 The PPU owns its own VRAM (8 KiB at @0x8000-0x9FFF@), OAM (160 bytes at
 @0xFE00-0xFE9F@), and the register file at @0xFF40-0xFF4B@. The bus

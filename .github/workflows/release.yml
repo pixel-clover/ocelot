@@ -1,0 +1,145 @@
+name: Create Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  call_tests:
+    uses: ./.github/workflows/tests.yml
+
+  create-release:
+    name: Create release
+    runs-on: ubuntu-latest
+    needs: call_tests
+    if: success()
+    permissions:
+      contents: write
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set release tag
+        shell: bash
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "RELEASE_TAG=${{ github.ref_name }}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=manual-${{ github.run_id }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Create release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          release_name: Release ${{ env.RELEASE_TAG }}
+          draft: ${{ github.ref_type != 'tag' }}
+          prerelease: true
+
+  build-and-upload:
+    name: Build (${{ matrix.artifact_name }})
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: ocelot-linux-x86_64.gz
+            asset_content_type: application/gzip
+          - os: ubuntu-24.04-arm
+            artifact_name: ocelot-linux-aarch64.gz
+            asset_content_type: application/gzip
+          - os: macos-13
+            artifact_name: ocelot-macos-x86_64.gz
+            asset_content_type: application/gzip
+          - os: macos-14
+            artifact_name: ocelot-macos-aarch64.gz
+            asset_content_type: application/gzip
+          - os: windows-latest
+            artifact_name: ocelot-windows-x86_64.zip
+            asset_content_type: application/zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Haskell
+        uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.6'
+          enable-stack: true
+          stack-version: 'latest'
+
+      - name: Cache Stack
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.stack
+            .stack-work
+          key: ${{ runner.os }}-${{ runner.arch }}-stack-release-${{ hashFiles('stack.yaml.lock', 'package.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-stack-release-
+            ${{ runner.os }}-${{ runner.arch }}-stack-
+
+      - name: Install SDL2 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libsdl2-dev
+
+      - name: Install SDL2 (macOS)
+        if: runner.os == 'macOS'
+        run: brew install sdl2
+
+      - name: Install SDL2 (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: stack exec -- pacman -S --noconfirm mingw-w64-x86_64-SDL2
+
+      - name: Build release binary
+        run: stack build ocelot:exe:ocelot --ghc-options="-O2" --flag ocelot:desktop
+
+      - name: Package artifact (Linux / macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          BIN="$(stack path --local-install-root)/bin/ocelot"
+          gzip -c "$BIN" > "${{ matrix.artifact_name }}"
+
+      - name: Package artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binDir = "$(stack path --local-install-root)\bin"
+          $releaseDir = "release-${{ github.run_id }}"
+          New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
+          Copy-Item "$binDir\ocelot.exe" "$releaseDir\"
+          # Bundle SDL2.dll from the MSYS2 sysroot that Stack manages
+          $sdl2 = stack exec -- sh -c "find /mingw64/bin -name 'SDL2.dll' 2>/dev/null | head -1"
+          if ($sdl2) { Copy-Item $sdl2 "$releaseDir\" }
+          Compress-Archive -Path "$releaseDir\*" -DestinationPath "${{ matrix.artifact_name }}"
+
+      - name: Upload release asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./${{ matrix.artifact_name }}
+          asset_name: ${{ matrix.artifact_name }}
+          asset_content_type: ${{ matrix.asset_content_type }}

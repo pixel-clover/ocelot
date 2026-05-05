@@ -34,6 +34,8 @@ let aboutOpen = false;
 // Counts simultaneously-open overlays; pause/resume only fire on 0->1 and 1->0 transitions.
 let overlayDepth = 0;
 let wasRunningBeforeOverlay = false;
+// Auto-pause on tab hide; separate from user-initiated pause so the two don't interfere.
+let pausedByVisibility = false;
 
 // Perf HUD
 let perfVisible = false;
@@ -65,15 +67,7 @@ let keyMap = {...DEFAULT_KEY_MAP};
 // GB buttons available for remapping (in display order)
 const REMAP_BUTTONS = ["Up", "Down", "Left", "Right", "A", "B", "Start", "Select"];
 
-// Gamepad: standard mapping button index -> GB button name
-const GAMEPAD_FACE_MAP = [
-    [0, "B"],      // A/Cross (bottom face) -> GB B
-    [1, "A"],      // B/Circle (right face)  -> GB A
-    [8, "Select"], // Select/Back            -> GB Select
-    [9, "Start"],  // Start/Menu             -> GB Start
-];
 const AXIS_THRESHOLD = 0.5;
-const prevGamepadState = {};
 
 async function init() {
     canvas = document.getElementById("screen");
@@ -152,6 +146,19 @@ async function init() {
             saveBatteryIfNeeded({silent: true}).catch((err) => {
                 console.warn("Battery save on visibilitychange failed", err);
             });
+            if (running) {
+                pausedByVisibility = true;
+                stopFrameLoop();
+                if (audioCtx) audioCtx.suspend();
+            }
+        } else if (pausedByVisibility) {
+            pausedByVisibility = false;
+            if (emu) {
+                running = true;
+                lastFrameTime = performance.now();
+                if (audioCtx && audioEnabled) audioCtx.resume();
+                rafId = requestAnimationFrame(frameLoop);
+            }
         }
     });
     window.addEventListener("pagehide", () => {
@@ -678,6 +685,23 @@ function onFileSelected(ev) {
     if (ev.target.files.length > 0) loadRom(ev.target.files[0]);
 }
 
+async function decompressIfNeeded(file) {
+    if (!(file.name || "").toLowerCase().endsWith(".zip")) return file;
+    const { unzip } = await import("https://esm.sh/fflate@0.8.2");
+    const buffer = await file.arrayBuffer();
+    return new Promise((resolve, reject) => {
+        unzip(new Uint8Array(buffer), (err, files) => {
+            if (err) { reject(new Error("ZIP extraction failed: " + err.message)); return; }
+            const ROM_EXTS = [".gb", ".gbc", ".sgb"];
+            const entry = Object.entries(files).find(([name]) =>
+                ROM_EXTS.some(ext => name.toLowerCase().endsWith(ext)));
+            if (!entry) { reject(new Error("No .gb or .gbc ROM found inside ZIP")); return; }
+            const [romName, romBytes] = entry;
+            resolve(new File([romBytes], romName, { type: "application/octet-stream" }));
+        });
+    });
+}
+
 async function loadRom(file) {
     if (!wasm) return;
     hideError();
@@ -695,6 +719,7 @@ async function loadRom(file) {
     await destroyCurrentSession();
     await initAudio();
     try {
+        file = await decompressIfNeeded(file);
         const buffer = await file.arrayBuffer();
         const romBytes = new Uint8Array(buffer);
         const ptr = allocAndCopy(romBytes);
@@ -764,7 +789,14 @@ function frameLoop(now) {
 function tickEmulator(now) {
     if (!running || !emu) return;
     if (now - lastFrameTime < frameInterval) return;
-    lastFrameTime = now;
+    // Accumulate time rather than snapping to now, so the deficit persists
+    // across RAF ticks and we hit ~59.7275 Hz on a 60 Hz display.
+    // Cap at 4 frames to avoid runaway catch-up after the tab is backgrounded.
+    if (now - lastFrameTime > frameInterval * 4) {
+        lastFrameTime = now - frameInterval;
+    } else {
+        lastFrameTime += frameInterval;
+    }
 
     pollGamepads();
 
@@ -815,28 +847,18 @@ function pollGamepads() {
         const gp = gamepads[gi];
         if (!gp || !gp.connected) continue;
 
-        // Face buttons
-        const desired = {};
-        for (const [bi, name] of GAMEPAD_FACE_MAP) {
-            if (bi >= gp.buttons.length || BUTTONS[name] === undefined) continue;
-            desired[name] = desired[name] || gp.buttons[bi].pressed;
-        }
-        for (const name in desired) {
-            const isDown = !!desired[name];
-            if (prevGamepadState[name] !== isDown) {
-                prevGamepadState[name] = isDown;
-                e.ocelot_set_button(emu, BUTTONS[name], isDown ? 1 : 0);
-            }
-        }
-
-        // D-pad (standard mapping: buttons 12-15) + left analog stick
+        const btn = (i) => gp.buttons.length > i && gp.buttons[i].pressed;
         const lx = gp.axes.length >= 2 ? gp.axes[0] : 0;
         const ly = gp.axes.length >= 2 ? gp.axes[1] : 0;
-        const dp = (i) => gp.buttons.length > i && gp.buttons[i].pressed;
-        e.ocelot_set_button(emu, BUTTONS.Up,    (dp(12) || ly < -AXIS_THRESHOLD) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Down,  (dp(13) || ly >  AXIS_THRESHOLD) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Left,  (dp(14) || lx < -AXIS_THRESHOLD) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Right, (dp(15) || lx >  AXIS_THRESHOLD) ? 1 : 0);
+
+        e.ocelot_set_button(emu, BUTTONS.A,      btn(0) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.B,      btn(1) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Select, btn(8) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Start,  btn(9) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Up,    (btn(12) || ly < -AXIS_THRESHOLD) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Down,  (btn(13) || ly >  AXIS_THRESHOLD) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Left,  (btn(14) || lx < -AXIS_THRESHOLD) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Right, (btn(15) || lx >  AXIS_THRESHOLD) ? 1 : 0);
 
         // Only use the first connected gamepad
         break;

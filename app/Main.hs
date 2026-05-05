@@ -3,10 +3,13 @@
 
 module Main (main) where
 
+import qualified Codec.Archive.Zip as Zip
 import Control.Exception (IOException, bracket_, try)
 import Control.Monad (when)
 import Data.Bits (testBit, (.&.))
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
+import Data.Char (toLower)
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
@@ -35,6 +38,7 @@ import Ocelot.Machine (Machine (..), getCpu, getCpuRegs, machineFromCartridge)
 import qualified Ocelot.Ppu as Ppu
 import Options.Applicative
 import System.Exit (exitFailure)
+import System.FilePath (takeExtension)
 import System.IO (hPutStrLn, stderr)
 
 stepCap :: Int
@@ -67,7 +71,7 @@ cliInfo =
     info
         (helper <*> versionFlag <*> commandParser)
         ( fullDesc
-            <> header "Ocelot - Game Boy (DMG) and Game Boy Color (CGB) emulator in Haskell"
+            <> header (T.unpack version <> " - Gameboy (DMG) and Gameboy Color (CGB) emulator in Haskell")
             <> footer
                 ( "SDL key bindings (play): Z=A, X=B, Enter=Start, RShift=Select, "
                     <> "Arrows=D-pad, Space=pause, F1=help overlay, .=frame step, Tab=fast-fwd (held), "
@@ -208,7 +212,23 @@ readRomBytes path = do
     r <- try (BS.readFile path) :: IO (Either IOException BS.ByteString)
     case r of
         Left e -> die ("could not read ROM file " <> path <> ": " <> show e)
-        Right bytes -> pure bytes
+        Right bytes ->
+            if map toLower (takeExtension path) == ".zip"
+                then extractRomFromZip path bytes
+                else pure bytes
+
+romExtensions :: [String]
+romExtensions = [".gb", ".gbc", ".sgb"]
+
+extractRomFromZip :: FilePath -> BS.ByteString -> IO BS.ByteString
+extractRomFromZip path bytes = do
+    let archive = Zip.toArchive (BL.fromStrict bytes)
+        isRom e = map toLower (takeExtension (Zip.eRelativePath e)) `elem` romExtensions
+    case filter isRom (Zip.zEntries archive) of
+        [] -> die ("no .gb, .gbc, or .sgb ROM found inside " <> path)
+        (entry : _) -> do
+            putStrLn ("zip:      extracting " <> Zip.eRelativePath entry)
+            pure (BL.toStrict (Zip.fromEntry entry))
 
 printHeader :: Header -> IO ()
 printHeader h = do

@@ -9,17 +9,18 @@
 [![Tests](https://img.shields.io/github/actions/workflow/status/pixel-clover/ocelot/tests.yml?label=tests&style=flat&labelColor=282c34&logo=github)](https://github.com/pixel-clover/ocelot/actions/workflows/tests.yml)
 [![Lints](https://img.shields.io/github/actions/workflow/status/pixel-clover/ocelot/lints.yml?label=lints&style=flat&labelColor=282c34&logo=github)](https://github.com/pixel-clover/ocelot/actions/workflows/lints.yml)
 [![Code Coverage](https://img.shields.io/codecov/c/github/pixel-clover/ocelot?label=coverage&style=flat&labelColor=282c34&logo=codecov)](https://codecov.io/gh/pixel-clover/ocelot)
-[![Docs](https://img.shields.io/badge/docs-latest-007ec6?label=docs&style=flat&labelColor=282c34&logo=readthedocs)](docs)
+[![Play Online](https://img.shields.io/badge/play%20online-browser-007ec6?style=flat&labelColor=282c34&logo=webassembly)](https://pixel-clover.github.io/ocelot/)
 [![License](https://img.shields.io/badge/license-MIT-007ec6?label=license&style=flat&labelColor=282c34&logo=open-source-initiative)](https://github.com/pixel-clover/ocelot/blob/main/LICENSE)
 [![Release](https://img.shields.io/github/release/pixel-clover/ocelot.svg?label=release&style=flat&labelColor=282c34&logo=github)](https://github.com/pixel-clover/ocelot/releases/latest)
 
-A Nintendo Game Boy and Game Boy Color emulator in Haskell
+
+A Nintendo Gameboy and Gameboy Color emulator in Haskell λ
 
 </div>
 
 ---
 
-Ocelot is a Game Boy (DMG) and Game Boy Color (CGB) emulator written in Haskell.
+Ocelot is a Gameboy (DMG) and Gameboy Color (CGB) emulator written in Haskell.
 
 ---
 
@@ -55,4 +56,4 @@ Ocelot is licensed under the MIT License (see [LICENSE](LICENSE)).
 Ocelot's implementation logic was checked with the following reference material for finding errors and verifying correctness:
 * [Pan Docs](https://gbdev.io/pandocs/)
 * [SameBoy](https://github.com/LIJI32/SameBoy)
-* [Game Boy: Complete Technical Reference](https://gekkio.fi/files/gb-docs/gbctr.pdf)
+* [Gameboy: Complete Technical Reference](https://gekkio.fi/files/gb-docs/gbctr.pdf)

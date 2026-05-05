@@ -4,7 +4,7 @@ This file provides guidance to coding agents collaborating on this repository.
 
 ## Mission
 
-Ocelot is a portable and accurate Game Boy (DMG) and Game Boy Color (CGB) emulator written in Haskell.
+Ocelot is a portable and accurate Gameboy (DMG) and Gameboy Color (CGB) emulator written in Haskell.
 Priorities, in order:
 
 1. Correct emulation behavior and compatibility.

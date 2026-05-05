@@ -69,6 +69,10 @@ scale = 4
 frameNs :: Word64
 frameNs = 16742706
 
+-- | Analog stick deadzone (~25 % of the 32 767 maximum).
+axisDeadzone :: Int16
+axisDeadzone = 8000
+
 -- | Cap the audio buffer so an emulator running ahead of the audio device doesn't accumulate unbounded samples.
 maxBufferedSamples :: Int
 maxBufferedSamples = 9600 -- ~100 ms of stereo samples at 48 kHz
@@ -747,6 +751,22 @@ handleEvent hk ui jp ev = case SDL.eventPayload ev of
          in case mapPad (SDL.controllerButtonEventButton cev) of
                 Just btn -> Joypad.setButton btn pressed jp
                 Nothing -> pure ()
+    SDL.ControllerAxisEvent aev ->
+        let val = SDL.controllerAxisEventValue aev
+            pos = val > axisDeadzone
+            neg = val < (-axisDeadzone)
+         in case SDL.controllerAxisEventAxis aev of
+                SDLGC.ControllerAxisLeftX -> do
+                    Joypad.setButton ButtonLeft neg jp
+                    Joypad.setButton ButtonRight pos jp
+                SDLGC.ControllerAxisLeftY -> do
+                    Joypad.setButton ButtonUp neg jp
+                    Joypad.setButton ButtonDown pos jp
+                _ -> pure ()
+    SDL.ControllerDeviceEvent cev ->
+        when (SDL.controllerDeviceEventConnection cev == SDLGC.ControllerDeviceAdded) $ do
+            devs <- SDLGC.availableControllers
+            mapM_ SDLGC.openController devs
     SDL.KeyboardEvent kev -> do
         let pressed = SDL.keyboardEventKeyMotion kev == SDL.Pressed
             scancode = SDL.keysymScancode (SDL.keyboardEventKeysym kev)

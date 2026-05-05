@@ -1,6 +1,6 @@
 {-# LANGUAGE BangPatterns #-}
 
-{- | Game Boy timer (DIV, TIMA, TMA, TAC).
+{- | Gameboy timer (DIV, TIMA, TMA, TAC).
 
 The internal divider is a 16-bit counter ticked once per T-cycle. @DIV@
 (@0xFF04@) reads the upper 8 bits; any write resets the entire counter to 0.
