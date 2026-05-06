@@ -34,6 +34,7 @@ module Ocelot.Bus (
     advance,
     drainSerial,
     drainAudioSamples,
+    drainAudioSamplesVector,
     triggerSpeedSwitch,
     installBootRom,
 ) where
@@ -44,6 +45,7 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int16)
+import Data.Vector.Unboxed (Vector)
 import Data.Vector.Unboxed.Mutable (IOVector)
 import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word16, Word8)
@@ -932,6 +934,10 @@ advance mCycles b = do
 -- | Drain the APU's pending stereo samples (interleaved L,R) for the frontend.
 drainAudioSamples :: Bus -> IO [Int16]
 drainAudioSamples b = Apu.drainSamples (busApu b)
+
+-- | Drain the APU's pending stereo samples into an immutable vector.
+drainAudioSamplesVector :: Bus -> IO (Vector Int16)
+drainAudioSamplesVector b = Apu.drainSamplesVector (busApu b)
 
 setIfBit :: Int -> Bus -> IO ()
 setIfBit n b = do

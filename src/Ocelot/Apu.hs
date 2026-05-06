@@ -33,6 +33,7 @@ module Ocelot.Apu (
     write8,
     advance,
     drainSamples,
+    drainSamplesVector,
     sampleRate,
     dumpState,
     loadState,
@@ -291,7 +292,11 @@ setCgbMode b apu = writeIORef (apuCgb apu) b
 the queue.
 -}
 drainSamples :: ApuState -> IO [Int16]
-drainSamples apu = drainSampleQueue (apuSamples apu)
+drainSamples apu = V.toList <$> drainSamplesVector apu
+
+-- | Read all queued samples into an immutable vector and clear the queue.
+drainSamplesVector :: ApuState -> IO (Vector Int16)
+drainSamplesVector apu = drainSampleQueueVector (apuSamples apu)
 
 {- | Encode the APU's full internal state to a flat byte string. The
 sample queue is intentionally not snapshotted (it's drained per frame
@@ -322,19 +327,14 @@ clearSampleQueue queue = do
     writeIORef (sampleQueueStart queue) 0
     writeIORef (sampleQueueLength queue) 0
 
-drainSampleQueue :: SampleQueue -> IO [Int16]
-drainSampleQueue queue = do
+drainSampleQueueVector :: SampleQueue -> IO (Vector Int16)
+drainSampleQueueVector queue = do
     buffer <- readIORef (sampleQueueBuffer queue)
     start <- readIORef (sampleQueueStart queue)
     len <- readIORef (sampleQueueLength queue)
-    let cap = MV.length buffer
-        go !remaining !acc
-            | remaining <= 0 = pure acc
-            | otherwise = do
-                let ix = (start + remaining - 1) `mod` cap
-                sample <- MV.read buffer ix
-                go (remaining - 1) (sample : acc)
-    samples <- go len []
+    drained <- MV.new len
+    copySampleQueue buffer start len drained
+    samples <- V.freeze drained
     clearSampleQueue queue
     pure samples
 

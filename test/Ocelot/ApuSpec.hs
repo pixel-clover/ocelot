@@ -4,6 +4,7 @@ module Ocelot.ApuSpec (spec) where
 
 import Data.Bits ((.&.), (.|.))
 import Data.Maybe (catMaybes, fromMaybe)
+import qualified Data.Vector.Unboxed as V
 import Data.Word (Word16, Word8)
 import qualified Numeric
 import Ocelot.Apu
@@ -212,6 +213,17 @@ spec = do
             combined <- drainSamples apuCombined
 
             combined `shouldBe` (firstFrame ++ secondFrame)
+
+        it "vector drains preserve the same samples as list drains" $ do
+            apuList <- freshSquareWaveApu
+            advance 17556 apuList
+            listSamples <- drainSamples apuList
+
+            apuVector <- freshSquareWaveApu
+            advance 17556 apuVector
+            vectorSamples <- drainSamplesVector apuVector
+
+            V.toList vectorSamples `shouldBe` listSamples
 
     describe "high-pass filter" $ do
         it "DC offset decays to near-zero after running a silent (all-DAC-off) APU for many frames" $ do

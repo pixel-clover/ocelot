@@ -16,7 +16,7 @@ The library is unaware of SDL: the only library calls used here are
 * 'machineFromCartridge', 'runFor', 'machineBus', 'busPpu', 'busJoypad'
 * 'Ppu.framebuffer'
 * 'Joypad.setButton'
-* 'Bus.drainAudioSamples'
+* 'Bus.drainAudioSamplesVector'
 
 so this frontend is interchangeable with the headless terminal mode.
 -}
@@ -29,7 +29,7 @@ module Frontend.Sdl (
 import Codec.Picture (Image, PaletteCreationMethod (..), PaletteOptions (..), PixelRGB8 (..), generateImage, palettize)
 import Codec.Picture.Gif (GifDelay, GifLooping (..), writeGifImages)
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar)
 import Control.Exception (IOException, SomeException, try)
 import Control.Monad (forM_, unless, when)
 import Data.Bits (testBit)
@@ -99,6 +99,9 @@ axisDeadzone = 8000
 maxBufferedSamples :: Int
 maxBufferedSamples = 9600 -- ~100 ms of stereo samples at 48 kHz
 
+maxFrameTimeHistory :: Int
+maxFrameTimeHistory = 61
+
 rgbFramebufferBytes :: Int
 rgbFramebufferBytes = gbWidth * gbHeight * 3
 
@@ -116,6 +119,22 @@ newRgbFrameStage = do
             , rgbFrameBytes = BSI.fromForeignPtr fp 0 rgbFramebufferBytes
             }
         )
+
+data AudioQueueState = AudioQueueState
+    { audioQueueBuffer :: !(VSM.IOVector Int16)
+    , audioQueueStart :: !Int
+    , audioQueueLength :: !Int
+    }
+
+newAudioQueue :: IO (MVar AudioQueueState)
+newAudioQueue = do
+    buffer <- VSM.new maxBufferedSamples
+    newMVar
+        AudioQueueState
+            { audioQueueBuffer = buffer
+            , audioQueueStart = 0
+            , audioQueueLength = 0
+            }
 
 data Hotkeys = Hotkeys
     { hkQuit :: !(IORef Bool)
@@ -175,7 +194,7 @@ data UiState = UiState
     -- ^ Count of presented frames. Used for the perf overlay history and GIF capture cadence.
     , uiToasts :: !(IORef [Toast])
     , uiCurrentSlot :: !(IORef Int)
-    , uiFrameTimes :: !(IORef [Word64])
+    , uiFrameTimes :: !(IORef (Seq.Seq Word64))
     -- ^ Ring of up to 61 frame-present timestamps (ns). Used to compute FPS/frame-time.
     , uiDoubleSpeedBadgeUntil :: !(IORef Word64)
     -- ^ Monotonic timestamp in ns after which the "DOUBLE SPEED" badge is hidden. 0 = not active.
@@ -191,7 +210,7 @@ newUiState =
         <*> newIORef 0
         <*> newIORef []
         <*> newIORef 1
-        <*> newIORef []
+        <*> newIORef Seq.empty
         <*> newIORef 0
         <*> newIORef Nothing
 
@@ -288,7 +307,7 @@ play romPath cart bootRom title scale = do
             (SDL.V2 (fromIntegral gbWidth) (fromIntegral gbHeight))
     rgbStage <- newRgbFrameStage
 
-    audioBuf <- newMVar Seq.empty
+    audioBuf <- newAudioQueue
     audioDev <- openAudio audioBuf
     audioPlaying <- newIORef True
 
@@ -309,7 +328,7 @@ play romPath cart bootRom title scale = do
     SDL.quit
     readIORef (hkOpenReq hk)
 
-openAudio :: MVar (Seq.Seq Int16) -> IO SDL.AudioDevice
+openAudio :: MVar AudioQueueState -> IO SDL.AudioDevice
 openAudio buf = do
     let spec =
             SDL.OpenDeviceSpec
@@ -329,7 +348,7 @@ Drains up to @VSM.length out@ samples from the shared buffer, padding with silen
 -}
 audioCallback ::
     forall sampleType.
-    MVar (Seq.Seq Int16) ->
+    MVar AudioQueueState ->
     SDL.AudioFormat sampleType ->
     VSM.IOVector sampleType ->
     IO ()
@@ -339,27 +358,34 @@ audioCallback buf fmt out = case fmt of
     SDL.Signed16BitBEAudio -> writeInt16 buf out
     _ -> pure ()
 
-writeInt16 :: MVar (Seq.Seq Int16) -> VSM.IOVector Int16 -> IO ()
+writeInt16 :: MVar AudioQueueState -> VSM.IOVector Int16 -> IO ()
 writeInt16 buf out = do
     let !needed = VSM.length out
-    samples <-
-        modifyMVar
-            buf
-            ( \xs -> do
-                let (taken, rest) = Seq.splitAt needed xs
-                pure (rest, taken)
-            )
-    let go !i queued
-            | i >= needed = pure ()
-            | otherwise =
-                case Seq.viewl queued of
-                    Seq.EmptyL -> do
-                        VSM.write out i 0
-                        go (i + 1) queued
-                    sample Seq.:< rest -> do
-                        VSM.write out i sample
-                        go (i + 1) rest
-    go 0 samples
+    modifyMVar_
+        buf
+        ( \queue -> do
+            let !available = min needed (audioQueueLength queue)
+                !buffer = audioQueueBuffer queue
+                !start = audioQueueStart queue
+                !cap = VSM.length buffer
+                !firstChunk = min available (cap - start)
+                !secondChunk = available - firstChunk
+            when (firstChunk > 0) $
+                VSM.copy
+                    (VSM.slice 0 firstChunk out)
+                    (VSM.slice start firstChunk buffer)
+            when (secondChunk > 0) $
+                VSM.copy
+                    (VSM.slice firstChunk secondChunk out)
+                    (VSM.slice 0 secondChunk buffer)
+            when (available < needed) $
+                fillAudioSilence out available needed
+            pure
+                queue
+                    { audioQueueStart = (start + available) `mod` cap
+                    , audioQueueLength = audioQueueLength queue - available
+                    }
+        )
 
 loop ::
     FilePath ->
@@ -375,7 +401,7 @@ loop ::
     PaceMode ->
     SDL.AudioDevice ->
     IORef Bool ->
-    MVar (Seq.Seq Int16) ->
+    MVar AudioQueueState ->
     SDL.Window ->
     IO ()
 loop romPath titleStr hk ui machineRef cart bootRom renderer texture rgbStage paceMode audioDev audioPlaying audioBuf window = do
@@ -435,8 +461,8 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture rgbStage pa
                 )
                 [1 .. frames]
 
-            samples <- Bus.drainAudioSamples (machineBus machine')
-            unless (null samples) $ appendAudioSamples audioBuf samples
+            samples <- Bus.drainAudioSamplesVector (machineBus machine')
+            unless (V.null samples) $ appendAudioSamples audioBuf samples
 
         nowUi <- getMonotonicTimeNSec
         pruneUiDeadlines nowUi ui
@@ -480,8 +506,8 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture rgbStage pa
             -- (computation + sleep), giving an accurate FPS/frame-time reading.
             frameEndNs <- getMonotonicTimeNSec
             modifyIORef' (uiFrameTimes ui) $ \ts ->
-                let ts' = ts ++ [frameEndNs]
-                 in if length ts' > 61 then drop 1 ts' else ts'
+                let ts' = ts Seq.|> frameEndNs
+                 in if Seq.length ts' > maxFrameTimeHistory then Seq.drop 1 ts' else ts'
         loop romPath titleStr hk ui machineRef cart bootRom renderer texture rgbStage paceMode audioDev audioPlaying audioBuf window
 
 gatherEvents :: Bool -> Word64 -> Maybe Word64 -> IO [SDL.Event]
@@ -495,27 +521,74 @@ gatherEvents waitMode nowNs mDeadline
         rest <- SDL.pollEvents
         pure (maybe rest (: rest) first)
 
-appendAudioSamples :: MVar (Seq.Seq Int16) -> [Int16] -> IO ()
+fillAudioSilence :: VSM.IOVector Int16 -> Int -> Int -> IO ()
+fillAudioSilence out start end = go start
+  where
+    go !i
+        | i >= end = pure ()
+        | otherwise = do
+            VSM.write out i 0
+            go (i + 1)
+
+appendAudioSamples :: MVar AudioQueueState -> V.Vector Int16 -> IO ()
 appendAudioSamples audioBuf samples =
     modifyMVar_
         audioBuf
-        ( \existing -> do
-            let !combined = existing Seq.>< Seq.fromList samples
-                !overflow = Seq.length combined - maxBufferedSamples
-            pure $
-                if overflow > 0
-                    then Seq.drop overflow combined
-                    else combined
+        ( \queue -> do
+            let !buffer = audioQueueBuffer queue
+                !cap = VSM.length buffer
+                !sampleCount = V.length samples
+            if sampleCount >= cap
+                then do
+                    copyVectorIntoRing samples (sampleCount - cap) buffer 0 cap
+                    pure
+                        queue
+                            { audioQueueStart = 0
+                            , audioQueueLength = cap
+                            }
+                else do
+                    let !overflow = max 0 (audioQueueLength queue + sampleCount - cap)
+                        !start = (audioQueueStart queue + overflow) `mod` cap
+                        !kept = audioQueueLength queue - overflow
+                        !writePos = (start + kept) `mod` cap
+                        !firstChunk = min sampleCount (cap - writePos)
+                        !secondChunk = sampleCount - firstChunk
+                    when (firstChunk > 0) $
+                        copyVectorIntoRing samples 0 buffer writePos firstChunk
+                    when (secondChunk > 0) $
+                        copyVectorIntoRing samples firstChunk buffer 0 secondChunk
+                    pure
+                        queue
+                            { audioQueueStart = start
+                            , audioQueueLength = kept + sampleCount
+                            }
         )
 
-syncAudioPlayback :: SDL.AudioDevice -> IORef Bool -> MVar (Seq.Seq Int16) -> Bool -> IO ()
+copyVectorIntoRing :: V.Vector Int16 -> Int -> VSM.IOVector Int16 -> Int -> Int -> IO ()
+copyVectorIntoRing samples srcOffset buffer dstOffset count = go 0
+  where
+    go !i
+        | i >= count = pure ()
+        | otherwise = do
+            VSM.write buffer (dstOffset + i) (V.unsafeIndex samples (srcOffset + i))
+            go (i + 1)
+
+syncAudioPlayback :: SDL.AudioDevice -> IORef Bool -> MVar AudioQueueState -> Bool -> IO ()
 syncAudioPlayback audioDev audioPlaying audioBuf shouldPlay = do
     playing <- readIORef audioPlaying
     when (playing /= shouldPlay) $ do
         if shouldPlay
             then SDL.setAudioDevicePlaybackState audioDev SDL.Play
             else do
-                modifyMVar_ audioBuf (const (pure Seq.empty))
+                modifyMVar_
+                    audioBuf
+                    ( \queue ->
+                        pure
+                            queue
+                                { audioQueueStart = 0
+                                , audioQueueLength = 0
+                                }
+                    )
                 SDL.setAudioDevicePlaybackState audioDev SDL.Pause
         writeIORef audioPlaying shouldPlay
 
@@ -726,14 +799,17 @@ showFixed1 x =
         d = floor (x * 10) `mod` 10 :: Int
      in show i <> "." <> show d
 
-renderPerfOverlay :: SDL.Renderer -> Int -> PaceMode -> [Word64] -> IO ()
+renderPerfOverlay :: SDL.Renderer -> Int -> PaceMode -> Seq.Seq Word64 -> IO ()
 renderPerfOverlay renderer winW paceMode frameTimes = do
-    let fps = case frameTimes of
-            (_ : _ : _) ->
-                let spanNs = fromIntegral (last frameTimes - head frameTimes) :: Double
-                    n = fromIntegral (length frameTimes - 1) :: Double
+    let sampleCount = Seq.length frameTimes
+        fps
+            | sampleCount >= 2 =
+                let firstNs = Seq.index frameTimes 0
+                    lastNs = Seq.index frameTimes (sampleCount - 1)
+                    spanNs = fromIntegral (lastNs - firstNs) :: Double
+                    n = fromIntegral (sampleCount - 1) :: Double
                  in n / (spanNs / 1e9)
-            _ -> 0
+            | otherwise = 0
         fpsStr = "FPS  " <> showFixed1 fps
         paceStr = "PACE  " <> paceModeLabel paceMode
         w = max (textWidth 2 fpsStr) (textWidth 2 paceStr) + 28
@@ -1404,7 +1480,8 @@ audioTest = do
             concatMap
                 (\i -> let s = sineAt i in [s, s])
                 [0 .. totalSamples - 1]
-    audioBuf <- newMVar (Seq.fromList samples)
+    audioBuf <- newAudioQueue
+    appendAudioSamples audioBuf (V.fromList samples)
     let spec =
             SDL.OpenDeviceSpec
                 { SDL.openDeviceFreq = SDL.Desire (fromIntegral Apu.sampleRate)
