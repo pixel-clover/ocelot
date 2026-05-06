@@ -84,12 +84,15 @@ data Hotkeys = Hotkeys
     -- ^ "." while paused: run one frame, then re-pause.
     , hkResetReq :: !(IORef Bool)
     -- ^ "R": rebuild the Machine from the cartridge.
+    , hkFullscreenReq :: !(IORef Bool)
+    -- ^ F11: toggle fullscreen/windowed.
     }
 
 newHotkeys :: IO Hotkeys
 newHotkeys =
     Hotkeys
         <$> newIORef False
+        <*> newIORef False
         <*> newIORef False
         <*> newIORef False
         <*> newIORef False
@@ -112,16 +115,26 @@ data Toast = Toast
 
 data UiState = UiState
     { uiHelpVisible :: !(IORef Bool)
+    , uiPerfVisible :: !(IORef Bool)
     , uiFrameCounter :: !(IORef Word64)
     , uiToasts :: !(IORef [Toast])
+    , uiCurrentSlot :: !(IORef Int)
+    , uiFrameTimes :: !(IORef [Word64])
+    -- ^ Ring of up to 61 frame-present timestamps (ns). Used to compute FPS/frame-time.
+    , uiDoubleSpeedBadgeUntil :: !(IORef Word64)
+    -- ^ Frame number after which the "DOUBLE SPEED" badge is hidden. 0 = not active.
     }
 
 newUiState :: IO UiState
 newUiState =
     UiState
         <$> newIORef False
+        <*> newIORef False
         <*> newIORef 0
         <*> newIORef []
+        <*> newIORef 0
+        <*> newIORef []
+        <*> newIORef 0
 
 tickUi :: UiState -> IO Word64
 tickUi ui = do
@@ -154,9 +167,13 @@ currentToast ui = listToMaybe <$> readIORef (uiToasts ui)
 
 fallbackTitle :: FilePath -> String
 fallbackTitle path =
-    let fileName = reverse (takeWhile (/= '/') (reverse path))
+    let fileName = reverse (takeWhile (\c -> c /= '/' && c /= '\\') (reverse path))
         stem = reverse (drop 1 (dropWhile (/= '.') (reverse fileName)))
      in if null stem then fileName else stem
+
+slotPath :: FilePath -> Int -> FilePath
+slotPath romPath 0 = romPath <> ".state"
+slotPath romPath n = romPath <> ".state" <> show n
 
 play :: FilePath -> Cartridge -> Maybe BS.ByteString -> Text -> Int -> IO ()
 play romPath cart bootRom title scale = do
@@ -182,6 +199,7 @@ play romPath cart bootRom title scale = do
             SDL.defaultWindow
                 { SDL.windowInitialSize =
                     SDL.V2 (fromIntegral winW) (fromIntegral winH)
+                , SDL.windowResizable = True
                 }
     renderer <-
         SDL.createRenderer
@@ -206,7 +224,7 @@ play romPath cart bootRom title scale = do
 
     SDL.setAudioDevicePlaybackState audioDev SDL.Play
 
-    loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf winW winH
+    loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf window
 
     SDL.setAudioDevicePlaybackState audioDev SDL.Pause
     SDL.closeAudioDevice audioDev
@@ -269,13 +287,12 @@ loop ::
     SDL.Renderer ->
     SDL.Texture ->
     MVar [Int16] ->
-    Int ->
-    Int ->
+    SDL.Window ->
     IO ()
-loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf winW winH = do
+loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf window = do
     quit <- readIORef (hkQuit hk)
     unless quit $ do
-        _ <- tickUi ui
+        frame <- tickUi ui
         machine <- readIORef machineRef
         events <- SDL.pollEvents
         mapM_ (handleEvent hk ui (Bus.busJoypad (machineBus machine))) events
@@ -283,8 +300,25 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf wi
         -- One-shot hotkeys: handle save/load/screenshot/reset requests.
         handlePending romPath hk ui machineRef cart bootRom
 
+        -- Toggle fullscreen on request.
+        fsReq <- readIORef (hkFullscreenReq hk)
+        when fsReq $ do
+            writeIORef (hkFullscreenReq hk) False
+            cfg <- SDL.getWindowConfig window
+            SDL.setWindowMode window $ case SDL.windowMode cfg of
+                SDL.FullscreenDesktop -> SDL.Windowed
+                _ -> SDL.FullscreenDesktop
+
         -- Re-read in case reset swapped the machine.
         machine' <- readIORef machineRef
+
+        -- Show the "DOUBLE SPEED" badge for 180 frames when double-speed activates;
+        -- reset the timer when double-speed turns off so it fires again next time.
+        doubleSpeedNow <- readIORef (Bus.busDoubleSpeed (machineBus machine'))
+        dsBadge <- readIORef (uiDoubleSpeedBadgeUntil ui)
+        if doubleSpeedNow
+            then when (dsBadge == 0) $ writeIORef (uiDoubleSpeedBadgeUntil ui) (frame + 180)
+            else when (dsBadge /= 0) $ writeIORef (uiDoubleSpeedBadgeUntil ui) 0
         paused <- readIORef (hkPaused hk)
         helpVisible <- readIORef (uiHelpVisible ui)
         fast <- readIORef (hkFastFwd hk)
@@ -316,15 +350,37 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf wi
                         pure trimmed
                     )
 
+        -- Query live window size so resize and fullscreen are handled correctly.
+        SDL.V2 wW wH <- SDL.get (SDL.windowSize window)
+        let winW = fromIntegral wW :: Int
+            winH = fromIntegral wH :: Int
+            bestScale = max 1 (min (winW `div` gbWidth) (winH `div` gbHeight))
+            dstW = gbWidth * bestScale
+            dstH = gbHeight * bestScale
+            dstX = (winW - dstW) `div` 2
+            dstY = (winH - dstH) `div` 2
+            dst =
+                SDL.Rectangle
+                    (SDL.P (SDL.V2 (fromIntegral dstX) (fromIntegral dstY)))
+                    (SDL.V2 (fromIntegral dstW) (fromIntegral dstH))
+
         fbRgb <- Ppu.framebufferRgb (Bus.busPpu (machineBus machine'))
         updateTextureRgb texture fbRgb
+        SDL.rendererDrawColor renderer $= SDL.V4 0 0 0 255
         SDL.clear renderer
-        SDL.copy renderer texture Nothing Nothing
+        SDL.copy renderer texture Nothing (Just dst)
         renderUi renderer ui titleStr machine' paused fast winW winH
         SDL.present renderer
 
         unless fast (paceFrame frameStartNs)
-        loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf winW winH
+
+        -- Record after pacing so consecutive timestamps span the full frame
+        -- (computation + sleep), giving an accurate FPS/frame-time reading.
+        frameEndNs <- getMonotonicTimeNSec
+        modifyIORef' (uiFrameTimes ui) $ \ts ->
+            let ts' = ts ++ [frameEndNs]
+             in if length ts' > 61 then drop 1 ts' else ts'
+        loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf window
 
 paceFrame :: Word64 -> IO ()
 paceFrame frameStartNs = do
@@ -337,17 +393,25 @@ paceFrame frameStartNs = do
             )
 
 panelPrimary, panelSecondary, panelOverlay, accentOrange, accentBlue :: SDL.V4 Word8
-panelPrimary = SDL.V4 0x0D 0x11 0x17 0xE8
-panelSecondary = SDL.V4 0x0E 0x14 0x19 0xEE
-panelOverlay = SDL.V4 0x0F 0x13 0x18 0xD8
+-- DMG-inspired backgrounds: near-black forest green, like the DMG screen surround.
+panelPrimary = SDL.V4 0x0B 0x16 0x0B 0xEC
+panelSecondary = SDL.V4 0x0E 0x1C 0x0E 0xF0
+panelOverlay = SDL.V4 0x0C 0x18 0x0C 0xDC
 accentOrange = SDL.V4 0xF7 0xA4 0x1D 0xFF
-accentBlue = SDL.V4 0x5B 0x8D 0xBE 0xFF
+-- Green-teal replaces generic blue; feels at home on GB hardware.
+accentBlue = SDL.V4 0x4A 0xBB 0x8C 0xFF
+
+-- Platform accent colors: DMG = exact lightest LCD shade (#9BBC0F); CGB = atomic purple.
+dmgAccent, cgbAccent :: SDL.V4 Word8
+dmgAccent = SDL.V4 0x9B 0xBC 0x0F 0xFF
+cgbAccent = SDL.V4 0xAA 0x55 0xDD 0xFF
 
 textPrimary, textSecondary, textMuted, shadowColor :: SDL.V4 Word8
-textPrimary = SDL.V4 0xE6 0xED 0xF3 0xFF
-textSecondary = SDL.V4 0x8B 0x94 0x9E 0xFF
-textMuted = SDL.V4 0xC7 0xD2 0xE0 0xFF
-shadowColor = SDL.V4 0x00 0x00 0x00 0x99
+-- Slight green tint on text so it reads as "viewed through the LCD".
+textPrimary = SDL.V4 0xD8 0xE8 0xC8 0xFF
+textSecondary = SDL.V4 0x88 0x98 0x80 0xFF
+textMuted = SDL.V4 0xC0 0xD4 0xB0 0xFF
+shadowColor = SDL.V4 0x00 0x00 0x00 0xA8
 
 successFill, failureFill, successAccent, failureAccent :: SDL.V4 Word8
 successFill = SDL.V4 0x0D 0x18 0x12 0xE8
@@ -364,9 +428,15 @@ data UiSection = UiSection
 renderUi :: SDL.Renderer -> UiState -> String -> Machine -> Bool -> Bool -> Int -> Int -> IO ()
 renderUi renderer ui title machine paused fast winW winH = do
     helpVisible <- readIORef (uiHelpVisible ui)
+    perfVisible <- readIORef (uiPerfVisible ui)
+    slot <- readIORef (uiCurrentSlot ui)
+    frameTimes <- readIORef (uiFrameTimes ui)
+    frame <- readIORef (uiFrameCounter ui)
+    dsBadgeUntil <- readIORef (uiDoubleSpeedBadgeUntil ui)
     toast <- currentToast ui
     let bus = machineBus machine
-        platformLabel = if Bus.busCgb bus then "CGB" else "DMG"
+        isCgb = Bus.busCgb bus
+        platformLabel = if isCgb then "CGB" else "DMG"
     doubleSpeed <- readIORef (Bus.busDoubleSpeed bus)
     let speedLabel = if doubleSpeed then "DOUBLE SPEED" else "NORMAL SPEED"
         clippedTitle = fitText 28 title
@@ -374,10 +444,10 @@ renderUi renderer ui title machine paused fast winW winH = do
 
     when overlayVisible $ do
         fillRect renderer (SDL.V4 0x00 0x00 0x00 0x98) 0 0 winW winH
-        renderOverlayHeader renderer winW (if helpVisible then "HELP" else "PAUSED")
+        renderOverlayHeader renderer winW isCgb (if helpVisible then "HELP" else "PAUSED")
         if helpVisible
-            then renderHelpOverlay renderer winW clippedTitle platformLabel speedLabel fast
-            else renderPauseOverlay renderer winW clippedTitle platformLabel speedLabel fast
+            then renderHelpOverlay renderer winW clippedTitle platformLabel speedLabel fast slot isCgb
+            else renderPauseOverlay renderer winW clippedTitle platformLabel speedLabel fast slot isCgb
         renderStatusBar
             renderer
             winW
@@ -389,13 +459,16 @@ renderUi renderer ui title machine paused fast winW winH = do
     when (fast && not overlayVisible) $
         renderBadge renderer (winW - 194) 20 174 34 panelSecondary accentOrange "FAST FORWARD"
 
-    when (doubleSpeed && not overlayVisible) $
+    when (frame <= dsBadgeUntil && not overlayVisible) $
         renderBadge renderer 20 20 168 34 panelSecondary accentBlue "DOUBLE SPEED"
+
+    when (perfVisible && not overlayVisible) $
+        renderPerfOverlay renderer winW frameTimes
 
     forM_ toast (renderToast renderer winW winH overlayVisible)
 
-renderPauseOverlay :: SDL.Renderer -> Int -> String -> String -> String -> Bool -> IO ()
-renderPauseOverlay renderer winW title platformLabel speedLabel fast = do
+renderPauseOverlay :: SDL.Renderer -> Int -> String -> String -> String -> Bool -> Int -> Bool -> IO ()
+renderPauseOverlay renderer winW title platformLabel speedLabel fast slot isCgb = do
     let leftSections =
             [ UiSection
                 "ACTIONS"
@@ -418,10 +491,11 @@ renderPauseOverlay renderer winW title platformLabel speedLabel fast = do
             [ UiSection
                 "SYSTEM"
                 accentBlue
-                [ "ROM    " <> fitText 18 title
+                [ "ROM    " <> fitText 12 title
                 , "MODE   " <> platformLabel
                 , "CLOCK  " <> speedLabel
                 , "SPEED  " <> (if fast then "FAST" else "NORMAL")
+                , "SLOT   " <> show slot
                 ]
             , UiSection
                 "CONTROLS"
@@ -433,18 +507,20 @@ renderPauseOverlay renderer winW title platformLabel speedLabel fast = do
                 , "TAB    FAST FORWARD"
                 ]
             ]
-    renderOverlayColumns renderer winW leftSections rightSections
+    renderOverlayColumns renderer winW isCgb leftSections rightSections
 
-renderHelpOverlay :: SDL.Renderer -> Int -> String -> String -> String -> Bool -> IO ()
-renderHelpOverlay renderer winW title platformLabel speedLabel fast = do
+renderHelpOverlay :: SDL.Renderer -> Int -> String -> String -> String -> Bool -> Int -> Bool -> IO ()
+renderHelpOverlay renderer winW title platformLabel speedLabel fast slot isCgb = do
     let leftSections =
             [ UiSection
                 "EMULATION"
                 accentOrange
                 [ "F1     CLOSE HELP"
-                , "SPACE  PAUSE OR RESUME"
+                , "SPACE  PAUSE/RESUME"
                 , ".      FRAME STEP"
                 , "TAB    FAST FORWARD"
+                , "F11    FULLSCREEN"
+                , "P      PERF OVERLAY"
                 , "ESC    QUIT"
                 ]
             , UiSection
@@ -452,6 +528,7 @@ renderHelpOverlay renderer winW title platformLabel speedLabel fast = do
                 accentBlue
                 [ "F5     SAVE STATE"
                 , "F7     LOAD STATE"
+                , "[/]    SLOT SELECT"
                 , "F12    SCREENSHOT"
                 , "R      HARD RESET"
                 ]
@@ -469,33 +546,62 @@ renderHelpOverlay renderer winW title platformLabel speedLabel fast = do
             , UiSection
                 "SYSTEM"
                 accentBlue
-                [ "ROM    " <> fitText 18 title
+                [ "ROM    " <> fitText 12 title
                 , "MODE   " <> platformLabel
                 , "CLOCK  " <> speedLabel
                 , "SPEED  " <> (if fast then "FAST" else "NORMAL")
+                , "SLOT   " <> show slot
                 ]
             ]
-    renderOverlayColumns renderer winW leftSections rightSections
+    renderOverlayColumns renderer winW isCgb leftSections rightSections
 
-renderOverlayColumns :: SDL.Renderer -> Int -> [UiSection] -> [UiSection] -> IO ()
-renderOverlayColumns renderer winW leftSections rightSections = do
+showFixed1 :: Double -> String
+showFixed1 x =
+    let i = floor x :: Int
+        d = floor (x * 10) `mod` 10 :: Int
+     in show i <> "." <> show d
+
+renderPerfOverlay :: SDL.Renderer -> Int -> [Word64] -> IO ()
+renderPerfOverlay renderer winW frameTimes = do
+    let fps = case frameTimes of
+            (_ : _ : _) ->
+                let spanNs = fromIntegral (last frameTimes - head frameTimes) :: Double
+                    n = fromIntegral (length frameTimes - 1) :: Double
+                 in n / (spanNs / 1e9)
+            _ -> 0
+        fpsStr = "FPS  " <> showFixed1 fps
+        w = textWidth 2 fpsStr + 28
+        h = 34
+        x = winW - w - 20
+        y = 64
+    drawPanel renderer panelSecondary accentBlue x y w h
+    drawTextShadowed renderer 2 textPrimary (x + 14) (y + 9) fpsStr
+
+sectionH :: UiSection -> Int
+sectionH s = length (sectionRows s) * 20 + 46
+
+renderOverlayColumns :: SDL.Renderer -> Int -> Bool -> [UiSection] -> [UiSection] -> IO ()
+renderOverlayColumns renderer winW isCgb leftSections rightSections = do
     let panelY = 92
         panelW = 262
-        panelH = 388
+        contentH = max (sum (map sectionH leftSections)) (sum (map sectionH rightSections))
+        panelH = contentH + 32
         leftX = 38
         rightX = winW - leftX - panelW
-    drawPanel renderer panelPrimary accentOrange leftX panelY panelW panelH
+        modeAccent = if isCgb then cgbAccent else dmgAccent
+    drawPanel renderer panelPrimary modeAccent leftX panelY panelW panelH
     drawPanel renderer panelPrimary accentBlue rightX panelY panelW panelH
     renderSections renderer (leftX + 14) (panelY + 16) (panelW - 28) leftSections
     renderSections renderer (rightX + 14) (panelY + 16) (panelW - 28) rightSections
 
-renderOverlayHeader :: SDL.Renderer -> Int -> String -> IO ()
-renderOverlayHeader renderer winW label = do
+renderOverlayHeader :: SDL.Renderer -> Int -> Bool -> String -> IO ()
+renderOverlayHeader renderer winW isCgb label = do
     let w = 224
         h = 46
         x = (winW - w) `div` 2
         y = 24
-    drawPanel renderer panelOverlay accentOrange x y w h
+        accent = if isCgb then cgbAccent else dmgAccent
+    drawPanel renderer panelOverlay accent x y w h
     drawCenteredText renderer 3 textPrimary (winW `div` 2) (y + 12) label
 
 renderStatusBar :: SDL.Renderer -> Int -> Int -> String -> String -> String -> IO ()
@@ -665,6 +771,8 @@ glyphRows raw = case toUpper raw of
     '?' -> [0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04]
     '-' -> [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00]
     '/' -> [0x01, 0x02, 0x04, 0x08, 0x10, 0x00, 0x00]
+    '[' -> [0x1C, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1C]
+    ']' -> [0x07, 0x01, 0x01, 0x01, 0x01, 0x01, 0x07]
     '\'' -> [0x04, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00]
     '&' -> [0x0C, 0x12, 0x14, 0x08, 0x15, 0x12, 0x0D]
     '(' -> [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02]
@@ -681,23 +789,24 @@ handlePending ::
     IO ()
 handlePending romPath hk ui machineRef cart bootRom = do
     machine <- readIORef machineRef
+    slot <- readIORef (uiCurrentSlot ui)
     saveReq <- readIORef (hkSaveReq hk)
     when saveReq $ do
         writeIORef (hkSaveReq hk) False
         blob <- Snap.save machine
-        let path = romPath <> ".state"
+        let path = slotPath romPath slot
         r <- try (BS.writeFile path blob) :: IO (Either IOException ())
         case r of
             Right () -> do
                 putStrLn ("state:    saved " <> path <> " (" <> show (BS.length blob) <> " B)")
-                pushToast ui ToastSuccess "State saved"
+                pushToast ui ToastSuccess ("Saved slot " <> show slot)
             Left e -> do
                 putStrLn ("state:    save failed: " <> show e)
                 pushToast ui ToastFailure "Save failed"
     loadReq <- readIORef (hkLoadReq hk)
     when loadReq $ do
         writeIORef (hkLoadReq hk) False
-        let path = romPath <> ".state"
+        let path = slotPath romPath slot
         r <- try (BS.readFile path) :: IO (Either IOException BS.ByteString)
         case r of
             Right blob -> do
@@ -705,13 +814,13 @@ handlePending romPath hk ui machineRef cart bootRom = do
                 case res of
                     Right () -> do
                         putStrLn ("state:    loaded " <> path)
-                        pushToast ui ToastSuccess "State loaded"
+                        pushToast ui ToastSuccess ("Loaded slot " <> show slot)
                     Left err -> do
                         putStrLn ("state:    load failed: " <> show err)
                         pushToast ui ToastFailure "Load failed"
             Left _ -> do
                 putStrLn ("state:    no " <> path <> " to load")
-                pushToast ui ToastFailure "No state file"
+                pushToast ui ToastFailure ("Slot " <> show slot <> " empty")
     shotReq <- readIORef (hkShotReq hk)
     when shotReq $ do
         writeIORef (hkShotReq hk) False
@@ -803,6 +912,23 @@ handleEvent hk ui jp ev = case SDL.eventPayload ev of
                     unless helpVisible (writeIORef (hkFrameStepReq hk) True)
             SDL.ScancodeR ->
                 when (pressed && not isRepeat) (writeIORef (hkResetReq hk) True)
+            SDL.ScancodeF11 ->
+                when (pressed && not isRepeat) (writeIORef (hkFullscreenReq hk) True)
+            SDL.ScancodeP ->
+                when (pressed && not isRepeat) $
+                    modifyIORef' (uiPerfVisible ui) not
+            SDL.ScancodeLeftBracket ->
+                when (pressed && not isRepeat) $ do
+                    s <- readIORef (uiCurrentSlot ui)
+                    let s' = max 0 (s - 1)
+                    writeIORef (uiCurrentSlot ui) s'
+                    pushToast ui ToastInfo ("Slot " <> show s')
+            SDL.ScancodeRightBracket ->
+                when (pressed && not isRepeat) $ do
+                    s <- readIORef (uiCurrentSlot ui)
+                    let s' = min 9 (s + 1)
+                    writeIORef (uiCurrentSlot ui) s'
+                    pushToast ui ToastInfo ("Slot " <> show s')
             _ -> case mapKey scancode of
                 Just btn -> Joypad.setButton btn pressed jp
                 Nothing -> pure ()

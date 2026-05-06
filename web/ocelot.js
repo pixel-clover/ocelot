@@ -19,6 +19,7 @@ let audioFrameCounter = 0;
 
 // Video scale (0 = auto, 1–4 = explicit integer multiple)
 let integerScale = 0;
+let scanlinesEnabled = false;
 
 // Storage
 let db = null;
@@ -126,13 +127,15 @@ async function init() {
     });
     document.getElementById("btn-fullscreen").addEventListener("click", toggleFullscreen);
     document.getElementById("theme-toggle").addEventListener("click", toggleTheme);
-    document.querySelectorAll(".scale-btn").forEach(btn => {
+    document.querySelectorAll(".scale-btn[data-scale]").forEach(btn => {
         btn.addEventListener("click", () => {
             applyIntegerScale(+btn.dataset.scale);
             saveSettings();
         });
     });
     window.addEventListener("resize", () => applyIntegerScale(integerScale));
+    document.addEventListener("fullscreenchange", () => applyIntegerScale(integerScale));
+    document.addEventListener("webkitfullscreenchange", () => applyIntegerScale(integerScale));
     document.getElementById("settings-toggle").addEventListener("click", toggleSettings);
     document.getElementById("perf-toggle").addEventListener("click", togglePerf);
     document.getElementById("btn-pause").addEventListener("click", togglePause);
@@ -141,6 +144,10 @@ async function init() {
     document.getElementById("about-btn").addEventListener("click", toggleAbout);
     document.getElementById("about-close").addEventListener("click", toggleAbout);
     document.getElementById("remap-reset").addEventListener("click", resetKeyMap);
+    document.getElementById("scanlines-toggle").addEventListener("click", () => {
+        applyScanlines(!scanlinesEnabled);
+        saveSettings();
+    });
     document.getElementById("error-dismiss").addEventListener("click", hideError);
 
     // Close overlays by clicking the backdrop
@@ -291,6 +298,7 @@ function loadSettings() {
         if (saved.theme) applyTheme(saved.theme);
         if (saved.integerScale !== undefined) applyIntegerScale(saved.integerScale);
         else applyIntegerScale(0);
+        if (saved.scanlines !== undefined) applyScanlines(saved.scanlines);
     } catch (_) { applyIntegerScale(0); }
     document.getElementById("audio-toggle").textContent = audioEnabled ? "ON" : "OFF";
 }
@@ -304,6 +312,7 @@ function saveSettings() {
             keyMap,
             theme: document.documentElement.getAttribute("data-theme") || "light",
             integerScale,
+            scanlines: scanlinesEnabled,
         }));
     } catch (_) {}
 }
@@ -692,6 +701,7 @@ async function destroyCurrentSession() {
     emu = 0;
     currentRomName = "";
     currentRomTitle = "";
+    syncLedState();
 }
 
 // ─── ROM loading ──────────────────────────────────────────────────────────────
@@ -769,6 +779,8 @@ async function loadRom(file) {
         fpsFrames = 0;
         fpsWindowStart = lastFrameTime;
         running = true;
+        document.getElementById("btn-pause").textContent = "Pause";
+        syncLedState();
         startBatterySaveTimer();
         rafId = requestAnimationFrame(frameLoop);
     } catch (err) {
@@ -793,6 +805,7 @@ function togglePause() {
         if (audioCtx) audioCtx.suspend();
         setStatus("Paused");
     }
+    syncLedState();
 }
 
 function frameLoop(now) {
@@ -1012,26 +1025,89 @@ function updatePerf() {
         gpDescriptions.length ? gpDescriptions.join("; ") : "none";
 }
 
-// ─── Integer scaling ──────────────────────────────────────────────────────────
+// ─── GB hardware state ────────────────────────────────────────────────────────
 
-function computeBestScale() {
-    const container = document.getElementById("screen-container");
-    const availW = container.parentElement.clientWidth;
-    const availH = window.innerHeight
-        - (document.querySelector(".action-bar")?.offsetHeight || 0)
-        - (document.querySelector(".status-bar")?.offsetHeight || 0)
-        - 32; // padding / borders
-    return Math.max(1, Math.floor(Math.min(availW / 160, availH / 144)));
+// Reflects emulator state on the power LED inside the screen bezel.
+function syncLedState() {
+    const c = document.getElementById("screen-container");
+    if (!c) return;
+    c.classList.remove("emu-playing", "emu-paused");
+    if (!emu) return;
+    c.classList.add(running ? "emu-playing" : "emu-paused");
 }
 
+function applyScanlines(enabled) {
+    scanlinesEnabled = enabled;
+    const c = document.getElementById("screen-container");
+    if (c) c.classList.toggle("scanlines", enabled);
+    const btn = document.getElementById("scanlines-toggle");
+    if (btn) {
+        btn.textContent = enabled ? "On" : "Off";
+        btn.classList.toggle("active", enabled);
+    }
+}
+
+// ─── Integer scaling / fit / stretch ─────────────────────────────────────────
+
+// Returns windowed available dimensions (excludes action bar, status bar, padding).
+function windowAvailW() {
+    const container = document.getElementById("screen-container");
+    return container ? container.parentElement.clientWidth : window.innerWidth;
+}
+
+function windowAvailH() {
+    return Math.max(144, window.innerHeight
+        - (document.querySelector(".action-bar")?.offsetHeight || 0)
+        - (document.querySelector(".status-bar")?.offsetHeight || 0)
+        - 32);
+}
+
+function computeBestScale() {
+    return Math.max(1, Math.floor(Math.min(windowAvailW() / 160, windowAvailH() / 144)));
+}
+
+// n: 0=auto integer, 1–4=fixed integer, -1=fit (AR preserved), -2=stretch (AR ignored).
 function applyIntegerScale(n) {
     integerScale = n;
-    const s = n > 0 ? n : computeBestScale();
-    if (canvas) {
-        canvas.style.width  = (160 * s) + "px";
-        canvas.style.height = (144 * s) + "px";
+    const isFs = !!document.fullscreenElement;
+    const availW = isFs ? window.innerWidth  : windowAvailW();
+    const availH = isFs ? window.innerHeight : windowAvailH();
+
+    let w, h;
+    if (n === -1) {
+        const s = Math.min(availW / 160, availH / 144);
+        w = Math.floor(160 * s);
+        h = Math.floor(144 * s);
+    } else if (n === -2) {
+        w = Math.floor(availW);
+        h = Math.floor(availH);
+    } else {
+        const s = n > 0 ? n : computeBestScale();
+        w = 160 * s;
+        h = 144 * s;
     }
-    document.querySelectorAll(".scale-btn").forEach(btn => {
+
+    if (canvas) {
+        canvas.style.width  = w + "px";
+        canvas.style.height = h + "px";
+    }
+
+    // In fullscreen the canvas is flex-centered inside a 100vw×100vh container,
+    // so the scanlines overlay must be shifted to match the canvas position.
+    const overlay = document.getElementById("scanlines-overlay");
+    if (overlay) {
+        overlay.style.width  = w + "px";
+        overlay.style.height = h + "px";
+        if (isFs) {
+            overlay.style.left = Math.floor((window.innerWidth  - w) / 2) + "px";
+            overlay.style.top  = Math.floor((window.innerHeight - h) / 2) + "px";
+        } else {
+            overlay.style.left = "0";
+            overlay.style.top  = "0";
+        }
+    }
+
+    document.querySelectorAll(".scale-btn[data-scale]").forEach(btn => {
         btn.classList.toggle("active", +btn.dataset.scale === n);
     });
 }

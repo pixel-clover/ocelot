@@ -39,47 +39,49 @@
         }
 
         :root[data-theme="dark"] {
-            --bg: #08080e;
-            --bg-panel: #101018;
-            --bg-input: #0c0c14;
-            --bg-btn-hover: #1c1c2c;
-            --border: #28283c;
-            --border-accent: #0060a8;
-            --text: #d0d4e0;
-            --text-muted: #6a6e88;
-            --text-accent: #c8a830;
-            --text-link: #4488cc;
-            --text-heading: #0080d0;
-            --toast-bg: #101018;
-            --toast-border: #c8a830;
-            --toast-text: #c8a830;
+            /* DMG-inspired: phosphor green on near-black forest panels */
+            --bg: #080e08;
+            --bg-panel: #0d1a0d;
+            --bg-input: #0a140a;
+            --bg-btn-hover: #162516;
+            --border: #1e361e;
+            --border-accent: #4a8c1e;
+            --text: #c8d8b0;
+            --text-muted: #628060;
+            --text-accent: #9bbc0f;   /* authentic DMG LCD lightest shade */
+            --text-link: #9bbc0f;
+            --text-heading: #739b14;
+            --toast-bg: #0d1a0d;
+            --toast-border: #9bbc0f;
+            --toast-text: #9bbc0f;
             --screen-bg: #000;
-            --group-bg: #0e0e18;
+            --group-bg: #0b170b;
             --error-bg: rgba(200, 40, 40, 0.14);
             --error-border: #cc3030;
-            --overlay-bg: rgba(4, 4, 8, 0.85);
+            --overlay-bg: rgba(4, 8, 4, 0.88);
         }
 
         :root[data-theme="light"] {
-            --bg: #f0ede6;
-            --bg-panel: #faf8f4;
-            --bg-input: #ebe8e0;
-            --bg-btn-hover: #e0ddd4;
-            --border: #c0bca8;
-            --border-accent: #004c90;
-            --text: #18181e;
-            --text-muted: #58585e;
-            --text-accent: #9a7810;
-            --text-link: #004c90;
-            --text-heading: #003870;
-            --toast-bg: #faf8f4;
-            --toast-border: #9a7810;
-            --toast-text: #9a7810;
-            --screen-bg: #080810;
-            --group-bg: #e8e4da;
+            /* DMG body plastic: warm gray-green, like the original hardware shell */
+            --bg: #e8e8d8;
+            --bg-panel: #f4f4e8;
+            --bg-input: #dcdccc;
+            --bg-btn-hover: #d4d4c4;
+            --border: #b0b0a0;
+            --border-accent: #4e7a10;
+            --text: #181e18;
+            --text-muted: #506050;
+            --text-accent: #4e7a10;   /* darker GB green for light bg */
+            --text-link: #4e7a10;
+            --text-heading: #3c5c0c;
+            --toast-bg: #f4f4e8;
+            --toast-border: #4e7a10;
+            --toast-text: #4e7a10;
+            --screen-bg: #080e08;
+            --group-bg: #e0e0d0;
             --error-bg: rgba(200, 40, 40, 0.08);
             --error-border: #cc3030;
-            --overlay-bg: rgba(8, 8, 14, 0.5);
+            --overlay-bg: rgba(8, 14, 8, 0.55);
         }
 
         body {
@@ -216,13 +218,14 @@
         #screen-container {
             position: relative;
             background: var(--screen-bg);
-            border: 3px solid #1a1a24;
+            border: 3px solid #0e1e0e;
             border-radius: 3px;
             overflow: hidden;
             box-shadow: 0 0 0 1px var(--border-accent), var(--shadow-md), inset 0 0 20px rgba(0, 0, 0, 0.4);
             display: inline-block;
             max-width: 100%;
             margin-bottom: 6px;
+            padding-bottom: 16px;
         }
 
         #screen {
@@ -430,11 +433,11 @@
             transition: background var(--transition-normal);
         }
 
-        .btn-group.tone-audio  { --group-accent: #0070b8; }
-        .btn-group.tone-save   { --group-accent: #b89820; }
-        .btn-group.tone-view   { --group-accent: #0070b8; }
-        .btn-group.tone-system { --group-accent: #606880; }
-        .btn-group.tone-info   { --group-accent: #606880; opacity: 0.92; }
+        .btn-group.tone-audio  { --group-accent: #4a8c1e; }   /* GB green */
+        .btn-group.tone-save   { --group-accent: #b89820; }   /* amber — save actions */
+        .btn-group.tone-view   { --group-accent: #4a8c1e; }   /* GB green */
+        .btn-group.tone-system { --group-accent: #7a6090; }   /* GBC purple-muted */
+        .btn-group.tone-info   { --group-accent: #7a6090; opacity: 0.92; }
 
         .btn-group-label {
             color: color-mix(in srgb, var(--group-accent) 88%, var(--text-muted));
@@ -660,6 +663,97 @@
             white-space: nowrap;
         }
 
+        /* GB hardware aesthetic elements */
+        #gb-bezel {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 16px;
+            background: #0a0a14;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 9px;
+            border-top: 1px solid rgba(255, 255, 255, 0.04);
+        }
+
+        #power-led {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: #1e1e2a;
+            box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+            transition: background 0.35s ease, box-shadow 0.35s ease;
+            flex-shrink: 0;
+        }
+
+        #screen-container.emu-playing #power-led {
+            background: #3ddc84;
+            box-shadow: 0 0 6px 1px rgba(61, 220, 132, 0.55), 0 0 0 1px rgba(0, 0, 0, 0.4);
+        }
+
+        #screen-container.emu-paused #power-led {
+            background: #f7a41d;
+            box-shadow: 0 0 6px 1px rgba(247, 164, 29, 0.5), 0 0 0 1px rgba(0, 0, 0, 0.4);
+            animation: led-blink 1.2s ease-in-out infinite;
+        }
+
+        @keyframes led-blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        #speaker-dots {
+            width: 32px;
+            height: 7px;
+            background-image: radial-gradient(circle, rgba(160, 170, 205, 0.28) 1.2px, transparent 1.2px);
+            background-size: 5px 7px;
+            background-position: 0 0;
+        }
+
+        #scanlines-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+            display: none;
+            z-index: 1;
+            background-image: repeating-linear-gradient(
+                to bottom,
+                transparent 0px, transparent 1px,
+                rgba(0, 0, 0, 0.07) 1px, rgba(0, 0, 0, 0.07) 2px
+            );
+        }
+
+        #screen-container.scanlines #scanlines-overlay {
+            display: block;
+        }
+
+        .scale-btn {
+            background: var(--bg-input);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            padding: 4px 10px;
+            font-family: inherit;
+            font-size: 0.68rem;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all var(--transition-fast);
+        }
+
+        .scale-btn:hover {
+            background: var(--bg-btn-hover);
+            border-color: var(--text-accent);
+        }
+
+        .scale-btn.active {
+            background: color-mix(in srgb, var(--text-accent) 14%, var(--bg-input));
+            border-color: var(--text-accent);
+            color: var(--text-accent);
+        }
+
         /* Animations */
         @keyframes modalPop {
             from { opacity: 0; transform: scale(0.95); }
@@ -674,6 +768,28 @@
         @keyframes pulse {
             from { opacity: 0.8; }
             to   { opacity: 1; }
+        }
+
+        /* Fullscreen: flex-center the canvas, strip window chrome */
+        #screen-container:fullscreen,
+        #screen-container:-webkit-full-screen {
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            width: 100vw !important;
+            height: 100vh !important;
+            padding: 0 !important;
+            border: none !important;
+            box-shadow: none !important;
+            border-radius: 0 !important;
+            background: #000 !important;
+            margin: 0 !important;
+            max-width: 100vw !important;
+        }
+
+        #screen-container:fullscreen #gb-bezel,
+        #screen-container:-webkit-full-screen #gb-bezel {
+            display: none;
         }
 
         /* Responsive */
@@ -717,6 +833,11 @@
 
 <div id="screen-container">
     <canvas height="144" id="screen" width="160"></canvas>
+    <div id="scanlines-overlay"></div>
+    <div id="gb-bezel">
+        <div id="power-led" title="Power indicator"></div>
+        <div id="speaker-dots" title="Speaker"></div>
+    </div>
 </div>
 
 <div class="action-bar">
@@ -777,6 +898,14 @@
                 <button class="scale-btn" data-scale="2" title="2× (320×288)" type="button">2×</button>
                 <button class="scale-btn" data-scale="3" title="3× (480×432)" type="button">3×</button>
                 <button class="scale-btn" data-scale="4" title="4× (640×576)" type="button">4×</button>
+                <button class="scale-btn" data-scale="-1" title="Fit: fill available space while preserving the 160×144 aspect ratio" type="button">Fit</button>
+                <button class="scale-btn" data-scale="-2" title="Stretch: fill available space completely, ignoring aspect ratio" type="button">Stretch</button>
+            </div>
+        </div>
+        <div class="settings-row">
+            <span class="settings-label">Scanlines</span>
+            <div class="settings-control">
+                <button class="scale-btn" id="scanlines-toggle" title="Toggle scanline overlay" type="button">Off</button>
             </div>
         </div>
     </div>

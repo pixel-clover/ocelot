@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: call_tests
     if: success()
+    timeout-minutes: 10
     permissions:
       contents: write
     outputs:
@@ -54,6 +55,7 @@ jobs:
     name: Build (${{ matrix.artifact_name }})
     needs: create-release
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     permissions:
       contents: write
     strategy:
@@ -113,7 +115,10 @@ jobs:
       - name: Install SDL2 (Windows)
         if: runner.os == 'Windows'
         shell: bash
-        run: stack exec -- pacman -Sy --noconfirm mingw-w64-x86_64-SDL2
+        run: |
+          stack exec -- pacman -Sy --noconfirm mingw-w64-x86_64-SDL2 mingw-w64-x86_64-pkg-config
+          # Expose pkg-config.exe to subsequent steps (Cabal configure looks for it in PATH)
+          stack exec -- sh -c 'cygpath -w /mingw64/bin' >> "$GITHUB_PATH"
 
       - name: Build release binary
         run: stack build ocelot:exe:ocelot --ghc-options="-O2" --flag ocelot:desktop
@@ -153,6 +158,7 @@ jobs:
     needs: call_tests
     if: success()
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
