@@ -21,7 +21,6 @@ accumulated stereo samples in @S16@ format.
 
 What is /not/ modeled:
 
-* The DAC's high-pass filter (output is direct).
 * Length-counter \"obscure\" behavior on writes during specific frame
   sequencer steps.
 * NR12 \"zombie mode\" envelope tweaks.

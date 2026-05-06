@@ -54,6 +54,7 @@ Do not invent modules that do not yet exist when answering questions, but do pla
 
 - `app/Main.hs`: executable entry point. Argument parsing, ROM loading from disk, headless terminal mode, and the SDL frontend dispatch live here.
 - `app/Frontend/Sdl.hs`: SDL2-backed frontend with video, audio, and hotkeys (pause, fast-forward, save state, load state, screenshot).
+- `app-web/Main.hs`: WASM executable entry point. Exposes the emulator to JavaScript via exported WASM functions; compiled with the GHC WASM toolchain (`wasm32-wasi-cabal`, `-f -desktop -f wasm-reactor`).
 - `src/`: library code. Public API root is `Ocelot` (re-exports the curated public surface).
     - `src/Ocelot.hs`: public facade. Re-exports the deliberate public types (`Cartridge`, header records, save helpers). Do not re-export raw
       subsystem state records.

@@ -92,7 +92,8 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Frame sequencer at 512 Hz driving length, envelope, sweep events
 - [x] Mixer (NR50, NR51) with per-side panning and master volume
 - [x] Power register (NR52) with channel-enabled mirrors and write gating when off
-- [x] DAC enable behavior (high-pass capacitor model deferred)
+- [x] DAC enable behavior
+- [x] High-pass filter on the DAC output (RC capacitor model: leaky integrator removes DC offset, ~6 Hz cutoff at 48 kHz)
 - [x] Sample resampler from 4 MHz tick rate to 48 kHz host audio rate
 - [x] Bulk-step APU at event boundaries (per-T-cycle iteration replaced with chunked stepper)
 - [ ] CGB stereo wave RAM read-during-play behavior
@@ -106,6 +107,7 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Keyboard input mapping in the SDL frontend (Z/X/Enter/Right-Shift + arrows + Escape)
 - [x] Gamepad input mapping in the frontend
 - [x] Frontend window with LCD framebuffer rendering (SDL2 RGB upload; terminal --headless mode also kept)
+- [x] Integer scaling for SDL frontend (`--scale N`, 1–5; default 4) and web frontend (Auto/1×/2×/3×/4× in settings panel)
 - [x] Audio output via SDL audio device with callback-drained shared buffer
 - [x] In-memory snapshot save and load (`Ocelot.Snapshot.save`/`load`) with versioned binary format
 - [x] Persistent save states: F5 writes `<rom>.state`, F7 reloads it
@@ -190,8 +192,7 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [ ] Gameboy Camera cartridge support
 - [ ] Rewind functionality (per-frame state ring buffer)
 - [ ] Configurable color correction (CGB LCD color profile, no-correction)
-- [ ] Integer scaling and pixel-perfect aspect ratio
-- [ ] WebAssembly build with Canvas rendering and Web Audio playback
+- [x] WebAssembly build with Canvas rendering and Web Audio playback (GHC WASM cross-compilation; served via nginx with gzip_static)
 - [ ] Libretro core packaging
 - [ ] Cheat code support (Game Genie, GameShark)
 - [ ] Lua or Haskell-script hookable trace API for tool-assisted runs

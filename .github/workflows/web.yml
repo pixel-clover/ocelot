@@ -1,4 +1,4 @@
-name: Publish Ocelot Web to GitHub Pages
+name: Publish Ocelot Web
 
 on:
   workflow_dispatch:
