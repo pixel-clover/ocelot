@@ -22,7 +22,7 @@ A Nintendo Gameboy and Gameboy Color emulator in Haskell λ
 ---
 
 **Download the latest desktop version of Ocelot from [here](https://github.com/pixel-clover/ocelot/releases)
-or [try Ccelot in your web browser](https://pixel-clover.github.io/ocelot/).**
+or [try Ocelot in your web browser](https://pixel-clover.github.io/ocelot/).**
 
 Footage of Ocelot running a few games:
 
@@ -30,19 +30,16 @@ Footage of Ocelot running a few games:
 
 <table>
   <tr>
-    <td align="center"><img alt="TLZ demo" src="docs/assets/gif/01_gb_lz.gif" width="200%"><br>The Legend of Zelda: Link's Awakening</td>
-    <td align="center"><img alt="TLZ DX demo" src="docs/assets/gif/02_gbc_lzdx.gif" width="200%"><br>The Legend of Zelda: Link's Awakening DX</td>
+    <td align="center" width="33%"><img alt="TLZ demo" src="docs/assets/gif/01_gb_lz.gif" width="100%"><br>The Legend of Zelda: Link's Awakening</td>
+    <td align="center" width="33%"><img alt="AI demo" src="docs/assets/gif/03_gb_ai.gif" width="100%"><br>Adventure Island</td>
+    <td align="center" width="34%"><img alt="FFA demo" src="docs/assets/gif/04_gb_ffa.gif" width="100%"><br>Final Fantasy Adventure</td>
   </tr>
   <tr>
-    <td align="center"><img alt="AI demo" src="docs/assets/gif/03_gb_ai.gif" width="200%"><br>Adventure Island</td>
-    <td align="center"><img alt="WL3 demo" src="docs/assets/gif/05_gbc_wl3.gif" width="200%"><br>Wario Land 3</td>
-  </tr>
-  <tr>
-    <td align="center"><img alt="FFA demo" src="docs/assets/gif/04_gb_ffa.gif" width="200%"><br>Final Fantasy Adventure</td>
-    <td align="center"><img alt="SMBDl demo" src="docs/assets/gif/06_gbc_smbd.gif" width="200%"><br>Super Mario Bros. Deluxe</td>
+    <td align="center" width="33%"><img alt="TLZ DX demo" src="docs/assets/gif/02_gbc_lzdx.gif" width="100%"><br>The Legend of Zelda: Link's Awakening DX</td>
+    <td align="center" width="33%"><img alt="WL3 demo" src="docs/assets/gif/05_gbc_wl3.gif" width="100%"><br>Wario Land 3</td>
+    <td align="center" width="34%"><img alt="SMBDl demo" src="docs/assets/gif/06_gbc_smbd.gif" width="100%"><br>Super Mario Bros. Deluxe</td>
   </tr>
 </table>
-
 </div>
 
 ### Key Features
@@ -162,7 +159,7 @@ Ocelot is licensed under the MIT License (see [LICENSE](LICENSE)).
 ### Acknowledgements
 
 * The logo is made of [image 1](https://www.svgrepo.com/svg/28849/old-gameboy-console) and [image 2](https://www.svgrepo.com/svg/373660/haskell).
-* This project uses the following resources (like test ROMs for verifying correctness of the implementation, etc.):
+* This project uses the following resources:
     * [gb-test-roms](https://github.com/retrio/gb-test-roms)
     * [mooneye-test-suite](https://github.com/Gekkio/mooneye-test-suite)
     * [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) and [cgb-acid2](https://github.com/mattcurrie/cgb-acid2)
