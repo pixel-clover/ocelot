@@ -45,8 +45,8 @@ release: ## Build optimized release binary
 
 clean: ## Remove build artifacts, cache directories, etc.
 	@echo "Removing build artifacts, cache, generated docs, etc."
-	rm -rf $(BUILD_DIR) $(DOC_OUT)
-	$(STACK) clean
+	rm -rf $(BUILD_DIR) $(DOC_OUT) bin/ dist/
+	$(STACK) clean --full
 
 lint: ## Run linter checks on Haskell source files
 	@echo "Running HLint..."

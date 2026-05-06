@@ -21,7 +21,26 @@ A Nintendo Gameboy and Gameboy Color emulator in Haskell λ
 
 ---
 
-Ocelot is a Gameboy (DMG) and Gameboy Color (CGB) emulator written in Haskell.
+**Download the latest desktop version of Ocelot from [here](https://github.com/pixel-clover/ocelot/releases)
+or [try Ocelot in your web browser](https://pixel-clover.github.io/ocelot/).**
+
+Footage of Ocelot running a few games:
+
+<div align="center">
+
+<table>
+  <tr>
+    <td align="center" width="33%"><img alt="TLZ demo" src="docs/assets/gif/01_gb_lz.gif" width="100%"><br>The Legend of Zelda: Link's Awakening</td>
+    <td align="center" width="33%"><img alt="AI demo" src="docs/assets/gif/03_gb_ai.gif" width="100%"><br>Adventure Island</td>
+    <td align="center" width="34%"><img alt="FFA demo" src="docs/assets/gif/04_gb_ffa.gif" width="100%"><br>Final Fantasy Adventure</td>
+  </tr>
+  <tr>
+    <td align="center" width="33%"><img alt="TLZ DX demo" src="docs/assets/gif/02_gbc_lzdx.gif" width="100%"><br>The Legend of Zelda: Link's Awakening DX</td>
+    <td align="center" width="33%"><img alt="WL3 demo" src="docs/assets/gif/05_gbc_wl3.gif" width="100%"><br>Wario Land 3</td>
+    <td align="center" width="34%"><img alt="SMBDl demo" src="docs/assets/gif/06_gbc_smbd.gif" width="100%"><br>Super Mario Bros. Deluxe</td>
+  </tr>
+</table>
+</div>
 
 ### Key Features
 
@@ -91,12 +110,18 @@ Run the `ocelot` binary to start the emulator GUI:
 ocelot
 ```
 
+Help menu while the emulator is running:
+
+<div align="center">
+<img alt="Ocelot Screenshot" src="docs/assets/img/help_menu_0.1.0.0.png" width="70%">
+</div>
+
 Run `ocelot --help` to see the list of available command-line options.
 
 Example output:
 
 ```
-Ocelot 0.1.0.0 (main@c636b) - Gameboy (DMG) and Gameboy Color (CGB) emulator in Haskell
+Ocelot 0.1.0.0 (develop@7bb29) - Gameboy (DMG) and Gameboy Color (CGB) emulator in Haskell
 
 Usage: ocelot [-V|--version] COMMAND
 
@@ -118,7 +143,7 @@ Available commands:
 
 SDL key bindings (play): Z=A, X=B, Enter=Start, RShift=Select, Arrows=D-pad,
 Space=pause, F1=help overlay, .=frame step, Tab=fast-fwd (held), R=reset,
-F5=save state, F7=load state, F12=screenshot, Escape=quit.
+F5=save state, F6=cycle slot (1-5), F7=load state, F12=screenshot, Escape=quit.
 ```
 
 ---
@@ -134,12 +159,12 @@ Ocelot is licensed under the MIT License (see [LICENSE](LICENSE)).
 ### Acknowledgements
 
 * The logo is made of [image 1](https://www.svgrepo.com/svg/28849/old-gameboy-console) and [image 2](https://www.svgrepo.com/svg/373660/haskell).
-* This project uses the following resources (like test ROMs for verifying correctness of the implementation, etc.):
+* This project uses the following resources (for different things like testing, frontend, etc.):
     * [gb-test-roms](https://github.com/retrio/gb-test-roms)
     * [mooneye-test-suite](https://github.com/Gekkio/mooneye-test-suite)
     * [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) and [cgb-acid2](https://github.com/mattcurrie/cgb-acid2)
     * [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono)
-    * [SDL](https://github.com/castholm/SDL)
+    * [SDL](https://github.com/libsdl-org/SDL)
 
 #### Reference Implementations
 

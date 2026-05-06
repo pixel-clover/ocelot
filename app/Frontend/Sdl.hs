@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -29,11 +30,11 @@ import Codec.Picture (Image, PaletteCreationMethod (..), PaletteOptions (..), Pi
 import Codec.Picture.Gif (GifDelay, GifLooping (..), writeGifImages)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar)
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, SomeException, try)
 import Control.Monad (forM_, unless, when)
 import Data.Bits (testBit)
 import qualified Data.ByteString as BS
-import Data.Char (toUpper)
+import Data.Char (isSpace, toUpper)
 import Data.Foldable (toList)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int16)
@@ -60,8 +61,16 @@ import qualified Ocelot.Snapshot as Snap
 import SDL (($=))
 import qualified SDL
 import qualified SDL.Input.GameController as SDLGC
-import System.Directory (createDirectoryIfMissing)
+import System.Directory (createDirectoryIfMissing, findExecutable)
+import System.Exit (ExitCode (..))
 import System.FilePath (takeBaseName, takeDirectory, (</>))
+#ifdef mingw32_HOST_OS
+import System.Process (readProcess)
+#elif defined(darwin_HOST_OS)
+import System.Process (readProcess)
+#else
+import System.Process (readProcessWithExitCode)
+#endif
 
 gbWidth, gbHeight :: Int
 gbWidth = 160
@@ -148,7 +157,7 @@ newUiState =
         <*> newIORef False
         <*> newIORef 0
         <*> newIORef []
-        <*> newIORef 0
+        <*> newIORef 1
         <*> newIORef []
         <*> newIORef 0
         <*> newIORef Nothing
@@ -512,7 +521,9 @@ renderPauseOverlay renderer winW title platformLabel speedLabel fast slot isCgb 
                 , "F1     OPEN HELP"
                 , "F5     SAVE STATE"
                 , "F7     LOAD STATE"
+                , "F6     SLOT SELECT"
                 , "F12    SCREENSHOT"
+                , "SF12   RECORD GIF"
                 ]
             , UiSection
                 "SESSION"
@@ -1013,7 +1024,7 @@ handleEvent hk ui jp ev = case SDL.eventPayload ev of
             SDL.ScancodeF6 ->
                 when (pressed && not isRepeat) $ do
                     s <- readIORef (uiCurrentSlot ui)
-                    let s' = (s + 1) `mod` 10
+                    let s' = s `mod` 5 + 1
                     writeIORef (uiCurrentSlot ui) s'
                     pushToast ui ToastInfo ("Slot " <> show s')
             SDL.ScancodeO ->
@@ -1061,6 +1072,62 @@ updateTextureRgb tex fb = do
     let bs = BS.pack (V.toList fb)
     _ <- SDL.updateTexture tex Nothing bs (fromIntegral (gbWidth * 3))
     pure ()
+
+{- | Open a native OS file picker for ROM files.  Returns 'Nothing' if no
+suitable tool is available or the user cancels.
+-}
+showOpenFileDialog :: IO (Maybe FilePath)
+showOpenFileDialog = do
+    r <- try runDialog :: IO (Either SomeException String)
+    pure $ case r of
+        Left _ -> Nothing
+        Right s ->
+            let p = reverse (dropWhile isSpace (reverse (dropWhile isSpace s)))
+             in if null p then Nothing else Just p
+  where
+#ifdef mingw32_HOST_OS
+    runDialog =
+        readProcess
+            "powershell"
+            [ "-NoProfile"
+            , "-NonInteractive"
+            , "-Command"
+            , "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms');"
+                <> "$d=New-Object System.Windows.Forms.OpenFileDialog;"
+                <> "$d.Title='Open ROM';"
+                <> "$d.Filter='GB/GBC ROMs|*.gb;*.gbc;*.sgb;*.zip|All Files|*.*';"
+                <> "if($d.ShowDialog()-eq'OK'){$d.FileName}"
+            ]
+            ""
+#elif defined(darwin_HOST_OS)
+    runDialog =
+        readProcess
+            "osascript"
+            ["-e", "POSIX path of (choose file with prompt \"Open ROM\" of type {\"gb\", \"gbc\", \"sgb\", \"zip\"})"]
+            ""
+#else
+    runDialog = do
+        mZenity <- findExecutable "zenity"
+        case mZenity of
+            Just exe -> do
+                (code, out, _) <-
+                    readProcessWithExitCode
+                        exe
+                        ["--file-selection", "--title=Open ROM", "--file-filter=GB/GBC ROMs | *.gb *.gbc *.sgb *.zip"]
+                        ""
+                pure $ case code of { ExitSuccess -> out; _ -> "" }
+            Nothing -> do
+                mKdialog <- findExecutable "kdialog"
+                case mKdialog of
+                    Just exe -> do
+                        (code, out, _) <-
+                            readProcessWithExitCode
+                                exe
+                                ["--getopenfilename", ".", "GB/GBC ROMs (*.gb *.gbc *.sgb *.zip)"]
+                                ""
+                        pure $ case code of { ExitSuccess -> out; _ -> "" }
+                    Nothing -> pure ""
+#endif
 
 {- | Show a startup menu before any ROM is loaded. Returns the path of the ROM the user dropped, or
 'Nothing' if the user chose to quit. Opens its own SDL window (title-bar only, no game texture).
@@ -1144,7 +1211,11 @@ processStartupEvents selRef waitRef = go
                             else do
                                 s <- readIORef selRef
                                 case s of
-                                    0 -> do writeIORef waitRef True; go rest
+                                    0 -> do
+                                        mPath <- showOpenFileDialog
+                                        case mPath of
+                                            Just path -> pure (Just (Just path))
+                                            Nothing -> do writeIORef waitRef True; go rest
                                     1 -> pure (Just Nothing)
                                     _ -> go rest
                     _ -> go rest

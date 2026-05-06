@@ -977,6 +977,8 @@ function toggleAbout() {
 function updateAboutInfo() {
     document.getElementById("about-version").textContent =
         wasm ? readStaticString(wasm.instance.exports.ocelot_version_ptr, wasm.instance.exports.ocelot_version_len) : "--";
+    document.getElementById("about-save-version").textContent =
+        wasm ? `v${wasm.instance.exports.ocelot_snapshot_version()}` : "--";
     document.getElementById("about-rom").textContent = currentRomTitle || "--";
     document.getElementById("about-mode").textContent =
         emu ? (wasm.instance.exports.ocelot_is_cgb(emu) ? "CGB" : "DMG") : "--";
@@ -1049,17 +1051,36 @@ function applyScanlines(enabled) {
 
 // ─── Integer scaling / fit / stretch ─────────────────────────────────────────
 
-// Returns windowed available dimensions (excludes action bar, status bar, padding).
+// Returns windowed available dimensions (excludes surrounding chrome and body padding).
 function windowAvailW() {
     const container = document.getElementById("screen-container");
-    return container ? container.parentElement.clientWidth : window.innerWidth;
+    if (!container) return window.innerWidth;
+    const parent = container.parentElement;
+    const style = getComputedStyle(parent);
+    return parent.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
 }
 
 function windowAvailH() {
-    return Math.max(144, window.innerHeight
-        - (document.querySelector(".action-bar")?.offsetHeight || 0)
-        - (document.querySelector(".status-bar")?.offsetHeight || 0)
-        - 32);
+    const container = document.getElementById("screen-container");
+    if (!container) return window.innerHeight;
+    const parent = container.parentElement;
+    const style = getComputedStyle(parent);
+    const paddingV = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+    const gap = parseFloat(style.gap) || 0;
+
+    let siblingsH = 0, visibleSiblingCount = 0;
+    for (const child of parent.children) {
+        if (child === container) continue;
+        if (getComputedStyle(child).display === "none") continue;
+        siblingsH += child.offsetHeight;
+        visibleSiblingCount++;
+    }
+
+    const cs = getComputedStyle(container);
+    const containerExtrasV = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom)
+        + parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
+
+    return Math.max(144, window.innerHeight - siblingsH - paddingV - gap * visibleSiblingCount - containerExtrasV);
 }
 
 function computeBestScale() {
