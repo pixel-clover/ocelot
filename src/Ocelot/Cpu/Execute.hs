@@ -284,10 +284,11 @@ runUntilHalt cap = go 0
                     c1 <- cpuCycles <$> getCpu m
                     go (n + fromIntegral (c1 - c0)) m
 
--- | Run the machine until at least @cap@ CPU M-cycles have been consumed.
--- Counting M-cycles (not instruction steps) ensures that the wall-clock
--- frame budget is respected regardless of the instruction mix: a CALL
--- (6 M-cycles) contributes 6 toward the cap, not 1.
+{- | Run the machine until at least @cap@ CPU M-cycles have been consumed.
+Counting M-cycles (not instruction steps) ensures that the wall-clock
+frame budget is respected regardless of the instruction mix: a CALL
+(6 M-cycles) contributes 6 toward the cap, not 1.
+-}
 runFor :: Int -> Machine -> IO Int
 runFor cap = go 0
   where

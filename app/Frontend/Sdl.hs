@@ -23,6 +23,8 @@ module Frontend.Sdl (
     audioTest,
 ) where
 
+import Codec.Picture (Image, PaletteCreationMethod (..), PaletteOptions (..), PixelRGB8 (..), generateImage, palettize)
+import Codec.Picture.Gif (GifDelay, GifLooping (..), writeGifImages)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar)
 import Control.Exception (IOException, try)
@@ -33,7 +35,7 @@ import Data.Char (toUpper)
 import Data.Foldable (toList)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int16)
-import Data.Maybe (listToMaybe)
+import Data.Maybe (isJust, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock.POSIX (getPOSIXTime)
@@ -54,6 +56,8 @@ import qualified Ocelot.Snapshot as Snap
 import SDL (($=))
 import qualified SDL
 import qualified SDL.Input.GameController as SDLGC
+import System.Directory (createDirectoryIfMissing)
+import System.FilePath (takeBaseName, takeDirectory, (</>))
 
 gbWidth, gbHeight :: Int
 gbWidth = 160
@@ -86,12 +90,15 @@ data Hotkeys = Hotkeys
     -- ^ "R": rebuild the Machine from the cartridge.
     , hkFullscreenReq :: !(IORef Bool)
     -- ^ F11: toggle fullscreen/windowed.
+    , hkGifToggle :: !(IORef Bool)
+    -- ^ Shift+F12: start or stop GIF recording.
     }
 
 newHotkeys :: IO Hotkeys
 newHotkeys =
     Hotkeys
         <$> newIORef False
+        <*> newIORef False
         <*> newIORef False
         <*> newIORef False
         <*> newIORef False
@@ -123,6 +130,8 @@ data UiState = UiState
     -- ^ Ring of up to 61 frame-present timestamps (ns). Used to compute FPS/frame-time.
     , uiDoubleSpeedBadgeUntil :: !(IORef Word64)
     -- ^ Frame number after which the "DOUBLE SPEED" badge is hidden. 0 = not active.
+    , uiGifFrames :: !(IORef (Maybe [V.Vector Word8]))
+    -- ^ Nothing = not recording; Just frames = recording (newest frame first).
     }
 
 newUiState :: IO UiState
@@ -135,6 +144,7 @@ newUiState =
         <*> newIORef 0
         <*> newIORef []
         <*> newIORef 0
+        <*> newIORef Nothing
 
 tickUi :: UiState -> IO Word64
 tickUi ui = do
@@ -171,9 +181,12 @@ fallbackTitle path =
         stem = reverse (drop 1 (dropWhile (/= '.') (reverse fileName)))
      in if null stem then fileName else stem
 
+-- | Folder that holds all save data for a ROM: <romdir>/<romstem>/
+romDir :: FilePath -> FilePath
+romDir romPath = takeDirectory romPath </> takeBaseName romPath
+
 slotPath :: FilePath -> Int -> FilePath
-slotPath romPath 0 = romPath <> ".state"
-slotPath romPath n = romPath <> ".state" <> show n
+slotPath romPath slot = romDir romPath </> ("slot" <> show slot <> ".state")
 
 play :: FilePath -> Cartridge -> Maybe BS.ByteString -> Text -> Int -> IO ()
 play romPath cart bootRom title scale = do
@@ -372,6 +385,12 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf wi
         renderUi renderer ui titleStr machine' paused fast winW winH
         SDL.present renderer
 
+        -- Capture every other frame to halve GIF file size (~30 fps effective).
+        gifRec <- readIORef (uiGifFrames ui)
+        case gifRec of
+            Just fs | even frame -> writeIORef (uiGifFrames ui) (Just (fbRgb : fs))
+            _ -> pure ()
+
         unless fast (paceFrame frameStartNs)
 
         -- Record after pacing so consecutive timestamps span the full frame
@@ -456,11 +475,17 @@ renderUi renderer ui title machine paused fast winW winH = do
             (platformLabel <> "  " <> speedLabel)
             (if helpVisible then "F1  CLOSE HELP" else "SPACE  RESUME")
 
+    gifRecording <- readIORef (uiGifFrames ui)
+
     when (fast && not overlayVisible) $
         renderBadge renderer (winW - 194) 20 174 34 panelSecondary accentOrange "FAST FORWARD"
 
+    when (isJust gifRecording && not overlayVisible) $
+        renderBadge renderer 20 20 68 34 panelSecondary (SDL.V4 0xDD 0x33 0x33 0xFF) "REC"
+
+    let dsBadgeY = if isJust gifRecording then 62 else 20
     when (frame <= dsBadgeUntil && not overlayVisible) $
-        renderBadge renderer 20 20 168 34 panelSecondary accentBlue "DOUBLE SPEED"
+        renderBadge renderer 20 dsBadgeY 168 34 panelSecondary accentBlue "DOUBLE SPEED"
 
     when (perfVisible && not overlayVisible) $
         renderPerfOverlay renderer winW frameTimes
@@ -528,8 +553,9 @@ renderHelpOverlay renderer winW title platformLabel speedLabel fast slot isCgb =
                 accentBlue
                 [ "F5     SAVE STATE"
                 , "F7     LOAD STATE"
-                , "[/]    SLOT SELECT"
+                , "F6     SLOT SELECT"
                 , "F12    SCREENSHOT"
+                , "SF12   RECORD GIF"
                 , "R      HARD RESET"
                 ]
             ]
@@ -795,7 +821,7 @@ handlePending romPath hk ui machineRef cart bootRom = do
         writeIORef (hkSaveReq hk) False
         blob <- Snap.save machine
         let path = slotPath romPath slot
-        r <- try (BS.writeFile path blob) :: IO (Either IOException ())
+        r <- try (createDirectoryIfMissing True (romDir romPath) >> BS.writeFile path blob) :: IO (Either IOException ())
         case r of
             Right () -> do
                 putStrLn ("state:    saved " <> path <> " (" <> show (BS.length blob) <> " B)")
@@ -826,8 +852,8 @@ handlePending romPath hk ui machineRef cart bootRom = do
         writeIORef (hkShotReq hk) False
         fb <- Ppu.framebufferRgb (Bus.busPpu (machineBus machine))
         ts <- floor <$> getPOSIXTime :: IO Int
-        let path = romPath <> "-" <> show ts <> ".ppm"
-        r <- try (writePpm path fb) :: IO (Either IOException ())
+        let path = romDir romPath </> ("screenshot-" <> show ts <> ".ppm")
+        r <- try (createDirectoryIfMissing True (romDir romPath) >> writePpm path fb) :: IO (Either IOException ())
         case r of
             Right () -> do
                 putStrLn ("shot:     wrote " <> path)
@@ -835,6 +861,49 @@ handlePending romPath hk ui machineRef cart bootRom = do
             Left e -> do
                 putStrLn ("shot:     failed: " <> show e)
                 pushToast ui ToastFailure "Screenshot failed"
+    gifToggle <- readIORef (hkGifToggle hk)
+    when gifToggle $ do
+        writeIORef (hkGifToggle hk) False
+        mFrames <- readIORef (uiGifFrames ui)
+        case mFrames of
+            Nothing -> do
+                writeIORef (uiGifFrames ui) (Just [])
+                putStrLn "gif:      recording started"
+                pushToast ui ToastInfo "Recording GIF..."
+            Just capturedFrames -> do
+                writeIORef (uiGifFrames ui) Nothing
+                let n = length capturedFrames
+                if n == 0
+                    then pushToast ui ToastInfo "No frames recorded"
+                    else do
+                        ts <- floor <$> getPOSIXTime :: IO Int
+                        let path = romDir romPath </> ("recording-" <> show ts <> ".gif")
+                            opts =
+                                PaletteOptions
+                                    { paletteCreationMethod = MedianMeanCut
+                                    , enableImageDithering = False
+                                    , paletteColorCount = 64 -- GB games use ≤56 colours
+                                    }
+                            -- palettize returns (Image Pixel8, Palette); writeGifImages wants (Palette, GifDelay, Image Pixel8)
+                            -- 3cs delay matches the every-other-frame capture rate (≈33 fps)
+                            images =
+                                [ (pal, 3 :: GifDelay, idx)
+                                | f <- reverse capturedFrames
+                                , let (idx, pal) = palettize opts (toGifImage f)
+                                ]
+                        case writeGifImages path LoopingForever images of
+                            Left err -> do
+                                putStrLn ("gif:      encode failed: " <> err)
+                                pushToast ui ToastFailure "GIF encode failed"
+                            Right writeAction -> do
+                                r <- try (createDirectoryIfMissing True (romDir romPath) >> writeAction) :: IO (Either IOException ())
+                                case r of
+                                    Right () -> do
+                                        putStrLn ("gif:      wrote " <> path <> " (" <> show n <> " frames)")
+                                        pushToast ui ToastSuccess "GIF saved"
+                                    Left e -> do
+                                        putStrLn ("gif:      write failed: " <> show e)
+                                        pushToast ui ToastFailure "GIF write failed"
     resetReq <- readIORef (hkResetReq hk)
     when resetReq $ do
         writeIORef (hkResetReq hk) False
@@ -842,6 +911,13 @@ handlePending romPath hk ui machineRef cart bootRom = do
         writeIORef machineRef machine'
         putStrLn "reset:    machine rebuilt from cartridge"
         pushToast ui ToastInfo "Machine reset"
+
+toGifImage :: V.Vector Word8 -> Image PixelRGB8
+toGifImage fb = generateImage pixel gbWidth gbHeight
+  where
+    pixel x y =
+        let i = (y * gbWidth + x) * 3
+         in PixelRGB8 (fb V.! i) (fb V.! (i + 1)) (fb V.! (i + 2))
 
 writePpm :: FilePath -> V.Vector Word8 -> IO ()
 writePpm path fb = do
@@ -881,6 +957,8 @@ handleEvent hk ui jp ev = case SDL.eventPayload ev of
         let pressed = SDL.keyboardEventKeyMotion kev == SDL.Pressed
             scancode = SDL.keysymScancode (SDL.keyboardEventKeysym kev)
             isRepeat = SDL.keyboardEventRepeat kev
+            mods = SDL.keysymModifier (SDL.keyboardEventKeysym kev)
+            shiftHeld = SDL.keyModifierLeftShift mods || SDL.keyModifierRightShift mods
         case scancode of
             SDL.ScancodeEscape ->
                 when pressed $ do
@@ -905,7 +983,10 @@ handleEvent hk ui jp ev = case SDL.eventPayload ev of
             SDL.ScancodeF7 ->
                 when (pressed && not isRepeat) (writeIORef (hkLoadReq hk) True)
             SDL.ScancodeF12 ->
-                when (pressed && not isRepeat) (writeIORef (hkShotReq hk) True)
+                when (pressed && not isRepeat) $
+                    if shiftHeld
+                        then writeIORef (hkGifToggle hk) True
+                        else writeIORef (hkShotReq hk) True
             SDL.ScancodePeriod ->
                 when (pressed && not isRepeat) $ do
                     helpVisible <- readIORef (uiHelpVisible ui)
@@ -917,16 +998,10 @@ handleEvent hk ui jp ev = case SDL.eventPayload ev of
             SDL.ScancodeP ->
                 when (pressed && not isRepeat) $
                     modifyIORef' (uiPerfVisible ui) not
-            SDL.ScancodeLeftBracket ->
+            SDL.ScancodeF6 ->
                 when (pressed && not isRepeat) $ do
                     s <- readIORef (uiCurrentSlot ui)
-                    let s' = max 0 (s - 1)
-                    writeIORef (uiCurrentSlot ui) s'
-                    pushToast ui ToastInfo ("Slot " <> show s')
-            SDL.ScancodeRightBracket ->
-                when (pressed && not isRepeat) $ do
-                    s <- readIORef (uiCurrentSlot ui)
-                    let s' = min 9 (s + 1)
+                    let s' = (s + 1) `mod` 10
                     writeIORef (uiCurrentSlot ui) s'
                     pushToast ui ToastInfo ("Slot " <> show s')
             _ -> case mapKey scancode of
