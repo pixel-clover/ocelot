@@ -40,15 +40,15 @@
 
         :root[data-theme="dark"] {
             /* Matches desktop SDL palette exactly */
-            --bg: #080e08;               /* panelPrimary darkened */
-            --bg-panel: #0b160b;         /* panelPrimary */
-            --bg-input: #0e1c0e;         /* panelSecondary */
+            --bg: #080e08; /* panelPrimary darkened */
+            --bg-panel: #0b160b; /* panelPrimary */
+            --bg-input: #0e1c0e; /* panelSecondary */
             --bg-btn-hover: #101e10;
             --border: #1e2e1e;
-            --border-accent: #5aa878;    /* accentBlue */
-            --text: #d8e8c8;             /* textPrimary */
-            --text-muted: #9aab8e;       /* textSecondary */
-            --text-accent: #b4d414;      /* accentOrange / DMG LCD brightest */
+            --border-accent: #5aa878; /* accentBlue */
+            --text: #d8e8c8; /* textPrimary */
+            --text-muted: #9aab8e; /* textSecondary */
+            --text-accent: #b4d414; /* accentOrange / DMG LCD brightest */
             --text-link: #b4d414;
             --text-heading: #9bbc0f;
             --toast-bg: #0b160b;
@@ -71,7 +71,7 @@
             --border-accent: #4e7a10;
             --text: #181e18;
             --text-muted: #506050;
-            --text-accent: #4e7a10;   /* darker GB green for light bg */
+            --text-accent: #4e7a10; /* darker GB green for light bg */
             --text-link: #4e7a10;
             --text-heading: #3c5c0c;
             --toast-bg: #f4f4e8;
@@ -376,9 +376,18 @@
             transform: translateY(-1px);
         }
 
-        .help-panel::-webkit-scrollbar { width: 6px; }
-        .help-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-        .help-panel::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+        .help-panel::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .help-panel::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 3px;
+        }
+
+        .help-panel::-webkit-scrollbar-thumb:hover {
+            background: var(--text-muted);
+        }
 
         /* About overlay */
         #about-overlay .help-panel {
@@ -403,8 +412,13 @@
             font-family: var(--font-mono);
         }
 
-        .about-row span:first-child { color: var(--text-muted); }
-        .about-row span:last-child { color: var(--text); }
+        .about-row span:first-child {
+            color: var(--text-muted);
+        }
+
+        .about-row span:last-child {
+            color: var(--text);
+        }
 
         /* Action bar */
         .action-bar {
@@ -433,11 +447,28 @@
             transition: background var(--transition-normal);
         }
 
-        .btn-group.tone-audio  { --group-accent: #b4d414; }   /* DMG LCD green */
-        .btn-group.tone-save   { --group-accent: #5aa878; }   /* accentBlue teal-green */
-        .btn-group.tone-view   { --group-accent: #b4d414; }   /* DMG LCD green */
-        .btn-group.tone-system { --group-accent: #5aa878; }
-        .btn-group.tone-info   { --group-accent: #5aa878; }
+        .btn-group.tone-audio {
+            --group-accent: #b4d414;
+        }
+
+        /* DMG LCD green */
+        .btn-group.tone-save {
+            --group-accent: #5aa878;
+        }
+
+        /* accentBlue teal-green */
+        .btn-group.tone-view {
+            --group-accent: #b4d414;
+        }
+
+        /* DMG LCD green */
+        .btn-group.tone-system {
+            --group-accent: #5aa878;
+        }
+
+        .btn-group.tone-info {
+            --group-accent: #5aa878;
+        }
 
         .btn-group-label {
             color: color-mix(in srgb, var(--group-accent) 88%, var(--text-muted));
@@ -501,6 +532,23 @@
             font-size: 0.68rem;
             color: var(--text-muted);
             font-family: var(--font-mono);
+        }
+
+        .page-footer {
+            font-size: 0.62rem;
+            font-family: var(--font-mono);
+            color: var(--text-muted);
+            letter-spacing: 0.05em;
+            margin-top: 4px;
+        }
+
+        .page-footer a {
+            color: var(--text-muted);
+            text-decoration: none;
+        }
+
+        .page-footer a:hover {
+            color: var(--text-accent);
         }
 
         .status-left {
@@ -602,7 +650,9 @@
             transition: border-color var(--transition-fast), background var(--transition-fast);
         }
 
-        .remap-btn:hover { border-color: var(--text-accent); }
+        .remap-btn:hover {
+            border-color: var(--text-accent);
+        }
 
         .remap-btn.listening {
             border-color: var(--text-accent);
@@ -623,7 +673,10 @@
             cursor: pointer;
         }
 
-        .remap-reset:hover { color: var(--text); border-color: var(--text-accent); }
+        .remap-reset:hover {
+            color: var(--text);
+            border-color: var(--text-accent);
+        }
 
         /* Performance HUD */
         #perf-hud {
@@ -643,7 +696,9 @@
             font-family: var(--font-mono);
         }
 
-        #perf-hud.hidden { display: none; }
+        #perf-hud.hidden {
+            display: none;
+        }
 
         .perf-row {
             display: flex;
@@ -652,7 +707,9 @@
             padding: 1px 0;
         }
 
-        .perf-row span:first-child { color: var(--text-muted); }
+        .perf-row span:first-child {
+            color: var(--text-muted);
+        }
 
         .perf-row span:last-child {
             color: var(--text-accent);
@@ -700,8 +757,12 @@
         }
 
         @keyframes led-blink {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.3; }
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.3;
+            }
         }
 
         #speaker-dots {
@@ -756,18 +817,34 @@
 
         /* Animations */
         @keyframes modalPop {
-            from { opacity: 0; transform: scale(0.95); }
-            to   { opacity: 1; transform: scale(1); }
+            from {
+                opacity: 0;
+                transform: scale(0.95);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1);
+            }
         }
 
         @keyframes slideDown {
-            from { opacity: 0; transform: translateY(-8px); }
-            to   { opacity: 1; transform: translateY(0); }
+            from {
+                opacity: 0;
+                transform: translateY(-8px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
         @keyframes pulse {
-            from { opacity: 0.8; }
-            to   { opacity: 1; }
+            from {
+                opacity: 0.8;
+            }
+            to {
+                opacity: 1;
+            }
         }
 
         /* Fullscreen: flex-center the canvas, strip window chrome */
@@ -794,17 +871,43 @@
 
         /* Responsive */
         @media (max-width: 700px) {
-            body { padding-left: 12px; padding-right: 12px; }
-            .action-bar { justify-content: flex-start; gap: 6px; padding: 6px; }
-            .status-bar { font-size: 0.62rem; }
+            body {
+                padding-left: 12px;
+                padding-right: 12px;
+            }
+
+            .action-bar {
+                justify-content: flex-start;
+                gap: 6px;
+                padding: 6px;
+            }
+
+            .status-bar {
+                font-size: 0.62rem;
+            }
         }
 
         @media (max-width: 500px) {
-            #drop-zone { padding-left: 16px; padding-right: 16px; }
-            .help-columns { grid-template-columns: 1fr; }
-            .btn-group-label { display: none; }
-            .btn-group { padding: 4px; }
-            .action-bar { gap: 4px; }
+            #drop-zone {
+                padding-left: 16px;
+                padding-right: 16px;
+            }
+
+            .help-columns {
+                grid-template-columns: 1fr;
+            }
+
+            .btn-group-label {
+                display: none;
+            }
+
+            .btn-group {
+                padding: 4px;
+            }
+
+            .action-bar {
+                gap: 4px;
+            }
         }
     </style>
 </head>
@@ -823,7 +926,7 @@
 
 <div id="drop-zone">
     <label for="rom-input">Drop a .gb, .gbc, or .zip ROM here, or click to choose one</label>
-    <input id="rom-input" type="file" accept=".gb,.gbc,.sgb,.zip,application/octet-stream">
+    <input accept=".gb,.gbc,.sgb,.zip,application/octet-stream" id="rom-input" type="file">
     <div>
         <select id="recent-roms" style="display:none">
             <option value="">Recent ROMs</option>
@@ -844,7 +947,8 @@
     <div class="btn-group tone-audio">
         <div class="btn-group-label">Audio</div>
         <button id="audio-toggle" title="Toggle audio on or off" type="button">ON</button>
-        <input class="vol-slider" id="master-volume" max="100" min="0" step="5" title="Master volume" type="range" value="70">
+        <input class="vol-slider" id="master-volume" max="100" min="0" step="5" title="Master volume" type="range"
+               value="70">
         <span class="vol-label" id="master-volume-label">70%</span>
     </div>
     <div class="btn-group tone-save">
@@ -894,19 +998,26 @@
         <div class="settings-row">
             <span class="settings-label">Scale</span>
             <div class="settings-control">
-                <button class="scale-btn" data-scale="0" title="Largest integer scale that fits the window" type="button">Auto</button>
+                <button class="scale-btn" data-scale="0" title="Largest integer scale that fits the window"
+                        type="button">Auto
+                </button>
                 <button class="scale-btn" data-scale="1" title="1× (160×144)" type="button">1×</button>
                 <button class="scale-btn" data-scale="2" title="2× (320×288)" type="button">2×</button>
                 <button class="scale-btn" data-scale="3" title="3× (480×432)" type="button">3×</button>
                 <button class="scale-btn" data-scale="4" title="4× (640×576)" type="button">4×</button>
-                <button class="scale-btn" data-scale="-1" title="Fit: fill available space while preserving the 160×144 aspect ratio" type="button">Fit</button>
-                <button class="scale-btn" data-scale="-2" title="Stretch: fill available space completely, ignoring aspect ratio" type="button">Stretch</button>
+                <button class="scale-btn" data-scale="-1"
+                        title="Fit: fill available space while preserving the 160×144 aspect ratio" type="button">Fit
+                </button>
+                <button class="scale-btn" data-scale="-2"
+                        title="Stretch: fill available space completely, ignoring aspect ratio" type="button">Stretch
+                </button>
             </div>
         </div>
         <div class="settings-row">
             <span class="settings-label">Scanlines</span>
             <div class="settings-control">
-                <button class="scale-btn" id="scanlines-toggle" title="Toggle scanline overlay" type="button">Off</button>
+                <button class="scale-btn" id="scanlines-toggle" title="Toggle scanline overlay" type="button">Off
+                </button>
             </div>
         </div>
     </div>
@@ -950,7 +1061,8 @@
             </div>
         </div>
         <p class="help-footer">
-            Found a bug? <a href="https://github.com/pixel-clover/ocelot/issues" rel="noopener" target="_blank">Open an issue</a>.
+            Found a bug? <a href="https://github.com/pixel-clover/ocelot/issues" rel="noopener" target="_blank">Open an
+            issue</a>.
         </p>
         <button id="help-close">CLOSE</button>
     </div>
@@ -985,6 +1097,10 @@
         <button id="about-close">CLOSE</button>
     </div>
 </div>
+
+<footer class="page-footer">
+    <a href="https://github.com/pixel-clover/ocelot" rel="noopener" target="_blank">Ocelot on GitHub</a>
+</footer>
 
 <script src="ocelot.js"></script>
 </body>
