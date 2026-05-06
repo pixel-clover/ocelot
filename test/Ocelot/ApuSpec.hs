@@ -208,6 +208,56 @@ spec = do
             -- At least one of the samples should be non-zero (the channel is producing output).
             any (/= 0) samples `shouldBe` True
 
+    describe "high-pass filter" $ do
+        it "DC offset decays to near-zero after running a silent (all-DAC-off) APU for many frames" $ do
+            -- With all DACs off every channel outputs 0. The APU should have been initialized with
+            -- non-zero master volume (NR50 = 0x77) so there is a DC contribution while any DAC is
+            -- on. After enough T-cycles the HPF capacitor must have discharged; all samples should
+            -- be exactly 0 once steady-state is reached. We advance 60 frames (~1 second).
+            apu <- initial
+            write8 0xFF26 0x80 apu -- Power on
+            write8 0xFF24 0x77 apu -- Master vol 7 both sides
+            write8 0xFF25 0x11 apu -- Ch1 panned both sides
+            write8 0xFF12 0xF0 apu -- Ch1 DAC on, vol 15
+            write8 0xFF14 0x80 apu -- Trigger ch1
+            advance 17556 apu -- Let it run for a frame with ch1 active
+            -- Now cut the DAC: writing 0x00 to NR12 turns the DAC off.
+            write8 0xFF12 0x00 apu
+            -- Drain any buffered samples so far.
+            _ <- drainSamples apu
+            -- Run for 60 frames with all DACs off; the HPF capacitor should fully discharge.
+            mapM_ (\_ -> advance 17556 apu) [1 .. 60 :: Int]
+            samples <- drainSamples apu
+            -- Take the last 800 samples (final ~8 ms) and verify all are zero.
+            let recent = drop (length samples - 800) samples
+            all (== 0) recent `shouldBe` True
+
+        it "a sustained square wave has near-zero DC component after the filter settles" $ do
+            -- Run a 50% duty square wave at volume 8 for ~1 second. The waveform is symmetric
+            -- (+v, -v alternating) so its true DC is 0. After the filter settles (a few hundred ms)
+            -- the running average should be within 1 LSB of zero.
+            apu <- initial
+            write8 0xFF26 0x80 apu
+            write8 0xFF24 0x77 apu
+            write8 0xFF25 0x11 apu -- Ch1 left and right
+            write8 0xFF12 0x88 apu -- Vol 8, env down, period 0
+            write8 0xFF11 0x80 apu -- 50% duty
+            write8 0xFF13 0x00 apu
+            write8 0xFF14 0x87 apu -- Trigger, freq = 7 -> very low freq, but DAC is on
+            -- Advance 60 frames to let the filter settle.
+            mapM_ (\_ -> advance 17556 apu) [1 .. 60 :: Int]
+            _ <- drainSamples apu
+            -- Advance one more frame and collect samples.
+            advance 17556 apu
+            samples <- drainSamples apu
+            let n = length samples
+            -- Mean of left channel samples (every other sample starting at index 0).
+            let leftSamples = [fromIntegral s :: Double | (i, s) <- zip [0 :: Int ..] samples, even i]
+                mean = sum leftSamples / fromIntegral (length leftSamples)
+            -- After ~1 second, DC component should be well below 1% of full scale (32767).
+            abs mean `shouldSatisfy` (< 328)
+            n `shouldSatisfy` (> 0)
+
 collectRwFailures :: ApuState -> IO [(Word16, Word8, Word8, Word8)]
 collectRwFailures apu = do
     -- Outer loop = D values (matches blargg's outer ld d,0 / inc d / jr nz).

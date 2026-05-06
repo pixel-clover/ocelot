@@ -53,6 +53,7 @@ data Command
 data PlayOpts = PlayOpts
     { playRomPath :: !FilePath
     , playBootRom :: !(Maybe FilePath)
+    , playScale :: !Int
     }
 
 main :: IO ()
@@ -147,6 +148,15 @@ playOptsParser =
                         )
                 )
             )
+        <*> option
+            (auto >>= \n -> if n >= 1 && n <= 5 then pure n else readerError "scale must be 1–5")
+            ( long "scale"
+                <> short 's'
+                <> metavar "N"
+                <> value 4
+                <> showDefault
+                <> help "Integer display scale factor (1–5). Window is 160N × 144N pixels."
+            )
 
 infoRom :: FilePath -> IO ()
 infoRom path = do
@@ -177,7 +187,7 @@ playRom opts = do
                     bracket_
                         (pure ())
                         (when battery (writeSave savePath cart))
-                        (Sdl.play path cart bootBytes (hdrTitle hdr))
+                        (Sdl.play path cart bootBytes (hdrTitle hdr) (playScale opts))
                 Left err -> printNotSupported err
 
 loadSaveIfExists :: FilePath -> Cartridge.Cartridge -> IO ()

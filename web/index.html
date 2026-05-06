@@ -220,17 +220,15 @@
             border-radius: 3px;
             overflow: hidden;
             box-shadow: 0 0 0 1px var(--border-accent), var(--shadow-md), inset 0 0 20px rgba(0, 0, 0, 0.4);
-            width: min(100%, 640px);
+            display: inline-block;
+            max-width: 100%;
             margin-bottom: 6px;
         }
 
         #screen {
             display: block;
-            width: 100%;
-            height: auto;
             image-rendering: pixelated;
             image-rendering: crisp-edges;
-            aspect-ratio: 160 / 144;
             background: #000;
         }
 
@@ -533,6 +531,30 @@
             font-weight: 500;
         }
 
+        /* Settings sections */
+        .settings-section {
+            margin-bottom: 14px;
+        }
+
+        .settings-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-top: 6px;
+        }
+
+        .settings-label {
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            min-width: 48px;
+        }
+
+        .settings-control {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+        }
+
         /* Keyboard remap */
         .remap-section {
             margin-top: 4px;
@@ -658,7 +680,6 @@
         @media (max-width: 700px) {
             body { padding-left: 12px; padding-right: 12px; }
             .action-bar { justify-content: flex-start; gap: 6px; padding: 6px; }
-            #screen-container { width: 100%; }
             .status-bar { font-size: 0.62rem; }
         }
 
@@ -746,6 +767,19 @@
 
 <div class="hidden" id="settings-panel">
     <h3>SETTINGS</h3>
+    <div class="settings-section">
+        <h4>VIDEO</h4>
+        <div class="settings-row">
+            <span class="settings-label">Scale</span>
+            <div class="settings-control">
+                <button class="scale-btn" data-scale="0" title="Largest integer scale that fits the window" type="button">Auto</button>
+                <button class="scale-btn" data-scale="1" title="1× (160×144)" type="button">1×</button>
+                <button class="scale-btn" data-scale="2" title="2× (320×288)" type="button">2×</button>
+                <button class="scale-btn" data-scale="3" title="3× (480×432)" type="button">3×</button>
+                <button class="scale-btn" data-scale="4" title="4× (640×576)" type="button">4×</button>
+            </div>
+        </div>
+    </div>
     <div class="remap-section">
         <h4>KEYBOARD</h4>
         <div class="remap-grid" id="remap-grid"></div>

@@ -59,12 +59,8 @@ gbWidth, gbHeight :: Int
 gbWidth = 160
 gbHeight = 144
 
-windowWidth, windowHeight :: Int
-windowWidth = gbWidth * scale
-windowHeight = gbHeight * scale
-
-scale :: Int
-scale = 4
+windowSize :: Int -> (Int, Int)
+windowSize s = (gbWidth * s, gbHeight * s)
 
 frameNs :: Word64
 frameNs = 16742706
@@ -162,11 +158,12 @@ fallbackTitle path =
         stem = reverse (drop 1 (dropWhile (/= '.') (reverse fileName)))
      in if null stem then fileName else stem
 
-play :: FilePath -> Cartridge -> Maybe BS.ByteString -> Text -> IO ()
-play romPath cart bootRom title = do
+play :: FilePath -> Cartridge -> Maybe BS.ByteString -> Text -> Int -> IO ()
+play romPath cart bootRom title scale = do
     let titleStr
             | T.null title = fallbackTitle romPath
             | otherwise = T.unpack title
+        (winW, winH) = windowSize scale
     SDL.initialize
         [ SDL.InitVideo
         , SDL.InitEvents
@@ -184,7 +181,7 @@ play romPath cart bootRom title = do
             ("Ocelot - " <> title)
             SDL.defaultWindow
                 { SDL.windowInitialSize =
-                    SDL.V2 (fromIntegral windowWidth) (fromIntegral windowHeight)
+                    SDL.V2 (fromIntegral winW) (fromIntegral winH)
                 }
     renderer <-
         SDL.createRenderer
@@ -209,7 +206,7 @@ play romPath cart bootRom title = do
 
     SDL.setAudioDevicePlaybackState audioDev SDL.Play
 
-    loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf
+    loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf winW winH
 
     SDL.setAudioDevicePlaybackState audioDev SDL.Pause
     SDL.closeAudioDevice audioDev
@@ -272,8 +269,10 @@ loop ::
     SDL.Renderer ->
     SDL.Texture ->
     MVar [Int16] ->
+    Int ->
+    Int ->
     IO ()
-loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf = do
+loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf winW winH = do
     quit <- readIORef (hkQuit hk)
     unless quit $ do
         _ <- tickUi ui
@@ -321,11 +320,11 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf = 
         updateTextureRgb texture fbRgb
         SDL.clear renderer
         SDL.copy renderer texture Nothing Nothing
-        renderUi renderer ui titleStr machine' paused fast
+        renderUi renderer ui titleStr machine' paused fast winW winH
         SDL.present renderer
 
         unless fast (paceFrame frameStartNs)
-        loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf
+        loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf winW winH
 
 paceFrame :: Word64 -> IO ()
 paceFrame frameStartNs = do
@@ -362,8 +361,8 @@ data UiSection = UiSection
     , sectionRows :: ![String]
     }
 
-renderUi :: SDL.Renderer -> UiState -> String -> Machine -> Bool -> Bool -> IO ()
-renderUi renderer ui title machine paused fast = do
+renderUi :: SDL.Renderer -> UiState -> String -> Machine -> Bool -> Bool -> Int -> Int -> IO ()
+renderUi renderer ui title machine paused fast winW winH = do
     helpVisible <- readIORef (uiHelpVisible ui)
     toast <- currentToast ui
     let bus = machineBus machine
@@ -374,27 +373,29 @@ renderUi renderer ui title machine paused fast = do
         overlayVisible = paused || helpVisible
 
     when overlayVisible $ do
-        fillRect renderer (SDL.V4 0x00 0x00 0x00 0x98) 0 0 windowWidth windowHeight
-        renderOverlayHeader renderer (if helpVisible then "HELP" else "PAUSED")
+        fillRect renderer (SDL.V4 0x00 0x00 0x00 0x98) 0 0 winW winH
+        renderOverlayHeader renderer winW (if helpVisible then "HELP" else "PAUSED")
         if helpVisible
-            then renderHelpOverlay renderer clippedTitle platformLabel speedLabel fast
-            else renderPauseOverlay renderer clippedTitle platformLabel speedLabel fast
+            then renderHelpOverlay renderer winW clippedTitle platformLabel speedLabel fast
+            else renderPauseOverlay renderer winW clippedTitle platformLabel speedLabel fast
         renderStatusBar
             renderer
+            winW
+            winH
             clippedTitle
             (platformLabel <> "  " <> speedLabel)
             (if helpVisible then "F1  CLOSE HELP" else "SPACE  RESUME")
 
     when (fast && not overlayVisible) $
-        renderBadge renderer (windowWidth - 194) 20 174 34 panelSecondary accentOrange "FAST FORWARD"
+        renderBadge renderer (winW - 194) 20 174 34 panelSecondary accentOrange "FAST FORWARD"
 
     when (doubleSpeed && not overlayVisible) $
         renderBadge renderer 20 20 168 34 panelSecondary accentBlue "DOUBLE SPEED"
 
-    forM_ toast (renderToast renderer overlayVisible)
+    forM_ toast (renderToast renderer winW winH overlayVisible)
 
-renderPauseOverlay :: SDL.Renderer -> String -> String -> String -> Bool -> IO ()
-renderPauseOverlay renderer title platformLabel speedLabel fast = do
+renderPauseOverlay :: SDL.Renderer -> Int -> String -> String -> String -> Bool -> IO ()
+renderPauseOverlay renderer winW title platformLabel speedLabel fast = do
     let leftSections =
             [ UiSection
                 "ACTIONS"
@@ -432,10 +433,10 @@ renderPauseOverlay renderer title platformLabel speedLabel fast = do
                 , "TAB    FAST FORWARD"
                 ]
             ]
-    renderOverlayColumns renderer leftSections rightSections
+    renderOverlayColumns renderer winW leftSections rightSections
 
-renderHelpOverlay :: SDL.Renderer -> String -> String -> String -> Bool -> IO ()
-renderHelpOverlay renderer title platformLabel speedLabel fast = do
+renderHelpOverlay :: SDL.Renderer -> Int -> String -> String -> String -> Bool -> IO ()
+renderHelpOverlay renderer winW title platformLabel speedLabel fast = do
     let leftSections =
             [ UiSection
                 "EMULATION"
@@ -474,38 +475,38 @@ renderHelpOverlay renderer title platformLabel speedLabel fast = do
                 , "SPEED  " <> (if fast then "FAST" else "NORMAL")
                 ]
             ]
-    renderOverlayColumns renderer leftSections rightSections
+    renderOverlayColumns renderer winW leftSections rightSections
 
-renderOverlayColumns :: SDL.Renderer -> [UiSection] -> [UiSection] -> IO ()
-renderOverlayColumns renderer leftSections rightSections = do
+renderOverlayColumns :: SDL.Renderer -> Int -> [UiSection] -> [UiSection] -> IO ()
+renderOverlayColumns renderer winW leftSections rightSections = do
     let panelY = 92
         panelW = 262
         panelH = 388
         leftX = 38
-        rightX = windowWidth - leftX - panelW
+        rightX = winW - leftX - panelW
     drawPanel renderer panelPrimary accentOrange leftX panelY panelW panelH
     drawPanel renderer panelPrimary accentBlue rightX panelY panelW panelH
     renderSections renderer (leftX + 14) (panelY + 16) (panelW - 28) leftSections
     renderSections renderer (rightX + 14) (panelY + 16) (panelW - 28) rightSections
 
-renderOverlayHeader :: SDL.Renderer -> String -> IO ()
-renderOverlayHeader renderer label = do
+renderOverlayHeader :: SDL.Renderer -> Int -> String -> IO ()
+renderOverlayHeader renderer winW label = do
     let w = 224
         h = 46
-        x = (windowWidth - w) `div` 2
+        x = (winW - w) `div` 2
         y = 24
     drawPanel renderer panelOverlay accentOrange x y w h
-    drawCenteredText renderer 3 textPrimary (windowWidth `div` 2) (y + 12) label
+    drawCenteredText renderer 3 textPrimary (winW `div` 2) (y + 12) label
 
-renderStatusBar :: SDL.Renderer -> String -> String -> String -> IO ()
-renderStatusBar renderer leftText centerText rightText = do
+renderStatusBar :: SDL.Renderer -> Int -> Int -> String -> String -> String -> IO ()
+renderStatusBar renderer winW winH leftText centerText rightText = do
     let x = 24
-        y = windowHeight - 52
-        w = windowWidth - 48
+        y = winH - 52
+        w = winW - 48
         h = 30
     drawPanel renderer panelOverlay accentBlue x y w h
     drawTextShadowed renderer 2 textPrimary (x + 14) (y + 8) leftText
-    drawCenteredText renderer 2 textMuted (windowWidth `div` 2) (y + 8) centerText
+    drawCenteredText renderer 2 textMuted (winW `div` 2) (y + 8) centerText
     drawRightText renderer 2 textSecondary (x + w - 14) (y + 8) rightText
 
 renderBadge :: SDL.Renderer -> Int -> Int -> Int -> Int -> SDL.V4 Word8 -> SDL.V4 Word8 -> String -> IO ()
@@ -513,8 +514,8 @@ renderBadge renderer x y w h fill accent label = do
     drawPanel renderer fill accent x y w h
     drawCenteredText renderer 2 textPrimary (x + w `div` 2) (y + 10) label
 
-renderToast :: SDL.Renderer -> Bool -> Toast -> IO ()
-renderToast renderer overlayVisible toast = do
+renderToast :: SDL.Renderer -> Int -> Int -> Bool -> Toast -> IO ()
+renderToast renderer winW winH overlayVisible toast = do
     let message = fitText 24 (toastMessage toast)
         (fillColor, accentColor) = case toastStyle toast of
             ToastInfo -> (panelSecondary, accentBlue)
@@ -522,10 +523,10 @@ renderToast renderer overlayVisible toast = do
             ToastFailure -> (failureFill, failureAccent)
         w = max 180 (textWidth 2 message + 28)
         h = 34
-        x = windowWidth - w - 20
+        x = winW - w - 20
         y
-            | overlayVisible = windowHeight - 98
-            | otherwise = windowHeight - 54
+            | overlayVisible = winH - 98
+            | otherwise = winH - 54
     drawPanel renderer fillColor accentColor x y w h
     drawTextShadowed renderer 2 textPrimary (x + 14) (y + 10) message
 

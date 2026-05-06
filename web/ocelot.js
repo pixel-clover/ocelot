@@ -17,6 +17,9 @@ let audioBufferLevel = 0;
 let audioBufferCapacity = 0;
 let audioFrameCounter = 0;
 
+// Video scale (0 = auto, 1–4 = explicit integer multiple)
+let integerScale = 0;
+
 // Storage
 let db = null;
 let storageNoticeShown = false;
@@ -74,6 +77,7 @@ async function init() {
     canvas = document.getElementById("screen");
     ctx = canvas.getContext("2d");
     ctx.imageSmoothingEnabled = false;
+    applyIntegerScale(0);
 
     const wasi = await createWasiBridge();
 
@@ -122,6 +126,13 @@ async function init() {
     });
     document.getElementById("btn-fullscreen").addEventListener("click", toggleFullscreen);
     document.getElementById("theme-toggle").addEventListener("click", toggleTheme);
+    document.querySelectorAll(".scale-btn").forEach(btn => {
+        btn.addEventListener("click", () => {
+            applyIntegerScale(+btn.dataset.scale);
+            saveSettings();
+        });
+    });
+    window.addEventListener("resize", () => applyIntegerScale(integerScale));
     document.getElementById("settings-toggle").addEventListener("click", toggleSettings);
     document.getElementById("perf-toggle").addEventListener("click", togglePerf);
     document.getElementById("btn-pause").addEventListener("click", togglePause);
@@ -278,7 +289,9 @@ function loadSettings() {
         }
         if (saved.keyMap) keyMap = {...DEFAULT_KEY_MAP, ...saved.keyMap};
         if (saved.theme) applyTheme(saved.theme);
-    } catch (_) {}
+        if (saved.integerScale !== undefined) applyIntegerScale(saved.integerScale);
+        else applyIntegerScale(0);
+    } catch (_) { applyIntegerScale(0); }
     document.getElementById("audio-toggle").textContent = audioEnabled ? "ON" : "OFF";
 }
 
@@ -290,6 +303,7 @@ function saveSettings() {
             slot: currentSlot,
             keyMap,
             theme: document.documentElement.getAttribute("data-theme") || "light",
+            integerScale,
         }));
     } catch (_) {}
 }
@@ -996,6 +1010,30 @@ function updatePerf() {
     }
     document.getElementById("perf-gamepads").textContent =
         gpDescriptions.length ? gpDescriptions.join("; ") : "none";
+}
+
+// ─── Integer scaling ──────────────────────────────────────────────────────────
+
+function computeBestScale() {
+    const container = document.getElementById("screen-container");
+    const availW = container.parentElement.clientWidth;
+    const availH = window.innerHeight
+        - (document.querySelector(".action-bar")?.offsetHeight || 0)
+        - (document.querySelector(".status-bar")?.offsetHeight || 0)
+        - 32; // padding / borders
+    return Math.max(1, Math.floor(Math.min(availW / 160, availH / 144)));
+}
+
+function applyIntegerScale(n) {
+    integerScale = n;
+    const s = n > 0 ? n : computeBestScale();
+    if (canvas) {
+        canvas.style.width  = (160 * s) + "px";
+        canvas.style.height = (144 * s) + "px";
+    }
+    document.querySelectorAll(".scale-btn").forEach(btn => {
+        btn.classList.toggle("active", +btn.dataset.scale === n);
+    });
 }
 
 function toggleFullscreen() {
