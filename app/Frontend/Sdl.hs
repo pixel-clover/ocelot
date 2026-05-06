@@ -2,6 +2,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 {- | SDL2-backed frontend with video and audio.
 
@@ -20,6 +21,7 @@ so this frontend is interchangeable with the headless terminal mode.
 -}
 module Frontend.Sdl (
     play,
+    startupScreen,
     audioTest,
 ) where
 
@@ -42,6 +44,8 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Data.Vector.Storable.Mutable as VSM
 import qualified Data.Vector.Unboxed as V
 import Data.Word (Word64, Word8)
+import Development.GitRev (gitBranch, gitHash)
+import Foreign.C.String (peekCString)
 import Foreign.C.Types (CInt)
 import GHC.Clock (getMonotonicTimeNSec)
 import qualified Ocelot.Apu as Apu
@@ -92,12 +96,15 @@ data Hotkeys = Hotkeys
     -- ^ F11: toggle fullscreen/windowed.
     , hkGifToggle :: !(IORef Bool)
     -- ^ Shift+F12: start or stop GIF recording.
+    , hkOpenReq :: !(IORef Bool)
+    -- ^ "O": quit the current session and request a new ROM to be loaded.
     }
 
 newHotkeys :: IO Hotkeys
 newHotkeys =
     Hotkeys
         <$> newIORef False
+        <*> newIORef False
         <*> newIORef False
         <*> newIORef False
         <*> newIORef False
@@ -188,7 +195,7 @@ romDir romPath = takeDirectory romPath </> takeBaseName romPath
 slotPath :: FilePath -> Int -> FilePath
 slotPath romPath slot = romDir romPath </> ("slot" <> show slot <> ".state")
 
-play :: FilePath -> Cartridge -> Maybe BS.ByteString -> Text -> Int -> IO ()
+play :: FilePath -> Cartridge -> Maybe BS.ByteString -> Text -> Int -> IO Bool
 play romPath cart bootRom title scale = do
     let titleStr
             | T.null title = fallbackTitle romPath
@@ -206,9 +213,10 @@ play romPath cart bootRom title scale = do
     _maybeController <- case (toList controllers, ()) of
         (dev : _, _) -> Just <$> SDLGC.openController dev
         _ -> pure Nothing
+    let buildTag = T.pack $(gitBranch) <> "@" <> T.pack (take 7 $(gitHash))
     window <-
         SDL.createWindow
-            ("Ocelot - " <> title)
+            ("Ocelot Emulator (" <> buildTag <> ")")
             SDL.defaultWindow
                 { SDL.windowInitialSize =
                     SDL.V2 (fromIntegral winW) (fromIntegral winH)
@@ -245,6 +253,7 @@ play romPath cart bootRom title scale = do
     SDL.destroyRenderer renderer
     SDL.destroyWindow window
     SDL.quit
+    readIORef (hkOpenReq hk)
 
 openAudio :: MVar [Int16] -> IO SDL.AudioDevice
 openAudio buf = do
@@ -416,13 +425,14 @@ panelPrimary, panelSecondary, panelOverlay, accentOrange, accentBlue :: SDL.V4 W
 panelPrimary = SDL.V4 0x0B 0x16 0x0B 0xEC
 panelSecondary = SDL.V4 0x0E 0x1C 0x0E 0xF0
 panelOverlay = SDL.V4 0x0C 0x18 0x0C 0xDC
-accentOrange = SDL.V4 0xF7 0xA4 0x1D 0xFF
--- Green-teal replaces generic blue; feels at home on GB hardware.
-accentBlue = SDL.V4 0x4A 0xBB 0x8C 0xFF
+-- DMG LCD brightest shade — the soft yellowish-green of the original screen.
+accentOrange = SDL.V4 0x9B 0xBC 0x0F 0xFF
+-- Slightly muted teal-green for secondary accents.
+accentBlue = SDL.V4 0x5A 0xA8 0x78 0xFF
 
--- Platform accent colors: DMG = exact lightest LCD shade (#9BBC0F); CGB = atomic purple.
+-- Platform accent colors: DMG reuses the main accent; CGB = atomic purple.
 dmgAccent, cgbAccent :: SDL.V4 Word8
-dmgAccent = SDL.V4 0x9B 0xBC 0x0F 0xFF
+dmgAccent = accentOrange
 cgbAccent = SDL.V4 0xAA 0x55 0xDD 0xFF
 
 textPrimary, textSecondary, textMuted, shadowColor :: SDL.V4 Word8
@@ -557,6 +567,7 @@ renderHelpOverlay renderer winW title platformLabel speedLabel fast slot isCgb =
                 , "F12    SCREENSHOT"
                 , "SF12   RECORD GIF"
                 , "R      HARD RESET"
+                , "O      OPEN ROM"
                 ]
             ]
         rightSections =
@@ -803,6 +814,7 @@ glyphRows raw = case toUpper raw of
     '&' -> [0x0C, 0x12, 0x14, 0x08, 0x15, 0x12, 0x0D]
     '(' -> [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02]
     ')' -> [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08]
+    '>' -> [0x10, 0x08, 0x04, 0x02, 0x04, 0x08, 0x10]
     _ -> [0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04]
 
 handlePending ::
@@ -1004,6 +1016,10 @@ handleEvent hk ui jp ev = case SDL.eventPayload ev of
                     let s' = (s + 1) `mod` 10
                     writeIORef (uiCurrentSlot ui) s'
                     pushToast ui ToastInfo ("Slot " <> show s')
+            SDL.ScancodeO ->
+                when (pressed && not isRepeat) $ do
+                    writeIORef (hkOpenReq hk) True
+                    writeIORef (hkQuit hk) True
             _ -> case mapKey scancode of
                 Just btn -> Joypad.setButton btn pressed jp
                 Nothing -> pure ()
@@ -1045,6 +1061,140 @@ updateTextureRgb tex fb = do
     let bs = BS.pack (V.toList fb)
     _ <- SDL.updateTexture tex Nothing bs (fromIntegral (gbWidth * 3))
     pure ()
+
+{- | Show a startup menu before any ROM is loaded. Returns the path of the ROM the user dropped, or
+'Nothing' if the user chose to quit. Opens its own SDL window (title-bar only, no game texture).
+-}
+startupScreen :: Int -> IO (Maybe FilePath)
+startupScreen scale = do
+    let (winW0, winH0) = windowSize scale
+    SDL.initialize [SDL.InitVideo, SDL.InitEvents]
+    let buildTag = T.pack $(gitBranch) <> "@" <> T.pack (take 7 $(gitHash))
+    window <-
+        SDL.createWindow
+            ("Ocelot Emulator (" <> buildTag <> ")")
+            SDL.defaultWindow
+                { SDL.windowInitialSize = SDL.V2 (fromIntegral winW0) (fromIntegral winH0)
+                , SDL.windowResizable = True
+                }
+    renderer <-
+        SDL.createRenderer
+            window
+            (-1)
+            SDL.defaultRenderer{SDL.rendererType = SDL.AcceleratedRenderer}
+    SDL.rendererDrawBlendMode renderer $= SDL.BlendAlphaBlend
+    selRef <- newIORef (0 :: Int)
+    waitRef <- newIORef False
+    result <- startupLoop renderer window selRef waitRef
+    SDL.destroyRenderer renderer
+    SDL.destroyWindow window
+    SDL.quit
+    pure result
+
+startupLoop :: SDL.Renderer -> SDL.Window -> IORef Int -> IORef Bool -> IO (Maybe FilePath)
+startupLoop renderer window selRef waitRef = do
+    events <- SDL.pollEvents
+    mDecision <- processStartupEvents selRef waitRef events
+    case mDecision of
+        Just decision -> pure decision
+        Nothing -> do
+            SDL.V2 wW wH <- SDL.get (SDL.windowSize window)
+            let winW = fromIntegral wW :: Int
+                winH = fromIntegral wH :: Int
+            SDL.rendererDrawColor renderer $= SDL.V4 0x08 0x0E 0x08 0xFF
+            SDL.clear renderer
+            sel <- readIORef selRef
+            waiting <- readIORef waitRef
+            renderStartupUi renderer winW winH sel waiting
+            SDL.present renderer
+            threadDelay 16000
+            startupLoop renderer window selRef waitRef
+
+processStartupEvents :: IORef Int -> IORef Bool -> [SDL.Event] -> IO (Maybe (Maybe FilePath))
+processStartupEvents selRef waitRef = go
+  where
+    menuLen = 2 :: Int
+    go [] = pure Nothing
+    go (ev : rest) = case SDL.eventPayload ev of
+        SDL.QuitEvent -> pure (Just Nothing)
+        SDL.DropEvent dd -> do
+            fp <- peekCString (SDL.dropEventFile dd)
+            pure (Just (Just fp))
+        SDL.KeyboardEvent kev
+            | SDL.keyboardEventKeyMotion kev == SDL.Pressed
+            , not (SDL.keyboardEventRepeat kev) ->
+                case SDL.keysymScancode (SDL.keyboardEventKeysym kev) of
+                    SDL.ScancodeEscape -> do
+                        waiting <- readIORef waitRef
+                        if waiting
+                            then do writeIORef waitRef False; go rest
+                            else pure (Just Nothing)
+                    SDL.ScancodeUp -> do
+                        waiting <- readIORef waitRef
+                        unless waiting $ modifyIORef' selRef (\s -> (s - 1 + menuLen) `mod` menuLen)
+                        go rest
+                    SDL.ScancodeDown -> do
+                        waiting <- readIORef waitRef
+                        unless waiting $ modifyIORef' selRef (\s -> (s + 1) `mod` menuLen)
+                        go rest
+                    SDL.ScancodeReturn -> do
+                        waiting <- readIORef waitRef
+                        if waiting
+                            then go rest
+                            else do
+                                s <- readIORef selRef
+                                case s of
+                                    0 -> do writeIORef waitRef True; go rest
+                                    1 -> pure (Just Nothing)
+                                    _ -> go rest
+                    _ -> go rest
+        _ -> go rest
+
+renderStartupUi :: SDL.Renderer -> Int -> Int -> Int -> Bool -> IO ()
+renderStartupUi renderer winW winH sel waiting = do
+    let logoScale = 3
+        logoText = "OCELOT"
+        logoW = textWidth logoScale logoText
+        logoGlyphH = 7 * logoScale
+        menuItems = ["OPEN ROM", "QUIT"] :: [String]
+        rowH = 7 * 2 + 12
+        menuH = length menuItems * rowH
+        hintText
+            | waiting = "DROP A ROM FILE ON THIS WINDOW"
+            | otherwise = "DROP A ROM FILE TO START"
+        hintW = textWidth 2 hintText
+        panelW = min (winW - 40) (max (hintW + 28) 280)
+        panelH = 20 + logoGlyphH + 16 + 2 + 12 + (7 * 2) + 20 + menuH + 20
+        panelX = (winW - panelW) `div` 2
+        panelY = (winH - panelH) `div` 2
+        borderAccent = if waiting then accentBlue else accentOrange
+    drawPanel renderer panelPrimary borderAccent panelX panelY panelW panelH
+    -- Logo
+    let logoX = panelX + (panelW - logoW) `div` 2
+        logoY = panelY + 20
+    drawTextShadowed renderer logoScale accentOrange logoX logoY logoText
+    -- Divider
+    let divY = logoY + logoGlyphH + 8
+    fillRect renderer accentOrange (panelX + 14) divY (panelW - 28) 2
+    -- Hint
+    let hintX = panelX + (panelW - hintW) `div` 2
+        hintY = divY + 12
+        hintColor = if waiting then accentBlue else textSecondary
+    drawTextShadowed renderer 2 hintColor hintX hintY hintText
+    -- Menu
+    let menuStartY = hintY + 7 * 2 + 20
+    forM_ (zip [0 ..] menuItems) $ \(i, item) -> do
+        let itemY = menuStartY + i * rowH
+            isSelected = i == sel && not waiting
+            (cursor, textColor)
+                | isSelected = ("> ", accentOrange)
+                | otherwise = ("  ", if waiting then textMuted else textPrimary)
+            itemText = cursor <> item
+            itemW = textWidth 2 itemText
+            itemX = panelX + (panelW - itemW) `div` 2
+        when isSelected $
+            fillRect renderer panelSecondary (panelX + 4) (itemY - 4) (panelW - 8) (7 * 2 + 8)
+        drawTextShadowed renderer 2 textColor itemX itemY itemText
 
 {- | Diagnostic: open the audio device and play a 440 Hz sine tone for two seconds, bypassing the APU.
 If you hear nothing here, the SDL audio path is the problem; if you hear the tone, the APU is the problem.

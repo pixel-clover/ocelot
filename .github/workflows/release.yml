@@ -118,7 +118,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          stack exec -- pacman -Sy --noconfirm mingw-w64-x86_64-SDL2 mingw-w64-x86_64-pkg-config
+          stack exec -- pacman -Sy --noconfirm \
+            mingw-w64-x86_64-SDL2 \
+            mingw-w64-x86_64-pkg-config \
+            mingw-w64-x86_64-libssp
           # Expose pkg-config.exe to subsequent steps (Cabal configure looks for it in PATH)
           stack exec -- sh -c 'cygpath -w /mingw64/bin' >> "$GITHUB_PATH"
 

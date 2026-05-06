@@ -39,26 +39,26 @@
         }
 
         :root[data-theme="dark"] {
-            /* DMG-inspired: phosphor green on near-black forest panels */
-            --bg: #080e08;
-            --bg-panel: #0d1a0d;
-            --bg-input: #0a140a;
-            --bg-btn-hover: #162516;
-            --border: #1e361e;
-            --border-accent: #4a8c1e;
-            --text: #c8d8b0;
-            --text-muted: #628060;
-            --text-accent: #9bbc0f;   /* authentic DMG LCD lightest shade */
+            /* Matches desktop SDL palette exactly */
+            --bg: #080e08;               /* panelPrimary darkened */
+            --bg-panel: #0b160b;         /* panelPrimary */
+            --bg-input: #0e1c0e;         /* panelSecondary */
+            --bg-btn-hover: #101e10;
+            --border: #1e2e1e;
+            --border-accent: #5aa878;    /* accentBlue */
+            --text: #d8e8c8;             /* textPrimary */
+            --text-muted: #889880;       /* textSecondary */
+            --text-accent: #9bbc0f;      /* accentOrange / DMG LCD brightest */
             --text-link: #9bbc0f;
-            --text-heading: #739b14;
-            --toast-bg: #0d1a0d;
+            --text-heading: #8bac0f;
+            --toast-bg: #0b160b;
             --toast-border: #9bbc0f;
             --toast-text: #9bbc0f;
             --screen-bg: #000;
-            --group-bg: #0b170b;
+            --group-bg: #0b160b;
             --error-bg: rgba(200, 40, 40, 0.14);
             --error-border: #cc3030;
-            --overlay-bg: rgba(4, 8, 4, 0.88);
+            --overlay-bg: rgba(4, 8, 4, 0.90);
         }
 
         :root[data-theme="light"] {
@@ -433,11 +433,11 @@
             transition: background var(--transition-normal);
         }
 
-        .btn-group.tone-audio  { --group-accent: #4a8c1e; }   /* GB green */
-        .btn-group.tone-save   { --group-accent: #b89820; }   /* amber — save actions */
-        .btn-group.tone-view   { --group-accent: #4a8c1e; }   /* GB green */
-        .btn-group.tone-system { --group-accent: #7a6090; }   /* GBC purple-muted */
-        .btn-group.tone-info   { --group-accent: #7a6090; opacity: 0.92; }
+        .btn-group.tone-audio  { --group-accent: #9bbc0f; }   /* DMG LCD green */
+        .btn-group.tone-save   { --group-accent: #5aa878; }   /* accentBlue teal-green */
+        .btn-group.tone-view   { --group-accent: #9bbc0f; }   /* DMG LCD green */
+        .btn-group.tone-system { --group-accent: #aa55dd; }   /* cgbAccent purple */
+        .btn-group.tone-info   { --group-accent: #aa55dd; opacity: 0.92; }
 
         .btn-group-label {
             color: color-mix(in srgb, var(--group-accent) 88%, var(--text-muted));
@@ -631,12 +631,12 @@
             top: 50px;
             left: 10px;
             z-index: 40;
-            background: rgba(10, 14, 26, 0.88);
-            border: 1px solid var(--border);
+            background: rgba(14, 28, 14, 0.92);
+            border: 1px solid var(--border-accent);
             border-radius: var(--radius-sm);
             padding: 6px 10px;
             font-size: 0.62rem;
-            color: #a0a880;
+            color: var(--text);
             backdrop-filter: blur(6px);
             -webkit-backdrop-filter: blur(6px);
             min-width: 180px;
@@ -652,10 +652,10 @@
             padding: 1px 0;
         }
 
-        .perf-row span:first-child { color: #707860; }
+        .perf-row span:first-child { color: var(--text-muted); }
 
         .perf-row span:last-child {
-            color: #c8d0a0;
+            color: var(--text-accent);
             font-variant-numeric: tabular-nums;
             max-width: 160px;
             overflow: hidden;
