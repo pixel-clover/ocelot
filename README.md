@@ -113,7 +113,7 @@ ocelot
 Help menu while the emulator is running:
 
 <div align="center">
-<img alt="Ocelot Screenshot" src="docs/assets/img/help_menu_0.1.0.0.png" width="100%">
+<img alt="Ocelot Screenshot" src="docs/assets/img/help_menu_0.1.0.0.png" width="70%">
 </div>
 
 Run `ocelot --help` to see the list of available command-line options.
@@ -159,12 +159,12 @@ Ocelot is licensed under the MIT License (see [LICENSE](LICENSE)).
 ### Acknowledgements
 
 * The logo is made of [image 1](https://www.svgrepo.com/svg/28849/old-gameboy-console) and [image 2](https://www.svgrepo.com/svg/373660/haskell).
-* This project uses the following resources:
+* This project uses the following resources (for different things like testing, frontend, etc.):
     * [gb-test-roms](https://github.com/retrio/gb-test-roms)
     * [mooneye-test-suite](https://github.com/Gekkio/mooneye-test-suite)
     * [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) and [cgb-acid2](https://github.com/mattcurrie/cgb-acid2)
     * [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono)
-    * [SDL](https://github.com/castholm/SDL)
+    * [SDL](https://github.com/libsdl-org/SDL)
 
 #### Reference Implementations
 
