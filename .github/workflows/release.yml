@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: call_tests
     if: success()
+    timeout-minutes: 10
     permissions:
       contents: write
     outputs:
@@ -54,6 +55,7 @@ jobs:
     name: Build (${{ matrix.artifact_name }})
     needs: create-release
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     permissions:
       contents: write
     strategy:
@@ -75,6 +77,8 @@ jobs:
           - os: windows-latest
             artifact_name: ocelot-windows-x86_64.zip
             asset_content_type: application/zip
+            # SDL2main.c is compiled with -fstack-protector; lld needs libssp explicitly.
+            extra_ld: -optl-lssp
 
     steps:
       - name: Checkout repository
@@ -113,10 +117,17 @@ jobs:
       - name: Install SDL2 (Windows)
         if: runner.os == 'Windows'
         shell: bash
-        run: stack exec -- pacman -Sy --noconfirm mingw-w64-x86_64-SDL2
+        run: |
+          stack exec -- pacman -Sy --noconfirm \
+            mingw-w64-x86_64-SDL2 \
+            mingw-w64-x86_64-pkg-config \
+            mingw-w64-x86_64-libssp
+          # Expose pkg-config.exe to subsequent steps (Cabal configure looks for it in PATH)
+          stack exec -- sh -c 'cygpath -w /mingw64/bin' >> "$GITHUB_PATH"
 
       - name: Build release binary
-        run: stack build ocelot:exe:ocelot --ghc-options="-O2" --flag ocelot:desktop
+        shell: bash
+        run: stack build ocelot:exe:ocelot --ghc-options="-O2 ${{ matrix.extra_ld }}" --flag ocelot:desktop
 
       - name: Package artifact (Linux / macOS)
         if: runner.os != 'Windows'
@@ -149,28 +160,16 @@ jobs:
           asset_content_type: ${{ matrix.asset_content_type }}
 
   build-image:
-    name: Build Docker image (${{ matrix.platform }})
+    name: Build Docker image
     needs: call_tests
     if: success()
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
 
     steps:
-      - name: Prepare platform pair
-        run: |
-          platform="${{ matrix.platform }}"
-          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -184,63 +183,7 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract Docker labels
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/ocelot-web
-
-      - name: Build and push by digest
-        id: build
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          platforms: ${{ matrix.platform }}
-          labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/ocelot-web,push-by-digest=true,name-canonical=true,push=true
-
-      - name: Export digest
-        run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
-
-      - name: Upload digest
-        uses: actions/upload-artifact@v4
-        with:
-          name: digests-${{ env.PLATFORM_PAIR }}
-          path: /tmp/digests/*
-          if-no-files-found: error
-          retention-days: 1
-
-  merge-image:
-    name: Merge Docker image manifest
-    runs-on: ubuntu-latest
-    needs: build-image
-    if: success()
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Download digests
-        uses: actions/download-artifact@v4
-        with:
-          path: /tmp/digests
-          pattern: digests-*
-          merge-multiple: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata for Docker
+      - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -253,14 +196,10 @@ jobs:
             type=raw,value=develop,enable=${{ github.event_name == 'workflow_dispatch' }}
             type=ref,event=tag
 
-      - name: Create manifest list and push
-        working-directory: /tmp/digests
-        run: |
-          docker buildx imagetools create \
-            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf 'ghcr.io/${{ github.repository_owner }}/ocelot-web@sha256:%s ' *)
-
-      - name: Inspect image
-        if: steps.meta.outputs.version != ''
-        run: |
-          docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/ocelot-web:${{ steps.meta.outputs.version }}
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

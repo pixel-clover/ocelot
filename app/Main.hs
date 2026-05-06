@@ -4,7 +4,7 @@
 module Main (main) where
 
 import qualified Codec.Archive.Zip as Zip
-import Control.Exception (IOException, bracket_, try)
+import Control.Exception (IOException, finally, try)
 import Control.Monad (when)
 import Data.Bits (testBit, (.&.))
 import qualified Data.ByteString as BS
@@ -51,7 +51,7 @@ data Command
     | Info !FilePath
 
 data PlayOpts = PlayOpts
-    { playRomPath :: !FilePath
+    { playRomPath :: !(Maybe FilePath)
     , playBootRom :: !(Maybe FilePath)
     , playScale :: !Int
     }
@@ -135,7 +135,7 @@ romArg = strArgument (metavar "ROM-PATH" <> help "Path to a .gb or .gbc ROM file
 playOptsParser :: Parser PlayOpts
 playOptsParser =
     PlayOpts
-        <$> romArg
+        <$> optional romArg
         <*> optional
             ( strOption
                 ( long "boot-rom"
@@ -168,7 +168,13 @@ infoRom path = do
 
 playRom :: PlayOpts -> IO ()
 playRom opts = do
-    let path = playRomPath opts
+    mPath <- case playRomPath opts of
+        Just p -> pure (Just p)
+        Nothing -> Sdl.startupScreen (playScale opts)
+    mapM_ (loadAndPlay opts) mPath
+
+loadAndPlay :: PlayOpts -> FilePath -> IO ()
+loadAndPlay opts path = do
     bytes <- readRomBytes path
     bootBytes <- traverse readRomBytes (playBootRom opts)
     case parseHeader bytes of
@@ -184,10 +190,12 @@ playRom opts = do
                     let savePath = path <> ".sav"
                         battery = cartridgeHasBattery cart
                     when battery (loadSaveIfExists savePath cart)
-                    bracket_
-                        (pure ())
-                        (when battery (writeSave savePath cart))
-                        (Sdl.play path cart bootBytes (hdrTitle hdr) (playScale opts))
+                    openNew <-
+                        Sdl.play path cart bootBytes (hdrTitle hdr) (playScale opts)
+                            `finally` when battery (writeSave savePath cart)
+                    when openNew $ do
+                        mPath' <- Sdl.startupScreen (playScale opts)
+                        mapM_ (loadAndPlay opts) mPath'
                 Left err -> printNotSupported err
 
 loadSaveIfExists :: FilePath -> Cartridge.Cartridge -> IO ()

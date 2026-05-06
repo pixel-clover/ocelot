@@ -278,14 +278,27 @@ runUntilHalt cap = go 0
             cpu <- getCpu m
             if cpuHalted cpu
                 then pure n
-                else step m >> go (n + 1) m
+                else do
+                    let c0 = cpuCycles cpu
+                    step m
+                    c1 <- cpuCycles <$> getCpu m
+                    go (n + fromIntegral (c1 - c0)) m
 
+{- | Run the machine until at least @cap@ CPU M-cycles have been consumed.
+Counting M-cycles (not instruction steps) ensures that the wall-clock
+frame budget is respected regardless of the instruction mix: a CALL
+(6 M-cycles) contributes 6 toward the cap, not 1.
+-}
 runFor :: Int -> Machine -> IO Int
 runFor cap = go 0
   where
     go !n !m
         | n >= cap = pure n
-        | otherwise = step m >> go (n + 1) m
+        | otherwise = do
+            c0 <- cpuCycles <$> getCpu m
+            step m
+            c1 <- cpuCycles <$> getCpu m
+            go (n + fromIntegral (c1 - c0)) m
 
 ----------------------------------------------------------------------
 -- Per-instruction handlers
