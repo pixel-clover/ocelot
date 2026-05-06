@@ -23,6 +23,7 @@ import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, castPtr, nullPtr, plusPtr)
 import qualified Ocelot as Public
 import qualified Ocelot.Joypad as Joypad
+import qualified Ocelot.Snapshot as Snapshot
 import qualified Ocelot.Web as Web
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -353,6 +354,9 @@ ocelot_version_ptr = pure (fst versionBuffer)
 ocelot_version_len :: IO CSize
 ocelot_version_len = pure (fromIntegral (snd versionBuffer))
 
+ocelot_snapshot_version :: IO CInt
+ocelot_snapshot_version = pure (fromIntegral Snapshot.currentVersion)
+
 ocelot_last_error_ptr :: IO (Ptr Word8)
 ocelot_last_error_ptr = fst <$> readIORef lastErrorRef
 
@@ -405,6 +409,7 @@ foreign export ccall ocelot_cartridge_has_battery :: CInt -> IO CInt
 foreign export ccall ocelot_is_cgb :: CInt -> IO CInt
 foreign export ccall ocelot_version_ptr :: IO (Ptr Word8)
 foreign export ccall ocelot_version_len :: IO CSize
+foreign export ccall ocelot_snapshot_version :: IO CInt
 foreign export ccall ocelot_last_error_ptr :: IO (Ptr Word8)
 foreign export ccall ocelot_last_error_len :: IO CSize
 foreign export ccall ocelot_framebuffer_width :: IO CInt

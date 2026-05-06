@@ -21,7 +21,29 @@ A Nintendo Gameboy and Gameboy Color emulator in Haskell λ
 
 ---
 
-Ocelot is a Gameboy (DMG) and Gameboy Color (CGB) emulator written in Haskell.
+**Download the latest desktop version of Ocelot from [here](https://github.com/pixel-clover/ocelot/releases)
+or [try Ccelot in your web browser](https://pixel-clover.github.io/ocelot/).**
+
+Footage of Ocelot running a few games:
+
+<div align="center">
+
+<table>
+  <tr>
+    <td align="center"><img alt="TLZ demo" src="docs/assets/gif/01_gb_lz.gif" width="200%"><br>The Legend of Zelda: Link's Awakening</td>
+    <td align="center"><img alt="TLZ DX demo" src="docs/assets/gif/02_gbc_lzdx.gif" width="200%"><br>The Legend of Zelda: Link's Awakening DX</td>
+  </tr>
+  <tr>
+    <td align="center"><img alt="AI demo" src="docs/assets/gif/03_gb_ai.gif" width="200%"><br>Adventure Island</td>
+    <td align="center"><img alt="WL3 demo" src="docs/assets/gif/05_gbc_wl3.gif" width="200%"><br>Wario Land 3</td>
+  </tr>
+  <tr>
+    <td align="center"><img alt="FFA demo" src="docs/assets/gif/04_gb_ffa.gif" width="200%"><br>Final Fantasy Adventure</td>
+    <td align="center"><img alt="SMBDl demo" src="docs/assets/gif/06_gbc_smbd.gif" width="200%"><br>Super Mario Bros. Deluxe</td>
+  </tr>
+</table>
+
+</div>
 
 ### Key Features
 
@@ -91,12 +113,18 @@ Run the `ocelot` binary to start the emulator GUI:
 ocelot
 ```
 
+Help menu while the emulator is running:
+
+<div align="center">
+<img alt="Ocelot Screenshot" src="docs/assets/img/help_menu_0.1.0.0.png" width="100%">
+</div>
+
 Run `ocelot --help` to see the list of available command-line options.
 
 Example output:
 
 ```
-Ocelot 0.1.0.0 (main@c636b) - Gameboy (DMG) and Gameboy Color (CGB) emulator in Haskell
+Ocelot 0.1.0.0 (develop@7bb29) - Gameboy (DMG) and Gameboy Color (CGB) emulator in Haskell
 
 Usage: ocelot [-V|--version] COMMAND
 

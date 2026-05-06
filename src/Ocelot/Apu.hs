@@ -1183,16 +1183,6 @@ stepCycles totalT s0 = go totalT s0 []
              in (s'', [r, l]) -- prepended in reverse so caller's `acc' = samples ++ acc` keeps order
         | otherwise = (s, [])
 
--- | Tick each channel's frequency timer by one T-cycle.
-tickChannels :: Int -> ApuInternal -> ApuInternal
-tickChannels !t s =
-    s
-        { apuCh1 = tickSquare t (apuCh1 s)
-        , apuCh2 = tickSquare t (apuCh2 s)
-        , apuCh3 = tickWave t (apuCh3 s)
-        , apuCh4 = tickNoise t (apuCh4 s)
-        }
-
 {- | Tick the square channel by @t@ T-cycles. Handles multi-cycle ticks
 correctly: when @t@ crosses one or more period boundaries, advances
 @sqDutyPos@ by the number of crossings and computes the residual

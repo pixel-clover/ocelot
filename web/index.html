@@ -47,13 +47,13 @@
             --border: #1e2e1e;
             --border-accent: #5aa878;    /* accentBlue */
             --text: #d8e8c8;             /* textPrimary */
-            --text-muted: #889880;       /* textSecondary */
-            --text-accent: #9bbc0f;      /* accentOrange / DMG LCD brightest */
-            --text-link: #9bbc0f;
-            --text-heading: #8bac0f;
+            --text-muted: #9aab8e;       /* textSecondary */
+            --text-accent: #b4d414;      /* accentOrange / DMG LCD brightest */
+            --text-link: #b4d414;
+            --text-heading: #9bbc0f;
             --toast-bg: #0b160b;
-            --toast-border: #9bbc0f;
-            --toast-text: #9bbc0f;
+            --toast-border: #b4d414;
+            --toast-text: #b4d414;
             --screen-bg: #000;
             --group-bg: #0b160b;
             --error-bg: rgba(200, 40, 40, 0.14);
@@ -433,11 +433,11 @@
             transition: background var(--transition-normal);
         }
 
-        .btn-group.tone-audio  { --group-accent: #9bbc0f; }   /* DMG LCD green */
+        .btn-group.tone-audio  { --group-accent: #b4d414; }   /* DMG LCD green */
         .btn-group.tone-save   { --group-accent: #5aa878; }   /* accentBlue teal-green */
-        .btn-group.tone-view   { --group-accent: #9bbc0f; }   /* DMG LCD green */
-        .btn-group.tone-system { --group-accent: #aa55dd; }   /* cgbAccent purple */
-        .btn-group.tone-info   { --group-accent: #aa55dd; opacity: 0.92; }
+        .btn-group.tone-view   { --group-accent: #b4d414; }   /* DMG LCD green */
+        .btn-group.tone-system { --group-accent: #5aa878; }
+        .btn-group.tone-info   { --group-accent: #5aa878; }
 
         .btn-group-label {
             color: color-mix(in srgb, var(--group-accent) 88%, var(--text-muted));
@@ -859,6 +859,7 @@
             <option value="2">2</option>
             <option value="3">3</option>
             <option value="4">4</option>
+            <option value="5">5</option>
         </select>
         <button id="btn-save" title="Save to slot" type="button">Save</button>
         <button id="btn-load" title="Load from slot" type="button">Load</button>
@@ -942,7 +943,7 @@
                 <div class="help-row">(Start) Start</div>
                 <div class="help-row">(Select / Back) Select</div>
                 <h4>FEATURES</h4>
-                <div class="help-row">4 save state slots</div>
+                <div class="help-row">5 save state slots</div>
                 <div class="help-row">Battery save (auto)</div>
                 <div class="help-row">DMG &amp; CGB support</div>
                 <div class="help-row">Click screen to pause</div>
@@ -973,6 +974,7 @@
         <div class="about-content">
             <div class="about-info">
                 <div class="about-row"><span>Version</span><span id="about-version">--</span></div>
+                <div class="about-row"><span>Save Format</span><span id="about-save-version">--</span></div>
                 <div class="about-row"><span>ROM</span><span id="about-rom">--</span></div>
                 <div class="about-row"><span>Mode</span><span id="about-mode">--</span></div>
                 <div class="about-row"><span>Audio</span><span id="about-audio">--</span></div>

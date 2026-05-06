@@ -77,8 +77,6 @@ jobs:
           - os: windows-latest
             artifact_name: ocelot-windows-x86_64.zip
             asset_content_type: application/zip
-            # SDL2main.c is compiled with -fstack-protector; lld needs libssp explicitly.
-            extra_ld: -optl-lssp
 
     steps:
       - name: Checkout repository
@@ -120,14 +118,21 @@ jobs:
         run: |
           stack exec -- pacman -Sy --noconfirm \
             mingw-w64-x86_64-SDL2 \
-            mingw-w64-x86_64-pkg-config \
-            mingw-w64-x86_64-libssp
+            mingw-w64-x86_64-pkg-config
           # Expose pkg-config.exe to subsequent steps (Cabal configure looks for it in PATH)
           stack exec -- sh -c 'cygpath -w /mingw64/bin' >> "$GITHUB_PATH"
 
       - name: Build release binary
         shell: bash
-        run: stack build ocelot:exe:ocelot --ghc-options="-O2 ${{ matrix.extra_ld }}" --flag ocelot:desktop
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            stack build ocelot:exe:ocelot \
+              --ghc-options="-O2" \
+              --ld-option="-lssp_nonshared" \
+              --flag ocelot:desktop
+          else
+            stack build ocelot:exe:ocelot --ghc-options="-O2" --flag ocelot:desktop
+          fi
 
       - name: Package artifact (Linux / macOS)
         if: runner.os != 'Windows'

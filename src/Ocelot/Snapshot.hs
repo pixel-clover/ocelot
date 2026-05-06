@@ -32,6 +32,7 @@ format compact.
 -}
 module Ocelot.Snapshot (
     SnapshotError (..),
+    currentVersion,
     save,
     load,
 ) where

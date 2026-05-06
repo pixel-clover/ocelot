@@ -36,6 +36,8 @@ module Ocelot (
 
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Version (showVersion)
+import qualified Paths_ocelot as Paths
 #ifndef wasm32_HOST_ARCH
 import GitHash (giBranch, giHash, tGitInfoCwdTry)
 #endif
@@ -63,11 +65,9 @@ import Ocelot.Cartridge.Header (
 -- | Human-readable version string, including branch and short commit hash baked in at compile time.
 version :: Text
 #ifdef wasm32_HOST_ARCH
-version = "Ocelot 0.1.0.0"
+version = "Ocelot " <> T.pack (showVersion Paths.version)
 #else
-version = "Ocelot 0.1.0.0" <> T.pack meta
+version = "Ocelot " <> T.pack (showVersion Paths.version) <> T.pack meta
   where
-    meta = case $$tGitInfoCwdTry of
-        Left _ -> ""
-        Right gi -> " (" <> giBranch gi <> "@" <> take 5 (giHash gi) <> ")"
+    meta = either (const "") (\gi -> " (" <> giBranch gi <> "@" <> take 5 (giHash gi) <> ")") $$tGitInfoCwdTry
 #endif
