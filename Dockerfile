@@ -16,15 +16,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -sSf https://gitlab.haskell.org/haskell-wasm/ghc-wasm-meta/-/raw/master/bootstrap.sh \
     | FLAVOUR=9.6 sh
 
-# Copy only the cabal file first so that the expensive dependency build is
-# cached by Docker unless the package manifest changes.
+# Copy the cabal file and sources so cabal can configure the package during
+# the dependency-only build. The dep layer is invalidated if either changes,
+# but in practice dependencies change far less often than source.
 COPY ocelot.cabal ./
+COPY src/ src/
 RUN . /root/.ghc-wasm/env && \
     wasm32-wasi-cabal update && \
     wasm32-wasi-cabal build --only-dependencies exe:ocelot-web -f -desktop -f wasm-reactor
 
 # Build the emulator.
-COPY src/ src/
 COPY app-web/ app-web/
 RUN . /root/.ghc-wasm/env && \
     wasm32-wasi-cabal build exe:ocelot-web -f -desktop -f wasm-reactor && \

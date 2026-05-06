@@ -70,7 +70,7 @@ cd ocelot
 ```
 
 > [!NOTE]
-> If you want to run the tests and develop Ocelot further, you may want to clone the repository with
+> If you want to run the tests and develop Ocelot further, you need to clone the repository with
 > `git clone --recursive https://github.com/pixel-clover/ocelot.git`.
 > Test ROMs can then be fetched with `make test-roms`.
 
@@ -134,10 +134,12 @@ Ocelot is licensed under the MIT License (see [LICENSE](LICENSE)).
 ### Acknowledgements
 
 * The logo is made of [image 1](https://www.svgrepo.com/svg/28849/old-gameboy-console) and [image 2](https://www.svgrepo.com/svg/373660/haskell).
-* This project uses the following test ROMs for regression testing and verifying correctness of the implementation:
+* This project uses the following resources (like test ROMs for verifying correctness of the implementation, etc.):
     * [gb-test-roms](https://github.com/retrio/gb-test-roms)
     * [mooneye-test-suite](https://github.com/Gekkio/mooneye-test-suite)
     * [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) and [cgb-acid2](https://github.com/mattcurrie/cgb-acid2)
+    * [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono)
+    * [SDL](https://github.com/castholm/SDL)
 
 #### Reference Implementations
 
