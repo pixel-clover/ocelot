@@ -438,7 +438,7 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode au
         SDL.rendererDrawColor renderer $= SDL.V4 0 0 0 255
         SDL.clear renderer
         SDL.copy renderer texture Nothing (Just dst)
-        renderUi renderer ui titleStr machine' paused fast nowUi winW winH
+        renderUi renderer ui titleStr machine' paused fast paceMode nowUi winW winH
         SDL.present renderer
         frame <- recordPresentedFrame ui
 
@@ -558,8 +558,8 @@ data UiSection = UiSection
     , sectionRows :: ![String]
     }
 
-renderUi :: SDL.Renderer -> UiState -> String -> Machine -> Bool -> Bool -> Word64 -> Int -> Int -> IO ()
-renderUi renderer ui title machine paused fast nowNs winW winH = do
+renderUi :: SDL.Renderer -> UiState -> String -> Machine -> Bool -> Bool -> PaceMode -> Word64 -> Int -> Int -> IO ()
+renderUi renderer ui title machine paused fast paceMode nowNs winW winH = do
     helpVisible <- readIORef (uiHelpVisible ui)
     perfVisible <- readIORef (uiPerfVisible ui)
     slot <- readIORef (uiCurrentSlot ui)
@@ -601,7 +601,7 @@ renderUi renderer ui title machine paused fast nowNs winW winH = do
         renderBadge renderer 20 dsBadgeY 168 34 panelSecondary accentBlue "DOUBLE SPEED"
 
     when (perfVisible && not overlayVisible) $
-        renderPerfOverlay renderer winW frameTimes
+        renderPerfOverlay renderer winW paceMode frameTimes
 
     forM_ toast (renderToast renderer winW winH overlayVisible)
 
@@ -703,8 +703,8 @@ showFixed1 x =
         d = floor (x * 10) `mod` 10 :: Int
      in show i <> "." <> show d
 
-renderPerfOverlay :: SDL.Renderer -> Int -> [Word64] -> IO ()
-renderPerfOverlay renderer winW frameTimes = do
+renderPerfOverlay :: SDL.Renderer -> Int -> PaceMode -> [Word64] -> IO ()
+renderPerfOverlay renderer winW paceMode frameTimes = do
     let fps = case frameTimes of
             (_ : _ : _) ->
                 let spanNs = fromIntegral (last frameTimes - head frameTimes) :: Double
@@ -712,12 +712,18 @@ renderPerfOverlay renderer winW frameTimes = do
                  in n / (spanNs / 1e9)
             _ -> 0
         fpsStr = "FPS  " <> showFixed1 fps
-        w = textWidth 2 fpsStr + 28
-        h = 34
+        paceStr = "PACE  " <> paceModeLabel paceMode
+        w = max (textWidth 2 fpsStr) (textWidth 2 paceStr) + 28
+        h = 54
         x = winW - w - 20
         y = 64
     drawPanel renderer panelSecondary accentBlue x y w h
     drawTextShadowed renderer 2 textPrimary (x + 14) (y + 9) fpsStr
+    drawTextShadowed renderer 2 textMuted (x + 14) (y + 29) paceStr
+
+paceModeLabel :: PaceMode -> String
+paceModeLabel PaceVSync = "VSYNC"
+paceModeLabel PaceSleep = "SLEEP FALLBACK"
 
 sectionH :: UiSection -> Int
 sectionH s = length (sectionRows s) * 20 + 46
