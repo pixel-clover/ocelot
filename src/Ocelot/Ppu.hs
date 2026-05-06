@@ -35,6 +35,7 @@ module Ocelot.Ppu (
     advance,
     framebuffer,
     framebufferRgb,
+    copyFramebufferRgb,
     framebufferRgbBytes,
     framebufferRgbaBytes,
     framebufferWidth,
@@ -57,6 +58,7 @@ import qualified Data.Vector.Unboxed as V
 import Data.Vector.Unboxed.Mutable (IOVector)
 import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word16, Word8)
+import Foreign.Ptr (Ptr)
 import Foreign.Storable (pokeByteOff)
 
 framebufferWidth, framebufferHeight :: Int
@@ -244,18 +246,24 @@ palette RAM (BG only this slice; sprites are still DMG-style).
 framebufferRgb :: PpuState -> IO (Vector Word8)
 framebufferRgb ps = V.freeze (ppuFbRgb ps)
 
--- | Copy the RGB framebuffer into a packed strict 'ByteString' in RGB888 order.
-framebufferRgbBytes :: PpuState -> IO ByteString
-framebufferRgbBytes ps =
-    BSI.create rgbBytes $ \ptr -> go ptr 0
+-- | Copy the RGB framebuffer into a caller-provided buffer in RGB888 order.
+copyFramebufferRgb :: Ptr Word8 -> PpuState -> IO ()
+copyFramebufferRgb ptr ps = go 0
   where
     rgbBytes = framebufferWidth * framebufferHeight * 3
-    go !ptr !i
+    go !i
         | i >= rgbBytes = pure ()
         | otherwise = do
             px <- MV.unsafeRead (ppuFbRgb ps) i
             pokeByteOff ptr i px
-            go ptr (i + 1)
+            go (i + 1)
+
+-- | Copy the RGB framebuffer into a packed strict 'ByteString' in RGB888 order.
+framebufferRgbBytes :: PpuState -> IO ByteString
+framebufferRgbBytes ps =
+    BSI.create rgbBytes $ \ptr -> copyFramebufferRgb ptr ps
+  where
+    rgbBytes = framebufferWidth * framebufferHeight * 3
 
 -- | Copy the RGB framebuffer into a packed strict 'ByteString' in RGBA8888 order.
 framebufferRgbaBytes :: PpuState -> IO ByteString

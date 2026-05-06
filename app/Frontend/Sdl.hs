@@ -34,6 +34,7 @@ import Control.Exception (IOException, SomeException, try)
 import Control.Monad (forM_, unless, when)
 import Data.Bits (testBit)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BSI
 import Data.Char (isSpace, toUpper)
 import Data.Foldable (toList)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
@@ -49,6 +50,7 @@ import Data.Word (Word64, Word8)
 import Development.GitRev (gitBranch, gitHash)
 import Foreign.C.String (peekCString)
 import Foreign.C.Types (CInt)
+import Foreign.ForeignPtr (ForeignPtr, withForeignPtr)
 import GHC.Clock (getMonotonicTimeNSec)
 import qualified Ocelot.Apu as Apu
 import qualified Ocelot.Bus as Bus
@@ -96,6 +98,24 @@ axisDeadzone = 8000
 -- | Cap the audio buffer so an emulator running ahead of the audio device doesn't accumulate unbounded samples.
 maxBufferedSamples :: Int
 maxBufferedSamples = 9600 -- ~100 ms of stereo samples at 48 kHz
+
+rgbFramebufferBytes :: Int
+rgbFramebufferBytes = gbWidth * gbHeight * 3
+
+data RgbFrameStage = RgbFrameStage
+    { rgbFramePtr :: !(ForeignPtr Word8)
+    , rgbFrameBytes :: !BS.ByteString
+    }
+
+newRgbFrameStage :: IO RgbFrameStage
+newRgbFrameStage = do
+    fp <- BSI.mallocByteString rgbFramebufferBytes
+    pure
+        ( RgbFrameStage
+            { rgbFramePtr = fp
+            , rgbFrameBytes = BSI.fromForeignPtr fp 0 rgbFramebufferBytes
+            }
+        )
 
 data Hotkeys = Hotkeys
     { hkQuit :: !(IORef Bool)
@@ -266,6 +286,7 @@ play romPath cart bootRom title scale = do
             SDL.RGB24
             SDL.TextureAccessStreaming
             (SDL.V2 (fromIntegral gbWidth) (fromIntegral gbHeight))
+    rgbStage <- newRgbFrameStage
 
     audioBuf <- newMVar Seq.empty
     audioDev <- openAudio audioBuf
@@ -278,7 +299,7 @@ play romPath cart bootRom title scale = do
 
     SDL.setAudioDevicePlaybackState audioDev SDL.Play
 
-    loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode audioDev audioPlaying audioBuf window
+    loop romPath titleStr hk ui machineRef cart bootRom renderer texture rgbStage paceMode audioDev audioPlaying audioBuf window
 
     SDL.setAudioDevicePlaybackState audioDev SDL.Pause
     SDL.closeAudioDevice audioDev
@@ -350,13 +371,14 @@ loop ::
     Maybe BS.ByteString ->
     SDL.Renderer ->
     SDL.Texture ->
+    RgbFrameStage ->
     PaceMode ->
     SDL.AudioDevice ->
     IORef Bool ->
     MVar (Seq.Seq Int16) ->
     SDL.Window ->
     IO ()
-loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode audioDev audioPlaying audioBuf window = do
+loop romPath titleStr hk ui machineRef cart bootRom renderer texture rgbStage paceMode audioDev audioPlaying audioBuf window = do
     quit <- readIORef (hkQuit hk)
     unless quit $ do
         machine <- readIORef machineRef
@@ -433,8 +455,9 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode au
                     (SDL.P (SDL.V2 (fromIntegral dstX) (fromIntegral dstY)))
                     (SDL.V2 (fromIntegral dstW) (fromIntegral dstH))
 
-        fbRgb <- Ppu.framebufferRgbBytes (Bus.busPpu (machineBus machine'))
-        updateTextureRgb texture fbRgb
+        withForeignPtr (rgbFramePtr rgbStage) $ \ptr ->
+            Ppu.copyFramebufferRgb ptr (Bus.busPpu (machineBus machine'))
+        updateTextureRgb texture (rgbFrameBytes rgbStage)
         SDL.rendererDrawColor renderer $= SDL.V4 0 0 0 255
         SDL.clear renderer
         SDL.copy renderer texture Nothing (Just dst)
@@ -459,7 +482,7 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode au
             modifyIORef' (uiFrameTimes ui) $ \ts ->
                 let ts' = ts ++ [frameEndNs]
                  in if length ts' > 61 then drop 1 ts' else ts'
-        loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode audioDev audioPlaying audioBuf window
+        loop romPath titleStr hk ui machineRef cart bootRom renderer texture rgbStage paceMode audioDev audioPlaying audioBuf window
 
 gatherEvents :: Bool -> Word64 -> Maybe Word64 -> IO [SDL.Event]
 gatherEvents waitMode nowNs mDeadline

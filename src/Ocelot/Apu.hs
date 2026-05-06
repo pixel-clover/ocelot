@@ -47,6 +47,7 @@ import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int16)
 import Data.Vector.Unboxed (Vector)
 import qualified Data.Vector.Unboxed as V
+import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word16, Word8)
 import qualified Ocelot.Snapshot.Binary as Snap
 
@@ -62,19 +63,28 @@ gbTCycleRate = 4194304
 frameSequencerPeriod :: Int
 frameSequencerPeriod = 8192
 
+initialSampleQueueCapacity :: Int
+initialSampleQueueCapacity = 4096
+
 ----------------------------------------------------------------------
 -- State types
 ----------------------------------------------------------------------
 
 data ApuState = ApuState
     { apuRef :: !(IORef ApuInternal)
-    , apuSamples :: !(IORef [Int16])
-    -- ^ Pending stereo samples interleaved L,R, newest first.
-    -- Drained via 'drainSamples'.
+    , apuSamples :: !SampleQueue
+    -- ^ Pending stereo samples interleaved L,R in chronological order.
+    -- Stored in a reusable ring buffer and drained via 'drainSamples'.
     , apuCgb :: !(IORef Bool)
     -- ^ True when the host is a CGB. Controls power-off semantics: on
     -- CGB the length counters are reset on power-off, while on DMG they
     -- are preserved. Set via 'setCgbMode' at machine construction time.
+    }
+
+data SampleQueue = SampleQueue
+    { sampleQueueBuffer :: !(IORef (MV.IOVector Int16))
+    , sampleQueueStart :: !(IORef Int)
+    , sampleQueueLength :: !(IORef Int)
     }
 
 data ApuInternal = ApuInternal
@@ -267,7 +277,7 @@ initialApuInternal =
 initial :: IO ApuState
 initial = do
     ref <- newIORef initialApuInternal
-    samples <- newIORef []
+    samples <- newSampleQueue
     cgb <- newIORef False
     pure (ApuState ref samples cgb)
 
@@ -281,10 +291,7 @@ setCgbMode b apu = writeIORef (apuCgb apu) b
 the queue.
 -}
 drainSamples :: ApuState -> IO [Int16]
-drainSamples apu = do
-    xs <- readIORef (apuSamples apu)
-    writeIORef (apuSamples apu) []
-    pure (reverse xs)
+drainSamples apu = drainSampleQueue (apuSamples apu)
 
 {- | Encode the APU's full internal state to a flat byte string. The
 sample queue is intentionally not snapshotted (it's drained per frame
@@ -300,7 +307,75 @@ loadState :: ByteString -> ApuState -> IO ()
 loadState bs apu = do
     let s = Snap.runCursor decodeApu bs
     writeIORef (apuRef apu) s
-    writeIORef (apuSamples apu) []
+    clearSampleQueue (apuSamples apu)
+
+newSampleQueue :: IO SampleQueue
+newSampleQueue = do
+    buffer <- MV.new initialSampleQueueCapacity
+    SampleQueue
+        <$> newIORef buffer
+        <*> newIORef 0
+        <*> newIORef 0
+
+clearSampleQueue :: SampleQueue -> IO ()
+clearSampleQueue queue = do
+    writeIORef (sampleQueueStart queue) 0
+    writeIORef (sampleQueueLength queue) 0
+
+drainSampleQueue :: SampleQueue -> IO [Int16]
+drainSampleQueue queue = do
+    buffer <- readIORef (sampleQueueBuffer queue)
+    start <- readIORef (sampleQueueStart queue)
+    len <- readIORef (sampleQueueLength queue)
+    let cap = MV.length buffer
+        go !remaining !acc
+            | remaining <= 0 = pure acc
+            | otherwise = do
+                let ix = (start + remaining - 1) `mod` cap
+                sample <- MV.read buffer ix
+                go (remaining - 1) (sample : acc)
+    samples <- go len []
+    clearSampleQueue queue
+    pure samples
+
+appendStereoSample :: SampleQueue -> Int16 -> Int16 -> IO ()
+appendStereoSample queue left right = do
+    ensureSampleQueueCapacity queue 2
+    buffer <- readIORef (sampleQueueBuffer queue)
+    start <- readIORef (sampleQueueStart queue)
+    len <- readIORef (sampleQueueLength queue)
+    let cap = MV.length buffer
+        ix = (start + len) `mod` cap
+    MV.write buffer ix left
+    MV.write buffer ((ix + 1) `mod` cap) right
+    writeIORef (sampleQueueLength queue) (len + 2)
+
+ensureSampleQueueCapacity :: SampleQueue -> Int -> IO ()
+ensureSampleQueueCapacity queue extra = do
+    buffer <- readIORef (sampleQueueBuffer queue)
+    len <- readIORef (sampleQueueLength queue)
+    let needed = len + extra
+        cap = MV.length buffer
+    if needed <= cap
+        then pure ()
+        else do
+            start <- readIORef (sampleQueueStart queue)
+            let newCap = until (>= needed) (* 2) (max initialSampleQueueCapacity cap)
+            newBuffer <- MV.new newCap
+            copySampleQueue buffer start len newBuffer
+            writeIORef (sampleQueueBuffer queue) newBuffer
+            writeIORef (sampleQueueStart queue) 0
+
+copySampleQueue :: MV.IOVector Int16 -> Int -> Int -> MV.IOVector Int16 -> IO ()
+copySampleQueue source start len dest = go 0
+  where
+    cap = MV.length source
+    go !i
+        | i >= len = pure ()
+        | otherwise = do
+            sample <- MV.read source ((start + i) `mod` cap)
+            MV.write dest i sample
+            go (i + 1)
 
 encodeApu :: ApuInternal -> BB.Builder
 encodeApu s =
@@ -1103,11 +1178,8 @@ advance :: Int -> ApuState -> IO ()
 advance mCycles apu = do
     s0 <- readIORef (apuRef apu)
     let !totalT = mCycles * 4
-        (s1, emitted) = stepCycles totalT s0
+    s1 <- stepCycles totalT s0 (apuSamples apu)
     writeIORef (apuRef apu) s1
-    case emitted of
-        [] -> pure ()
-        _ -> modifyIORef' (apuSamples apu) (emitted ++)
 
 {- | Step the APU forward by @totalT@ T-cycles. Internally batches by
 the next-event horizon: each iteration advances by @chunk@ T-cycles
@@ -1118,20 +1190,20 @@ per-T-cycle implementation (channel events fire at chunk-end, then
 the frame event, then the sample event) but cuts allocation by
 ~10-100× for typical workloads where channel periods are in the
 hundreds and the sample-emission stride (~88 T-cycles for 48 kHz)
-dominates.
+dominates, while writing emitted samples directly into the reusable
+queue instead of building intermediate lists.
 -}
-stepCycles :: Int -> ApuInternal -> (ApuInternal, [Int16])
-stepCycles totalT s0 = go totalT s0 []
+stepCycles :: Int -> ApuInternal -> SampleQueue -> IO ApuInternal
+stepCycles totalT s0 sampleQueue = go totalT s0
   where
-    go !remaining !s !acc
-        | remaining <= 0 = (s, acc)
-        | otherwise =
+    go !remaining !s
+        | remaining <= 0 = pure s
+        | otherwise = do
             let !chunk = computeChunk remaining s
                 !s1 = batchAdvance chunk s
                 !s2 = handleFrameEvent s1
-                (!s3, !samples) = handleSamples s2
-                !acc' = samples ++ acc
-             in go (remaining - chunk) s3 acc'
+            s3 <- handleSamples s2
+            go (remaining - chunk) s3
 
     -- Smallest cycle count until any timer fires its event.
     computeChunk !remaining !s =
@@ -1180,8 +1252,10 @@ stepCycles totalT s0 = go totalT s0 []
         | apuSampleAcc s >= gbTCycleRate =
             let !s' = s{apuSampleAcc = apuSampleAcc s - gbTCycleRate}
                 (!s'', !l, !r) = mixSample s'
-             in (s'', [r, l]) -- prepended in reverse so caller's `acc' = samples ++ acc` keeps order
-        | otherwise = (s, [])
+             in do
+                    appendStereoSample sampleQueue l r
+                    pure s''
+        | otherwise = pure s
 
 {- | Tick the square channel by @t@ T-cycles. Handles multi-cycle ticks
 correctly: when @t@ crosses one or more period boundaries, advances

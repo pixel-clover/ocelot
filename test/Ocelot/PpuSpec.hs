@@ -4,10 +4,12 @@ module Ocelot.PpuSpec (spec) where
 
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BSI
 import Data.IORef (readIORef, writeIORef)
 import qualified Data.Vector.Unboxed as V
 import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word8)
+import Foreign.ForeignPtr (withForeignPtr)
 import Ocelot.Ppu
 import Test.Hspec
 
@@ -109,6 +111,16 @@ spec = do
             rgb <- framebufferRgb ps
             rgbBytes <- framebufferRgbBytes ps
             BS.unpack rgbBytes `shouldBe` V.toList rgb
+
+        it "RGB framebuffer copies reuse caller-provided storage" $ do
+            ps <- freshOn
+            writeVram ps [(0, 0xFF), (1, 0x00)]
+            _ <- advance ((80 + 172) `div` 4) ps
+            rgb <- framebufferRgb ps
+            fp <- BSI.mallocByteString (framebufferWidth * framebufferHeight * 3)
+            let copied = BSI.fromForeignPtr fp 0 (framebufferWidth * framebufferHeight * 3)
+            withForeignPtr fp $ \ptr -> copyFramebufferRgb ptr ps
+            BS.unpack copied `shouldBe` V.toList rgb
 
         it "RGBA byte snapshots expand RGB pixels with opaque alpha" $ do
             ps <- freshOn
