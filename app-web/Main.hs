@@ -14,13 +14,12 @@ import qualified Data.IntMap.Strict as IntMap
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import qualified Data.Vector.Unboxed as V
 import Data.Word (Word8)
 import Foreign.C.Types (CInt (..), CSize (..))
 import Foreign.Marshal.Alloc (free, mallocBytes)
-import Foreign.Marshal.Array (pokeArray)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, castPtr, nullPtr, plusPtr)
+import Foreign.Storable (poke)
 import qualified Ocelot as Public
 import qualified Ocelot.Joypad as Joypad
 import qualified Ocelot.Snapshot as Snapshot
@@ -134,22 +133,31 @@ destroyHandle handle = do
 
 copyFramebuffer :: SessionHandle -> IO ()
 copyFramebuffer handle = do
-    fb <- Web.framebufferRgb (shSession handle)
-    pokeArray (shFramebufferPtr handle) (V.toList fb)
+    fb <- Web.framebufferRgbBytes (shSession handle)
+    BS.useAsCStringLen fb $ \(src, len) ->
+        copyBytes (shFramebufferPtr handle) (castPtr src) len
 
 appendAudio :: SessionHandle -> [Int16] -> IO ()
 appendAudio handle newSamples = do
     currentLen <- readIORef (shAudioLen handle)
     let room = shAudioCap handle - currentLen
-        clipped = take room newSamples
-    pokeArray (shAudioPtr handle `plusInt16Ptr` currentLen) clipped
-    writeIORef (shAudioLen handle) (currentLen + length clipped)
+    written <- pokeAudioSamples (shAudioPtr handle `plusInt16Ptr` currentLen) room newSamples
+    writeIORef (shAudioLen handle) (currentLen + written)
 
 plusInt16Ptr :: Ptr Int16 -> Int -> Ptr Int16
 plusInt16Ptr ptr offset = ptr `plusPtrBytes` (offset * 2)
 
 plusPtrBytes :: Ptr a -> Int -> Ptr a
 plusPtrBytes ptr bytes = castPtr (castPtr ptr `plusPtr` bytes)
+
+pokeAudioSamples :: Ptr Int16 -> Int -> [Int16] -> IO Int
+pokeAudioSamples ptr0 room0 = go ptr0 room0 0
+  where
+    go _ 0 written _ = pure written
+    go _ _ written [] = pure written
+    go ptr room written (sample : rest) = do
+        poke ptr sample
+        go (plusInt16Ptr ptr 1) (room - 1) (written + 1) rest
 
 normalizeButton :: CInt -> Maybe Joypad.Button
 normalizeButton code = case fromIntegral code :: Int of

@@ -30,6 +30,14 @@ spec = do
             fb <- Web.framebufferRgb session
             V.length fb `shouldBe` Web.framebufferWidth * Web.framebufferHeight * 3
 
+        it "exposes framebuffer bytes that match the RGB framebuffer snapshot" $ do
+            let rom = synthNoMbcRom BS.empty
+            Right session <- Web.loadSession rom
+            Web.runFrame session
+            fb <- Web.framebufferRgb session
+            fbBytes <- Web.framebufferRgbBytes session
+            BS.unpack fbBytes `shouldBe` V.toList fb
+
         it "accepts joypad input and round-trips save states" $ do
             let rom = synthNoMbcRom BS.empty
             Right session <- Web.loadSession rom

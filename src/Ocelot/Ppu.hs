@@ -35,6 +35,7 @@ module Ocelot.Ppu (
     advance,
     framebuffer,
     framebufferRgb,
+    framebufferRgbBytes,
     framebufferWidth,
     framebufferHeight,
     setCgbMode,
@@ -44,6 +45,8 @@ module Ocelot.Ppu (
 
 import Control.Monad (unless, when)
 import Data.Bits (shiftL, shiftR, testBit, (.&.), (.|.))
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Internal as BSI
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int8)
 import Data.List (sortBy)
@@ -53,6 +56,7 @@ import qualified Data.Vector.Unboxed as V
 import Data.Vector.Unboxed.Mutable (IOVector)
 import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word16, Word8)
+import Foreign.Storable (pokeByteOff)
 
 framebufferWidth, framebufferHeight :: Int
 framebufferWidth = 160
@@ -238,6 +242,19 @@ palette RAM (BG only this slice; sprites are still DMG-style).
 -}
 framebufferRgb :: PpuState -> IO (Vector Word8)
 framebufferRgb ps = V.freeze (ppuFbRgb ps)
+
+-- | Copy the RGB framebuffer into a packed strict 'ByteString' in RGB888 order.
+framebufferRgbBytes :: PpuState -> IO ByteString
+framebufferRgbBytes ps =
+    BSI.create rgbBytes $ \ptr -> go ptr 0
+  where
+    rgbBytes = framebufferWidth * framebufferHeight * 3
+    go !ptr !i
+        | i >= rgbBytes = pure ()
+        | otherwise = do
+            px <- MV.unsafeRead (ppuFbRgb ps) i
+            pokeByteOff ptr i px
+            go ptr (i + 1)
 
 {- | Tell the PPU whether it's running a CGB cart (called once by the
 bus at startup). Affects BG attribute fetching and the sprite-priority

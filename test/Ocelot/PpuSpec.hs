@@ -3,6 +3,7 @@
 module Ocelot.PpuSpec (spec) where
 
 import Data.Bits ((.&.))
+import qualified Data.ByteString as BS
 import Data.IORef (readIORef, writeIORef)
 import qualified Data.Vector.Unboxed as V
 import qualified Data.Vector.Unboxed.Mutable as MV
@@ -100,6 +101,14 @@ spec = do
             _ <- advance ((80 + 172) `div` 4) ps
             fb <- framebuffer ps
             fb V.! 0 `shouldBe` 0x03
+
+        it "RGB byte snapshots match immutable RGB framebuffer snapshots" $ do
+            ps <- freshOn
+            writeVram ps [(0, 0xFF), (1, 0x00)]
+            _ <- advance ((80 + 172) `div` 4) ps
+            rgb <- framebufferRgb ps
+            rgbBytes <- framebufferRgbBytes ps
+            BS.unpack rgbBytes `shouldBe` V.toList rgb
 
     describe "register I/O" $ do
         it "STAT read returns mode bits 0..1 from the current mode" $ do
