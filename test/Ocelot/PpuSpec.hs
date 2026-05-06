@@ -110,6 +110,14 @@ spec = do
             rgbBytes <- framebufferRgbBytes ps
             BS.unpack rgbBytes `shouldBe` V.toList rgb
 
+        it "RGBA byte snapshots expand RGB pixels with opaque alpha" $ do
+            ps <- freshOn
+            writeVram ps [(0, 0xFF), (1, 0x00)]
+            _ <- advance ((80 + 172) `div` 4) ps
+            rgb <- framebufferRgb ps
+            rgbaBytes <- framebufferRgbaBytes ps
+            BS.unpack rgbaBytes `shouldBe` rgbaFromRgb (V.toList rgb)
+
     describe "register I/O" $ do
         it "STAT read returns mode bits 0..1 from the current mode" $ do
             ps <- freshOn
@@ -233,3 +241,8 @@ readDot ps = readIORef (ppuDot ps)
 
 readLy :: PpuState -> IO Word8
 readLy ps = readIORef (ppuLy ps)
+
+rgbaFromRgb :: [Word8] -> [Word8]
+rgbaFromRgb [] = []
+rgbaFromRgb (r : g : b : rest) = r : g : b : 255 : rgbaFromRgb rest
+rgbaFromRgb _ = error "RGB framebuffer length must be a multiple of 3"

@@ -648,7 +648,8 @@ function renderAudio() {
     if (sampleCount === 0) return;
     const ptr = e.ocelot_audio_buffer_ptr(emu);
     const samples = new Int16Array(e.memory.buffer, ptr, sampleCount);
-    audioNode.port.postMessage(samples.slice());
+    const chunk = samples.slice();
+    audioNode.port.postMessage(chunk, [chunk.buffer]);
     e.ocelot_clear_audio_buffer(emu);
     if ((++audioFrameCounter % 6) === 0) {
         audioNode.port.postMessage("query-level");
@@ -873,13 +874,7 @@ function tickEmulator(now) {
     const fbLen = e.ocelot_framebuffer_len(emu);
     const fb = new Uint8ClampedArray(e.memory.buffer, fbPtr, fbLen);
     if (!imageData) imageData = ctx.createImageData(160, 144);
-    const pixels = imageData.data;
-    for (let src = 0, dst = 0; src < fb.length; src += 3, dst += 4) {
-        pixels[dst] = fb[src];
-        pixels[dst + 1] = fb[src + 1];
-        pixels[dst + 2] = fb[src + 2];
-        pixels[dst + 3] = 255;
-    }
+    imageData.data.set(fb);
     ctx.putImageData(imageData, 0, 0);
     lastFrameMs = performance.now() - t0;
     updateFps(now);

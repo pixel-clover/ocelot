@@ -44,7 +44,7 @@ data Runtime = Runtime
     }
 
 framebufferBytes :: Int
-framebufferBytes = Web.framebufferWidth * Web.framebufferHeight * 3
+framebufferBytes = Web.framebufferWidth * Web.framebufferHeight * 4
 
 audioCapacitySamples :: Int
 audioCapacitySamples = 32768 * 2
@@ -133,7 +133,7 @@ destroyHandle handle = do
 
 copyFramebuffer :: SessionHandle -> IO ()
 copyFramebuffer handle = do
-    fb <- Web.framebufferRgbBytes (shSession handle)
+    fb <- Web.framebufferRgbaBytes (shSession handle)
     BS.useAsCStringLen fb $ \(src, len) ->
         copyBytes (shFramebufferPtr handle) (castPtr src) len
 

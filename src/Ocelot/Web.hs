@@ -12,6 +12,7 @@ module Ocelot.Web (
     setButton,
     framebufferRgb,
     framebufferRgbBytes,
+    framebufferRgbaBytes,
     drainAudioSamples,
     saveState,
     loadState,
@@ -81,6 +82,10 @@ framebufferRgb session =
 framebufferRgbBytes :: WebSession -> IO ByteString
 framebufferRgbBytes session =
     Ppu.framebufferRgbBytes (Bus.busPpu (machineBus (wsMachine session)))
+
+framebufferRgbaBytes :: WebSession -> IO ByteString
+framebufferRgbaBytes session =
+    Ppu.framebufferRgbaBytes (Bus.busPpu (machineBus (wsMachine session)))
 
 drainAudioSamples :: WebSession -> IO [Int16]
 drainAudioSamples session =

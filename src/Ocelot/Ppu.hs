@@ -36,6 +36,7 @@ module Ocelot.Ppu (
     framebuffer,
     framebufferRgb,
     framebufferRgbBytes,
+    framebufferRgbaBytes,
     framebufferWidth,
     framebufferHeight,
     setCgbMode,
@@ -255,6 +256,25 @@ framebufferRgbBytes ps =
             px <- MV.unsafeRead (ppuFbRgb ps) i
             pokeByteOff ptr i px
             go ptr (i + 1)
+
+-- | Copy the RGB framebuffer into a packed strict 'ByteString' in RGBA8888 order.
+framebufferRgbaBytes :: PpuState -> IO ByteString
+framebufferRgbaBytes ps =
+    BSI.create rgbaBytes $ \ptr -> go ptr 0 0
+  where
+    rgbBytes = framebufferWidth * framebufferHeight * 3
+    rgbaBytes = framebufferWidth * framebufferHeight * 4
+    go !ptr !src !dst
+        | src >= rgbBytes = pure ()
+        | otherwise = do
+            r <- MV.unsafeRead (ppuFbRgb ps) src
+            g <- MV.unsafeRead (ppuFbRgb ps) (src + 1)
+            b <- MV.unsafeRead (ppuFbRgb ps) (src + 2)
+            pokeByteOff ptr dst r
+            pokeByteOff ptr (dst + 1) g
+            pokeByteOff ptr (dst + 2) b
+            pokeByteOff ptr (dst + 3) (255 :: Word8)
+            go ptr (src + 3) (dst + 4)
 
 {- | Tell the PPU whether it's running a CGB cart (called once by the
 bus at startup). Affects BG attribute fetching and the sprite-priority
