@@ -53,8 +53,8 @@ The current tree is small; this layout describes the target structure as the pro
 Do not invent modules that do not yet exist when answering questions, but do place new modules according to this map.
 
 - `app/Main.hs`: executable entry point. Argument parsing, ROM loading from disk, headless terminal mode, and the SDL frontend dispatch live here.
-- `app/Frontend/Sdl.hs`: SDL2-backed frontend with video, audio, and hotkeys (pause, fast-forward, save states with 10 slots, load state, screenshot,
-  GIF recording, ROM switching). Includes a startup screen for drag-and-drop ROM loading when no ROM is provided at launch.
+- `app/Frontend/Sdl.hs`: SDL2-backed frontend with video, audio, and hotkeys (pause, fast-forward, save states with 5 slots, load state, screenshot,
+  GIF recording, ROM switching). Includes a startup screen with a native file picker and drag-and-drop fallback for ROM loading when no ROM is provided at launch.
 - `app-web/Main.hs`: WASM executable entry point. Exposes the emulator to JavaScript via exported WASM functions; compiled with the GHC WASM
   toolchain (`wasm32-wasi-cabal`, `-f -desktop -f wasm-reactor`).
 - `src/`: library code. Public API root is `Ocelot` (re-exports the curated public surface).

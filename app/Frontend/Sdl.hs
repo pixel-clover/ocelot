@@ -64,7 +64,13 @@ import qualified SDL.Input.GameController as SDLGC
 import System.Directory (createDirectoryIfMissing, findExecutable)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeBaseName, takeDirectory, (</>))
-import System.Process (readProcess, readProcessWithExitCode)
+#ifdef mingw32_HOST_OS
+import System.Process (readProcess)
+#elif defined(darwin_HOST_OS)
+import System.Process (readProcess)
+#else
+import System.Process (readProcessWithExitCode)
+#endif
 
 gbWidth, gbHeight :: Int
 gbWidth = 160
@@ -515,7 +521,9 @@ renderPauseOverlay renderer winW title platformLabel speedLabel fast slot isCgb 
                 , "F1     OPEN HELP"
                 , "F5     SAVE STATE"
                 , "F7     LOAD STATE"
+                , "F6     SLOT SELECT"
                 , "F12    SCREENSHOT"
+                , "SF12   RECORD GIF"
                 ]
             , UiSection
                 "SESSION"

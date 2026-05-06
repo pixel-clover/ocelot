@@ -110,12 +110,12 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Integer scaling for SDL frontend (`--scale N`, 1–5; default 4) and web frontend (Auto/1×/2×/3×/4× in settings panel)
 - [x] Audio output via SDL audio device with callback-drained shared buffer
 - [x] In-memory snapshot save and load (`Ocelot.Snapshot.save`/`load`) with versioned binary format
-- [x] Persistent save states: F5 saves, F7 loads; 10 slots cycled with F6; files written to `<romdir>/<romstem>/slot<n>.state`
+- [x] Persistent save states: F5 saves, F7 loads; 5 slots (1-5) cycled with F6; files written to `<romdir>/<romstem>/slot<n>.state`
 - [x] Screenshot capture: F12 writes a P6 PPM to `<romdir>/<romstem>/screenshot-<timestamp>.ppm`
 - [x] GIF recording: Shift+F12 toggles capture; frames are palette-quantized and written to `<romdir>/<romstem>/recording-<timestamp>.gif`
 - [x] Pause toggle (Space) and fast-forward (Tab held, 4x)
 - [x] Frame step and reset hotkeys
-- [x] Startup screen: drag-and-drop ROM loading when launched without a ROM argument; keyboard-navigable menu with `> OPEN ROM` and `QUIT`
+- [x] Startup screen: native OS file picker on `> OPEN ROM` (zenity/kdialog on Linux, osascript on macOS, PowerShell on Windows) with drag-and-drop fallback; keyboard-navigable menu with `> OPEN ROM` and `QUIT`
 - [x] Open ROM hotkey (O) while playing: saves battery, exits the current session, and returns to the startup screen
 - [ ] PNG screenshot output (currently PPM)
 
