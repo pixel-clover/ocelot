@@ -1,4 +1,4 @@
-FROM debian:trixie-slim AS build
+FROM --platform=linux/amd64 debian:trixie-slim AS build
 
 WORKDIR /src
 
@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     jq \
+    make \
     unzip \
     xz-utils \
     zstd \
@@ -15,18 +16,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -sSf https://gitlab.haskell.org/haskell-wasm/ghc-wasm-meta/-/raw/master/bootstrap.sh \
     | FLAVOUR=9.6 sh
 
-ENV PATH="/root/.ghc-wasm/bin:${PATH}"
-
 # Copy only the cabal file first so that the expensive dependency build is
 # cached by Docker unless the package manifest changes.
 COPY ocelot.cabal ./
-RUN wasm32-wasi-cabal update && \
+RUN . /root/.ghc-wasm/env && \
+    wasm32-wasi-cabal update && \
     wasm32-wasi-cabal build --only-dependencies exe:ocelot-web -f -desktop -f wasm-reactor
 
 # Build the emulator.
 COPY src/ src/
 COPY app-web/ app-web/
-RUN wasm32-wasi-cabal build exe:ocelot-web -f -desktop -f wasm-reactor && \
+RUN . /root/.ghc-wasm/env && \
+    wasm32-wasi-cabal build exe:ocelot-web -f -desktop -f wasm-reactor && \
     cp "$(wasm32-wasi-cabal list-bin exe:ocelot-web -f -desktop -f wasm-reactor)" ocelot.wasm
 
 # Pinned to a specific minor for reproducibility; bump deliberately when needed.
