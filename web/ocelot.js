@@ -5,6 +5,9 @@ let emu = 0;
 let running = false;
 let rafId = null;
 let canvas, ctx, imageData;
+let imageDataBuffer = null;
+let imageDataPtr = 0;
+let imageDataLen = 0;
 let BUTTONS = {};
 
 // Audio state
@@ -719,6 +722,10 @@ async function destroyCurrentSession() {
     emu = 0;
     currentRomName = "";
     currentRomTitle = "";
+    imageData = null;
+    imageDataBuffer = null;
+    imageDataPtr = 0;
+    imageDataLen = 0;
     syncLedState();
 }
 
@@ -847,6 +854,17 @@ function frameLoop(now) {
     tickEmulator(now);
 }
 
+function getFramebufferImageData(ptr, len) {
+    const buffer = wasm.instance.exports.memory.buffer;
+    if (!imageData || imageDataBuffer !== buffer || imageDataPtr !== ptr || imageDataLen !== len) {
+        imageData = new ImageData(new Uint8ClampedArray(buffer, ptr, len), 160, 144);
+        imageDataBuffer = buffer;
+        imageDataPtr = ptr;
+        imageDataLen = len;
+    }
+    return imageData;
+}
+
 function tickEmulator(now) {
     if (!running || !emu) return;
     if (now - lastFrameTime < frameInterval) return;
@@ -872,10 +890,7 @@ function tickEmulator(now) {
     renderAudio();
     const fbPtr = e.ocelot_framebuffer_ptr(emu);
     const fbLen = e.ocelot_framebuffer_len(emu);
-    const fb = new Uint8ClampedArray(e.memory.buffer, fbPtr, fbLen);
-    if (!imageData) imageData = ctx.createImageData(160, 144);
-    imageData.data.set(fb);
-    ctx.putImageData(imageData, 0, 0);
+    ctx.putImageData(getFramebufferImageData(fbPtr, fbLen), 0, 0);
     lastFrameMs = performance.now() - t0;
     updateFps(now);
 }
