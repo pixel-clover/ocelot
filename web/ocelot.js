@@ -1178,6 +1178,9 @@ function applyIntegerScale(n) {
     if (canvas) {
         canvas.style.width = w + "px";
         canvas.style.height = h + "px";
+        // Integer modes (n >= 0): nearest-neighbour keeps pixels sharp.
+        // Non-integer modes (Fit / Stretch): bilinear avoids jagged artefacts.
+        canvas.style.imageRendering = n < 0 ? "auto" : "pixelated";
     }
 
     // In fullscreen the canvas is flex-centered inside a 100vw×100vh container,
