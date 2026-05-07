@@ -465,14 +465,15 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode au
         -- Hard cap at 1800 frames (60 s); auto-stop when reached.
         gifRec <- readIORef (uiGifFrames ui)
         case gifRec of
-            Just fs | even frame ->
-                if length fs >= 1800
-                    then do
-                        writeIORef (uiGifFrames ui) Nothing
-                        saveGifRecording romPath ui fs
-                    else do
-                        fbRgbFrame <- Bus.framebufferRgb (machineBus machine')
-                        writeIORef (uiGifFrames ui) (Just (fbRgbFrame : fs))
+            Just fs
+                | even frame ->
+                    if length fs >= 1800
+                        then do
+                            writeIORef (uiGifFrames ui) Nothing
+                            saveGifRecording romPath ui fs
+                        else do
+                            fbRgbFrame <- Bus.framebufferRgb (machineBus machine')
+                            writeIORef (uiGifFrames ui) (Just (fbRgbFrame : fs))
             _ -> pure ()
 
         unless fast (paceFrame paceMode frameStartNs)
