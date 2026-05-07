@@ -158,7 +158,7 @@ Ocelot is licensed under the MIT License (see [LICENSE](LICENSE)).
 
 ### Acknowledgements
 
-* The logo is made of [image 1](https://www.svgrepo.com/svg/28849/old-game boy-console) and [image 2](https://www.svgrepo.com/svg/373660/haskell).
+* The logo is made of [image 1](https://www.svgrepo.com/svg/28849/old-gameboy-console) and [image 2](https://www.svgrepo.com/svg/373660/haskell).
 * This project uses the following resources (for different things like testing, frontend, etc.):
     * [gb-test-roms](https://github.com/retrio/gb-test-roms)
     * [mooneye-test-suite](https://github.com/Gekkio/mooneye-test-suite)
