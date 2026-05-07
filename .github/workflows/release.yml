@@ -114,6 +114,7 @@ jobs:
         shell: bash
         run: |
           stack exec -- pacman -Sy --noconfirm \
+            mingw-w64-x86_64-toolchain \
             mingw-w64-x86_64-SDL2 \
             mingw-w64-x86_64-pkg-config
           # Expose pkg-config.exe to subsequent steps (Cabal configure looks for it in PATH)
@@ -125,6 +126,7 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then
             stack build ocelot:exe:ocelot \
               --ghc-options="-O2" \
+              --ld-option="-lssp" \
               --ld-option="-lssp_nonshared" \
               --flag ocelot:desktop
           else

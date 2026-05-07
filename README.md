@@ -113,7 +113,7 @@ ocelot
 Help menu while the emulator is running:
 
 <div align="center">
-<img alt="Ocelot Screenshot" src="docs/assets/img/help_menu_0.1.0.0.png" width="70%">
+<img alt="Ocelot Screenshot" src="docs/assets/img/help_menu_0.1.0.0.png" width="100%">
 </div>
 
 Run `ocelot --help` to see the list of available command-line options.
