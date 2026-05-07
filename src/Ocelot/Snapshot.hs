@@ -68,7 +68,7 @@ magic :: ByteString
 magic = BS.pack [0x4F, 0x43, 0x53, 0x31] -- "OCS1"
 
 currentVersion :: Word32
-currentVersion = 8
+currentVersion = 1
 
 cpuLen, timerLen, joyLen, ppuRegLen :: Int
 cpuLen = 24
