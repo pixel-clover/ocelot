@@ -14,13 +14,11 @@ import qualified Data.IntMap.Strict as IntMap
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import qualified Data.Vector.Unboxed as V
 import Data.Word (Word8)
 import Foreign.C.Types (CInt (..), CSize (..))
 import Foreign.Marshal.Alloc (free, mallocBytes)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, castPtr, nullPtr, plusPtr)
-import Foreign.Storable (poke)
 import qualified Ocelot as Public
 import qualified Ocelot.Joypad as Joypad
 import qualified Ocelot.Snapshot as Snapshot
@@ -136,12 +134,11 @@ copyFramebuffer :: SessionHandle -> IO ()
 copyFramebuffer handle =
     Web.copyFramebufferRgba (shFramebufferPtr handle) (shSession handle)
 
-appendAudio :: SessionHandle -> V.Vector Int16 -> IO ()
-appendAudio handle newSamples = do
+drainAudioIntoHandle :: SessionHandle -> IO ()
+drainAudioIntoHandle handle = do
     currentLen <- readIORef (shAudioLen handle)
     let room = shAudioCap handle - currentLen
-        written = min room (V.length newSamples)
-    pokeAudioSamples (shAudioPtr handle `plusInt16Ptr` currentLen) newSamples written
+    written <- Web.drainAudioSamplesInto (shAudioPtr handle `plusInt16Ptr` currentLen) room (shSession handle)
     writeIORef (shAudioLen handle) (currentLen + written)
 
 plusInt16Ptr :: Ptr Int16 -> Int -> Ptr Int16
@@ -149,14 +146,6 @@ plusInt16Ptr ptr offset = ptr `plusPtrBytes` (offset * 2)
 
 plusPtrBytes :: Ptr a -> Int -> Ptr a
 plusPtrBytes ptr bytes = castPtr (castPtr ptr `plusPtr` bytes)
-
-pokeAudioSamples :: Ptr Int16 -> V.Vector Int16 -> Int -> IO ()
-pokeAudioSamples ptr0 samples count = go ptr0 0
-  where
-    go _ i | i >= count = pure ()
-    go ptr i = do
-        poke ptr (V.unsafeIndex samples i)
-        go (plusInt16Ptr ptr 1) (i + 1)
 
 normalizeButton :: CInt -> Maybe Joypad.Button
 normalizeButton code = case fromIntegral code :: Int of
@@ -237,8 +226,7 @@ ocelot_run_frame sid = do
             Left err -> setLastError (displayException err) >> pure 0
             Right () -> do
                 copyFramebuffer handle
-                newSamples <- Web.drainAudioSamplesVector (shSession handle)
-                appendAudio handle newSamples
+                drainAudioIntoHandle handle
                 clearLastError
                 pure 1
     pure (fromMaybe 0 result)

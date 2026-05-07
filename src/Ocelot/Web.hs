@@ -16,6 +16,7 @@ module Ocelot.Web (
     copyFramebufferRgba,
     drainAudioSamples,
     drainAudioSamplesVector,
+    drainAudioSamplesInto,
     saveState,
     loadState,
     extractSaveData,
@@ -101,6 +102,10 @@ drainAudioSamples session =
 drainAudioSamplesVector :: WebSession -> IO (V.Vector Int16)
 drainAudioSamplesVector session =
     Bus.drainAudioSamplesVector (machineBus (wsMachine session))
+
+drainAudioSamplesInto :: Ptr Int16 -> Int -> WebSession -> IO Int
+drainAudioSamplesInto ptr capacity session =
+    Bus.drainAudioSamplesInto ptr capacity (machineBus (wsMachine session))
 
 saveState :: WebSession -> IO ByteString
 saveState = Snapshot.save . wsMachine

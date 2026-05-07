@@ -6,6 +6,7 @@ import Data.Bits ((.&.), (.|.))
 import Data.Maybe (catMaybes, fromMaybe)
 import qualified Data.Vector.Unboxed as V
 import Data.Word (Word16, Word8)
+import Foreign.Marshal.Array (allocaArray, peekArray)
 import qualified Numeric
 import Ocelot.Apu
 import Test.Hspec
@@ -224,6 +225,21 @@ spec = do
             vectorSamples <- drainSamplesVector apuVector
 
             V.toList vectorSamples `shouldBe` listSamples
+
+        it "pointer drains copy bounded samples and clear the queue" $ do
+            apuList <- freshSquareWaveApu
+            advance 17556 apuList
+            expected <- take 16 <$> drainSamples apuList
+
+            apuPtr <- freshSquareWaveApu
+            advance 17556 apuPtr
+            copied <- allocaArray 16 $ \ptr -> do
+                n <- drainSamplesInto ptr 16 apuPtr
+                samples <- peekArray n ptr
+                pure (n, samples)
+
+            copied `shouldBe` (16, expected)
+            drainSamples apuPtr `shouldReturn` []
 
     describe "high-pass filter" $ do
         it "DC offset decays to near-zero after running a silent (all-DAC-off) APU for many frames" $ do
