@@ -64,7 +64,8 @@ See [ROADMAP.md](ROADMAP.md) for the list of implemented and planned features.
 
 ##### A. Desktop
 
-You can download the latest pre-built desktop binaries (Linux and macOS) from the project's [release page](https://github.com/pixel-clover/ocelot/releases).
+You can download the latest pre-built desktop binaries (Linux and macOS) from the
+project's [release page](https://github.com/pixel-clover/ocelot/releases).
 
 ##### B. Web
 

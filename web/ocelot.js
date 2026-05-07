@@ -353,6 +353,36 @@ async function createWasiBridge() {
             bytes(statPtr, 1)[0] = filetypeCharacterDevice;
             return errnoSuccess;
         },
+        fd_fdstat_set_flags(fd, _flags) {
+            return fd <= 2 ? errnoSuccess : errnoBadf;
+        },
+        fd_fdstat_set_rights(fd, _fsRightsBase, _fsRightsInheriting) {
+            return fd <= 2 ? errnoSuccess : errnoBadf;
+        },
+        fd_advise() {
+            return errnoBadf;
+        },
+        fd_allocate() {
+            return errnoBadf;
+        },
+        fd_pread() {
+            return errnoBadf;
+        },
+        fd_pwrite() {
+            return errnoBadf;
+        },
+        fd_readdir() {
+            return errnoBadf;
+        },
+        fd_renumber() {
+            return errnoBadf;
+        },
+        fd_filestat_set_size() {
+            return errnoBadf;
+        },
+        fd_filestat_set_times() {
+            return errnoBadf;
+        },
         fd_seek() {
             return errnoBadf;
         },
@@ -383,7 +413,28 @@ async function createWasiBridge() {
         path_filestat_get() {
             return errnoNoent;
         },
+        path_filestat_set_times() {
+            return errnoNoent;
+        },
+        path_create_directory() {
+            return errnoNoent;
+        },
+        path_link() {
+            return errnoNoent;
+        },
+        path_remove_directory() {
+            return errnoNoent;
+        },
+        path_rename() {
+            return errnoNoent;
+        },
         path_readlink() {
+            return errnoNoent;
+        },
+        path_symlink() {
+            return errnoNoent;
+        },
+        path_unlink_file() {
             return errnoNoent;
         },
         clock_res_get(_clockId, resolutionPtr) {
@@ -418,6 +469,9 @@ async function createWasiBridge() {
         imports: {wasi_snapshot_preview1: wasiImport},
         initialize(instance) {
             memory = instance.exports.memory;
+            if (typeof instance.exports._initialize === "function") {
+                instance.exports._initialize();
+            }
         },
     };
 }
@@ -634,18 +688,17 @@ function startGpListening(rbtn, btnName) {
         }
     }, 50);
 
-    function onEsc(ev) {
-        if (ev.code === "Escape") {
-            ev.preventDefault();
-            cleanup();
-        }
+    function onKey(ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (ev.code === "Escape") cleanup();
     }
 
-    document.addEventListener("keydown", onEsc, true);
+    document.addEventListener("keydown", onKey, true);
 
     function cleanup() {
         clearInterval(interval);
-        document.removeEventListener("keydown", onEsc, true);
+        document.removeEventListener("keydown", onKey, true);
         rbtn.classList.remove("listening");
         rbtn.textContent = gpBtnDisplayName(btnName);
         activeGpRemapCleanup = null;
@@ -673,7 +726,10 @@ function pauseForOverlay() {
     overlayDepth++;
     if (running) {
         running = false;
-        if (rafId) cancelAnimationFrame(rafId);
+        if (rafId) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
+        }
         if (audioCtx) audioCtx.suspend();
     }
 }
@@ -812,8 +868,17 @@ async function populateRecentRoms() {
         select.style.display = "none";
         return;
     }
-    const entries = await getRecentRoms();
-    entries.sort((a, b) => b.timestamp - a.timestamp);
+    const allEntries = await getRecentRoms();
+    allEntries.sort((a, b) => b.timestamp - a.timestamp);
+    // Deduplicate by name: keep only the most recent entry per ROM name.
+    // Old entries used the filename as the DB key; new entries use sha256:<hash>.
+    // Both can coexist after a schema migration, producing visual duplicates.
+    const seen = new Set();
+    const entries = allEntries.filter(e => {
+        if (seen.has(e.name)) return false;
+        seen.add(e.name);
+        return true;
+    });
     if (entries.length === 0) {
         select.style.display = "none";
         return;
@@ -1326,6 +1391,10 @@ function updatePerf() {
     document.getElementById("perf-rom").textContent = currentRomTitle || "N/A";
     document.getElementById("perf-mode").textContent =
         emu ? (wasm.instance.exports.ocelot_is_cgb(emu) ? "CGB" : "DMG") : "N/A";
+    if (!running) {
+        document.getElementById("perf-fps").textContent = "-- FPS";
+        document.getElementById("perf-frame-ms").textContent = "-- ms";
+    }
     document.getElementById("perf-audio").textContent =
         audioCtx && audioNode
             ? `${audioCtx.state}` +
