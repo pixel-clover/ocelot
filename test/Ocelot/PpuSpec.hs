@@ -130,6 +130,16 @@ spec = do
             rgbaBytes <- framebufferRgbaBytes ps
             BS.unpack rgbaBytes `shouldBe` rgbaFromRgb (V.toList rgb)
 
+        it "RGBA framebuffer copies reuse caller-provided storage" $ do
+            ps <- freshOn
+            writeVram ps [(0, 0xFF), (1, 0x00)]
+            _ <- advance ((80 + 172) `div` 4) ps
+            rgb <- framebufferRgb ps
+            fp <- BSI.mallocByteString (framebufferWidth * framebufferHeight * 4)
+            let copied = BSI.fromForeignPtr fp 0 (framebufferWidth * framebufferHeight * 4)
+            withForeignPtr fp $ \ptr -> copyFramebufferRgba ptr ps
+            BS.unpack copied `shouldBe` rgbaFromRgb (V.toList rgb)
+
     describe "register I/O" $ do
         it "STAT read returns mode bits 0..1 from the current mode" $ do
             ps <- freshOn

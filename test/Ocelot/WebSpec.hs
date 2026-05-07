@@ -63,6 +63,14 @@ spec = do
             samples <- Web.drainAudioSamples session
             length samples `shouldSatisfy` (>= 0)
 
+        it "drains audio samples as a vector consistently with the list path" $ do
+            let rom = synthNoMbcRom BS.empty
+            Right session <- Web.loadSession rom
+            Web.runFrame session
+            samples <- Web.drainAudioSamplesVector session
+            V.length samples `shouldSatisfy` (>= 0)
+            Web.drainAudioSamples session `shouldReturn` []
+
 isLeft :: Either a b -> Bool
 isLeft (Left _) = True
 isLeft (Right _) = False

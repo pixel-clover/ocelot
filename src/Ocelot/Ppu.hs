@@ -1,5 +1,4 @@
 {-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE TupleSections #-}
 
 {- | Gameboy Picture Processing Unit (DMG only).
 
@@ -36,6 +35,7 @@ module Ocelot.Ppu (
     framebuffer,
     framebufferRgb,
     copyFramebufferRgb,
+    copyFramebufferRgba,
     framebufferRgbBytes,
     framebufferRgbaBytes,
     framebufferWidth,
@@ -258,6 +258,23 @@ copyFramebufferRgb ptr ps = go 0
             pokeByteOff ptr i px
             go (i + 1)
 
+-- | Copy the RGB framebuffer into a caller-provided buffer in RGBA8888 order.
+copyFramebufferRgba :: Ptr Word8 -> PpuState -> IO ()
+copyFramebufferRgba ptr ps = go 0 0
+  where
+    rgbBytes = framebufferWidth * framebufferHeight * 3
+    go !src !dst
+        | src >= rgbBytes = pure ()
+        | otherwise = do
+            r <- MV.unsafeRead (ppuFbRgb ps) src
+            g <- MV.unsafeRead (ppuFbRgb ps) (src + 1)
+            b <- MV.unsafeRead (ppuFbRgb ps) (src + 2)
+            pokeByteOff ptr dst r
+            pokeByteOff ptr (dst + 1) g
+            pokeByteOff ptr (dst + 2) b
+            pokeByteOff ptr (dst + 3) (255 :: Word8)
+            go (src + 3) (dst + 4)
+
 -- | Copy the RGB framebuffer into a packed strict 'ByteString' in RGB888 order.
 framebufferRgbBytes :: PpuState -> IO ByteString
 framebufferRgbBytes ps =
@@ -268,21 +285,9 @@ framebufferRgbBytes ps =
 -- | Copy the RGB framebuffer into a packed strict 'ByteString' in RGBA8888 order.
 framebufferRgbaBytes :: PpuState -> IO ByteString
 framebufferRgbaBytes ps =
-    BSI.create rgbaBytes $ \ptr -> go ptr 0 0
+    BSI.create rgbaBytes $ \ptr -> copyFramebufferRgba ptr ps
   where
-    rgbBytes = framebufferWidth * framebufferHeight * 3
     rgbaBytes = framebufferWidth * framebufferHeight * 4
-    go !ptr !src !dst
-        | src >= rgbBytes = pure ()
-        | otherwise = do
-            r <- MV.unsafeRead (ppuFbRgb ps) src
-            g <- MV.unsafeRead (ppuFbRgb ps) (src + 1)
-            b <- MV.unsafeRead (ppuFbRgb ps) (src + 2)
-            pokeByteOff ptr dst r
-            pokeByteOff ptr (dst + 1) g
-            pokeByteOff ptr (dst + 2) b
-            pokeByteOff ptr (dst + 3) (255 :: Word8)
-            go ptr (src + 3) (dst + 4)
 
 {- | Tell the PPU whether it's running a CGB cart (called once by the
 bus at startup). Affects BG attribute fetching and the sprite-priority
@@ -600,6 +605,31 @@ computeStatLine ps = do
 -- Line renderer (BG + window + sprites)
 ----------------------------------------------------------------------
 
+data LineRenderContext = LineRenderContext
+    { lineLy :: !Int
+    , lineCgb :: !Bool
+    , lineBgActive :: !Bool
+    , lineWinEnabled :: !Bool
+    , lineBgp :: !Word8
+    , lineWly :: !Int
+    , lineWy :: !Int
+    , lineWx :: !Int
+    , lineScy :: !Int
+    , lineScx :: !Int
+    , lineBgMapBase :: !Int
+    , lineWindowMapBase :: !Int
+    , lineUnsignedTiles :: !Bool
+    , lineRenderMode :: !CgbRenderMode
+    }
+
+data SpriteLineContext = SpriteLineContext
+    { spriteLineMasterOn :: !Bool
+    , spriteLineHeight :: !Int
+    , spriteLineObp0 :: !Word8
+    , spriteLineObp1 :: !Word8
+    , spriteLineCandidates :: ![Sprite]
+    }
+
 renderLine :: PpuState -> IO ()
 renderLine ps = do
     ly <- readIORef (ppuLy ps)
@@ -612,99 +642,144 @@ renderLine ps = do
         bgActive = cgb || bgWinEnabled
         winEnabled = testBit lcdc 5 && bgActive
         spritesEnabled = testBit lcdc 1
+        unsignedTiles = testBit lcdc 4
+        bgMapBase = if testBit lcdc 3 then 0x1C00 else 0x1800
+        windowMapBase = if testBit lcdc 6 then 0x1C00 else 0x1800
     bgp <- readIORef (ppuBgp ps)
+    scy <- fromIntegral <$> readIORef (ppuScy ps) :: IO Int
+    scx <- fromIntegral <$> readIORef (ppuScx ps) :: IO Int
     -- Snapshot WLY for this line so mid-line increments don't leak into
     -- the same scanline's pixel addressing.
     wly <- readIORef (ppuWindowLine ps)
     wy <- fromIntegral <$> readIORef (ppuWy ps) :: IO Int
     wx <- fromIntegral <$> readIORef (ppuWx ps) :: IO Int
+    renderMode <- readIORef (ppuRenderMode ps)
     let windowOnThisLine = winEnabled && lyI >= wy && wx <= 166
-    -- Per-pixel BG info: (color index 0..3, optional CGB attribute byte).
-    bgPixels <-
-        if not bgActive
-            then pure (replicate framebufferWidth (0 :: Word8, 0 :: Word8))
-            else
-                mapM
-                    (bgOrWindowPixel ps cgb lyI winEnabled wly)
-                    [0 .. framebufferWidth - 1]
+        ctx =
+            LineRenderContext
+                { lineLy = lyI
+                , lineCgb = cgb
+                , lineBgActive = bgActive
+                , lineWinEnabled = winEnabled
+                , lineBgp = bgp
+                , lineWly = wly
+                , lineWy = wy
+                , lineWx = wx
+                , lineScy = scy
+                , lineScx = scx
+                , lineBgMapBase = bgMapBase
+                , lineWindowMapBase = windowMapBase
+                , lineUnsignedTiles = unsignedTiles
+                , lineRenderMode = renderMode
+                }
+    spriteCtx <-
+        if spritesEnabled
+            then Just <$> prepareSpriteLine ps cgb lyI lcdc
+            else pure Nothing
+    renderPixelsForLine ps ctx spriteCtx
     -- Increment WLY if the window was actually drawn this line.
     when windowOnThisLine (writeIORef (ppuWindowLine ps) (wly + 1))
-    let bgIdxes = map fst bgPixels
-        bgShades = map (paletteApply bgp) bgIdxes
-    finalPixels <-
-        if spritesEnabled
-            then overlaySprites ps cgb lyI lcdc bgPixels bgShades
-            else pure (map (,Nothing) bgShades)
-    let fbBase = lyI * framebufferWidth
-        finalShades = map fst finalPixels
-    mapM_
-        (\(i, sh) -> MV.write (ppuFb ps) (fbBase + i) sh)
-        (zip [0 ..] finalShades)
-    -- Mirror the line into the RGB framebuffer.
-    mode <- readIORef (ppuRenderMode ps)
-    writeRgbLine ps mode lyI bgPixels finalPixels
 
-{- | Write one rendered scanline into 'ppuFbRgb'.
+renderPixelsForLine :: PpuState -> LineRenderContext -> Maybe SpriteLineContext -> IO ()
+renderPixelsForLine ps ctx mSpriteCtx = go 0
+  where
+    fbBase = lineLy ctx * framebufferWidth
+    rgbBase = lineLy ctx * framebufferWidth * 3
 
-Per pixel routing depends on the render mode:
+    go !x
+        | x >= framebufferWidth = pure ()
+        | otherwise = do
+            (!bgIdx, !bgAttr) <- bgPixelAt ps ctx x
+            let !bgShade = paletteApply (lineBgp ctx) bgIdx
+            (!finalShade, mHit) <- case mSpriteCtx of
+                Just spriteCtx ->
+                    resolveSpritePixel ps ctx spriteCtx x bgIdx bgAttr bgShade
+                Nothing -> pure (bgShade, Nothing)
+            MV.write (ppuFb ps) (fbBase + x) finalShade
+            rgb <- pixelRgb ps (lineRenderMode ctx) bgIdx bgAttr finalShade mHit
+            writeRgbPixel (rgbBase + x * 3) rgb
+            go (x + 1)
 
-* 'RenderDmg' (DMG hardware on DMG cart): the final shade goes through
-  the hardcoded greenish-DMG palette ('dmgShadeRgb').
-* 'RenderCgbCompat' (CGB hardware on DMG cart): the final shade indexes
-  into CGB BG palette 0 (for BG\/window pixels) or OBJ palette 0\/1
-  (for sprite pixels, picked by OAM attr bit 4). The auto-palette is
-  pre-loaded into palette RAM at startup.
-* 'RenderCgbFull' (CGB cart): BG attribute byte selects palette 0..7
-  in BG palette RAM; OAM attr bits 0..2 select OBJ palette 0..7.
--}
-writeRgbLine ::
+    writeRgbPixel off (r, g, b) = do
+        MV.write (ppuFbRgb ps) off r
+        MV.write (ppuFbRgb ps) (off + 1) g
+        MV.write (ppuFbRgb ps) (off + 2) b
+
+bgPixelAt :: PpuState -> LineRenderContext -> Int -> IO (Word8, Word8)
+bgPixelAt ps ctx x
+    | not (lineBgActive ctx) = pure (0, 0)
+    | inWindow =
+        tilePixelAt
+            ps
+            (lineCgb ctx)
+            (lineUnsignedTiles ctx)
+            (lineWindowMapBase ctx)
+            (x + 7 - lineWx ctx)
+            (lineWly ctx)
+    | otherwise =
+        tilePixelAt
+            ps
+            (lineCgb ctx)
+            (lineUnsignedTiles ctx)
+            (lineBgMapBase ctx)
+            ((lineScx ctx + x) .&. 0xFF)
+            ((lineScy ctx + lineLy ctx) .&. 0xFF)
+  where
+    inWindow =
+        lineWinEnabled ctx
+            && lineLy ctx >= lineWy ctx
+            && (x + 7) >= lineWx ctx
+
+tilePixelAt :: PpuState -> Bool -> Bool -> Int -> Int -> Int -> IO (Word8, Word8)
+tilePixelAt ps cgb unsigned mapBase col row = do
+    let !tileX = col `shiftR` 3
+        !tileY = row `shiftR` 3
+        !mapIdx = mapBase + tileY * 32 + tileX
+        vram = ppuVram ps
+    tileNum <- MV.read vram mapIdx
+    attr <-
+        if cgb
+            then MV.read vram (0x2000 + mapIdx)
+            else pure 0
+    let hflip = cgb && testBit attr 5
+        vflip = cgb && testBit attr 6
+        tileBank = if cgb && testBit attr 3 then 0x2000 else 0
+        rowInTile0 = row .&. 7
+        rowInTile = if vflip then 7 - rowInTile0 else rowInTile0
+        !tileBase =
+            if unsigned
+                then fromIntegral tileNum * 16
+                else 0x1000 + fromIntegral (fromIntegral tileNum :: Int8) * 16
+        !rowOff = tileBank + tileBase + rowInTile * 2
+    byteLow <- MV.read vram rowOff
+    byteHigh <- MV.read vram (rowOff + 1)
+    let colInTile0 = col .&. 7
+        colInTile = if hflip then colInTile0 else 7 - colInTile0
+        idx =
+            (if testBit byteHigh colInTile then 2 else 0)
+                + (if testBit byteLow colInTile then 1 else 0)
+    pure (idx, attr)
+
+pixelRgb ::
     PpuState ->
     CgbRenderMode ->
-    Int ->
-    [(Word8, Word8)] ->
-    [(Word8, Maybe (Sprite, Word8))] ->
-    IO ()
-writeRgbLine ps mode lyI bgPixels finalPixels = do
-    let baseRgb = lyI * framebufferWidth * 3
-        writePx i (r, g, b) = do
-            let off = baseRgb + i * 3
-            MV.write (ppuFbRgb ps) off r
-            MV.write (ppuFbRgb ps) (off + 1) g
-            MV.write (ppuFbRgb ps) (off + 2) b
-    case mode of
-        RenderDmg ->
-            mapM_
-                (\(i, (sh, _)) -> writePx i (dmgShadeRgb sh))
-                (zip [0 :: Int ..] finalPixels)
-        RenderCgbCompat ->
-            mapM_
-                ( \(i, (sh, mHit)) -> do
-                    rgb <- case mHit of
-                        Just (s, _) ->
-                            -- DMG OBJ uses OBP0 (attr bit 4 = 0) or OBP1
-                            -- (attr bit 4 = 1); compat mode routes that to
-                            -- CGB OBJ palette 0 or 1, indexed by the
-                            -- already-applied DMG shade.
-                            let pal = if testBit (spriteAttr s) 4 then 1 else 0
-                             in cgbPalRgb (ppuObjPalRam ps) pal sh
-                        Nothing -> cgbPalRgb (ppuBgPalRam ps) 0 sh
-                    writePx i rgb
-                )
-                (zip [0 :: Int ..] finalPixels)
-        RenderCgbFull ->
-            mapM_
-                ( \(i, (idx, attr), (sh, mHit)) -> do
-                    rgb <- case mHit of
-                        Just (s, sIdx) -> cgbObjRgb ps (spriteAttr s) sIdx
-                        Nothing
-                            -- attr is always meaningful in RenderCgbFull
-                            -- (CGB cart on CGB host); branch kept for the
-                            -- defensive sh fallback if BG layer is off.
-                            | otherwise -> cgbBgRgb ps attr idx
-                    _ <- pure sh -- sh unused in CGB-full path (BG color from attr palette)
-                    writePx i rgb
-                )
-                (zip3 [0 :: Int ..] bgPixels finalPixels)
+    Word8 ->
+    Word8 ->
+    Word8 ->
+    Maybe (Sprite, Word8) ->
+    IO (Word8, Word8, Word8)
+pixelRgb ps mode bgIdx bgAttr finalShade mHit = case mode of
+    RenderDmg -> pure (dmgShadeRgb finalShade)
+    RenderCgbCompat ->
+        case mHit of
+            Just (s, _) ->
+                let pal = if testBit (spriteAttr s) 4 then 1 else 0
+                 in cgbPalRgb (ppuObjPalRam ps) pal finalShade
+            Nothing -> cgbPalRgb (ppuBgPalRam ps) 0 finalShade
+    RenderCgbFull ->
+        case mHit of
+            Just (s, sIdx) -> cgbObjRgb ps (spriteAttr s) sIdx
+            Nothing -> cgbBgRgb ps bgAttr bgIdx
 
 {- | Look up a CGB palette color from a palette RAM IOVector by
 (palette index 0..7, color index 0..3).
@@ -736,74 +811,7 @@ cgbObjRgb ps attr colorIdx = do
     hi <- MV.read (ppuObjPalRam ps) (off + 1)
     pure (rgb555ToRgb888 lo hi)
 
-{- | Compute one BG\/Window pixel: (color index 0..3, CGB attribute
-byte). On DMG the attribute byte is always @0@; the @cgb@ flag at
-the call site decides whether the byte is meaningful. Avoiding the
-'Maybe' wrapper here saves ~one box allocation per pixel rendered
-(160 px × 144 lines × 60 fps ≈ 1.4 M boxes/s saved at full speed).
--}
-bgOrWindowPixel :: PpuState -> Bool -> Int -> Bool -> Int -> Int -> IO (Word8, Word8)
-bgOrWindowPixel ps cgb ly winEnabled wly x = do
-    wy <- fromIntegral <$> readIORef (ppuWy ps)
-    wx <- fromIntegral <$> readIORef (ppuWx ps)
-    let inWindow = winEnabled && ly >= wy && (x + 7) >= wx
-    if inWindow
-        then tilePixelCgb ps cgb (windowMapBase ps) (x + 7 - wx) wly
-        else do
-            lcdc <- readIORef (ppuLcdc ps)
-            scy <- fromIntegral <$> readIORef (ppuScy ps)
-            scx <- fromIntegral <$> readIORef (ppuScx ps)
-            let mapBase = if testBit lcdc 3 then 0x1C00 else 0x1800
-                col = (scx + x) .&. 0xFF
-                row = (scy + ly) .&. 0xFF
-            tilePixelCgb ps cgb (pure mapBase) col row
-
-windowMapBase :: PpuState -> IO Int
-windowMapBase ps = do
-    lcdc <- readIORef (ppuLcdc ps)
-    pure (if testBit lcdc 6 then 0x1C00 else 0x1800)
-
-{- | Sample one BG/Window pixel from the tile maps. In CGB mode the
-attribute byte at the same map index in VRAM bank 1 controls the tile
-data bank, palette, and per-tile flips; the returned pair carries that
-attribute through to the RGB pass. DMG returns @0@ for the attribute
-(callers gate on the CGB flag, not on attr value).
--}
-tilePixelCgb :: PpuState -> Bool -> IO Int -> Int -> Int -> IO (Word8, Word8)
-tilePixelCgb ps cgb mkMapBase col row = do
-    lcdc <- readIORef (ppuLcdc ps)
-    mapBase <- mkMapBase
-    let unsigned = testBit lcdc 4
-        !tileX = col `shiftR` 3
-        !tileY = row `shiftR` 3
-        !mapIdx = mapBase + tileY * 32 + tileX
-        vram = ppuVram ps
-    tileNum <- MV.read vram mapIdx
-    -- CGB attribute byte: same offset, but in VRAM bank 1. On DMG we
-    -- read 0 (caller's @cgb@ flag gates whether it's interpreted).
-    attr <-
-        if cgb
-            then MV.read vram (0x2000 + mapIdx)
-            else pure 0
-    let hflip = cgb && testBit attr 5
-        vflip = cgb && testBit attr 6
-        tileBank = if cgb && testBit attr 3 then 0x2000 else 0
-        rowInTile0 = row .&. 7
-        rowInTile = if vflip then 7 - rowInTile0 else rowInTile0
-        !tileBase =
-            if unsigned
-                then fromIntegral tileNum * 16
-                else 0x1000 + fromIntegral (fromIntegral tileNum :: Int8) * 16
-        !rowOff = tileBank + tileBase + rowInTile * 2
-    byteLow <- MV.read vram rowOff
-    byteHigh <- MV.read vram (rowOff + 1)
-    let colInTile0 = col .&. 7
-        colInTile = if hflip then colInTile0 else 7 - colInTile0
-        idx =
-            (if testBit byteHigh colInTile then 2 else 0)
-                + (if testBit byteLow colInTile then 1 else 0)
-    pure (idx, attr)
-
+-- | Apply a DMG palette register to a 2-bit color index.
 paletteApply :: Word8 -> Word8 -> Word8
 paletteApply pal idx = (pal `shiftR` (fromIntegral idx `shiftL` 1)) .&. 0x03
 
@@ -819,24 +827,46 @@ data Sprite = Sprite
     , spriteOam :: !Int
     }
 
-readOamSprites :: IOVector Word8 -> IO [Sprite]
-readOamSprites oam =
-    mapM
-        ( \i -> do
+prepareSpriteLine :: PpuState -> Bool -> Int -> Word8 -> IO SpriteLineContext
+prepareSpriteLine ps cgb ly lcdc = do
+    let height = if testBit lcdc 2 then 16 else 8
+        masterOn = testBit lcdc 0
+    candidates <- readVisibleSprites (ppuOam ps) ly height
+    opri <- readIORef (ppuOpri ps)
+    obp0 <- readIORef (ppuObp0 ps)
+    obp1 <- readIORef (ppuObp1 ps)
+    let xOrder = not cgb || testBit opri 0
+        sorted = if xOrder then stableSortByX candidates else candidates
+    pure
+        SpriteLineContext
+            { spriteLineMasterOn = masterOn
+            , spriteLineHeight = height
+            , spriteLineObp0 = obp0
+            , spriteLineObp1 = obp1
+            , spriteLineCandidates = sorted
+            }
+
+readVisibleSprites :: IOVector Word8 -> Int -> Int -> IO [Sprite]
+readVisibleSprites oam ly height = go (0 :: Int) (0 :: Int) []
+  where
+    go !i !found !acc
+        | i >= 40 || found >= 10 = pure (reverse acc)
+        | otherwise = do
             y <- MV.read oam (i * 4)
             x <- MV.read oam (i * 4 + 1)
             t <- MV.read oam (i * 4 + 2)
             a <- MV.read oam (i * 4 + 3)
-            pure
-                Sprite
-                    { spriteY = fromIntegral y - 16
-                    , spriteX = fromIntegral x - 8
-                    , spriteTile = t
-                    , spriteAttr = a
-                    , spriteOam = i
-                    }
-        )
-        [0 .. 39]
+            let sprite =
+                    Sprite
+                        { spriteY = fromIntegral y - 16
+                        , spriteX = fromIntegral x - 8
+                        , spriteTile = t
+                        , spriteAttr = a
+                        , spriteOam = i
+                        }
+            if overlapsLine ly height sprite
+                then go (i + 1) (found + 1) (sprite : acc)
+                else go (i + 1) found acc
 
 {- | Overlay sprites on top of the background. Per pixel returns:
 
@@ -854,78 +884,54 @@ CGB priority arbitration considers three sources:
 Object wins iff master-priority-off, or BG is transparent, or neither
 of the BG\/OBJ priority bits is set.
 -}
-overlaySprites ::
+resolveSpritePixel ::
     PpuState ->
-    Bool ->
+    LineRenderContext ->
+    SpriteLineContext ->
     Int ->
     Word8 ->
-    [(Word8, Word8)] ->
-    [Word8] ->
-    IO [(Word8, Maybe (Sprite, Word8))]
-overlaySprites ps cgb ly lcdc bgPixels bgShades = do
-    let height = if testBit lcdc 2 then 16 else 8
-        masterOn = testBit lcdc 0
-    sprs <- readOamSprites (ppuOam ps)
-    -- Sprite priority resolution: on a DMG host or in DMG-on-CGB compat
-    -- mode (where the CGB boot ROM has set OPRI=1), leftmost-X wins.
-    -- On a CGB host running a CGB cart, OPRI bit 0 selects the rule:
-    -- 0 = OAM-index priority (CGB native), 1 = leftmost-X priority
-    -- (DMG behavior). 'fromCartridgeOnHost' seeds OPRI=1 for compat
-    -- carts, so this collapses to one check that also lets CGB carts
-    -- override mid-game.
-    opri <- readIORef (ppuOpri ps)
-    let xOrder = not cgb || testBit opri 0
-        candidates = take 10 (filter (overlaps ly height) sprs)
-        sorted = if xOrder then stableSortByX candidates else candidates
-    obp0 <- readIORef (ppuObp0 ps)
-    obp1 <- readIORef (ppuObp1 ps)
-    mapM
-        (pixelWith masterOn height sorted obp0 obp1)
-        (zip3 [0 ..] bgPixels bgShades)
+    Word8 ->
+    Word8 ->
+    IO (Word8, Maybe (Sprite, Word8))
+resolveSpritePixel ps ctx spriteCtx x bgIdx bgAttr bgShade = do
+    hit <-
+        foreMostHit
+            (spriteLineHeight spriteCtx)
+            (spriteLineCandidates spriteCtx)
+            x
+    case hit of
+        Nothing -> pure (bgShade, Nothing)
+        Just (s, sIdx) ->
+            let objPriority = testBit (spriteAttr s) 7
+                bgPriority = lineCgb ctx && testBit bgAttr 7
+                bgOpaque = bgIdx > 0
+                masterOff = lineCgb ctx && not (spriteLineMasterOn spriteCtx)
+                objWins =
+                    masterOff
+                        || not bgOpaque
+                        || not (objPriority || bgPriority)
+             in if objWins
+                    then
+                        let pal =
+                                if testBit (spriteAttr s) 4
+                                    then spriteLineObp1 spriteCtx
+                                    else spriteLineObp0 spriteCtx
+                         in pure (paletteApply pal sIdx, Just (s, sIdx))
+                    else pure (bgShade, Nothing)
   where
-    overlaps :: Int -> Int -> Sprite -> Bool
-    overlaps lyI height s =
-        lyI >= spriteY s && lyI < spriteY s + height
-
-    pixelWith ::
-        Bool ->
-        Int ->
-        [Sprite] ->
-        Word8 ->
-        Word8 ->
-        (Int, (Word8, Word8), Word8) ->
-        IO (Word8, Maybe (Sprite, Word8))
-    pixelWith masterOn height sorted obp0 obp1 (x, (bgI, attr), bgS) = do
-        hit <- foreMostHit height sorted x
-        case hit of
-            Nothing -> pure (bgS, Nothing)
-            Just (s, sIdx) ->
-                let objPriority = testBit (spriteAttr s) 7
-                    bgPriority = cgb && testBit attr 7
-                    bgOpaque = bgI > 0
-                    masterOff = cgb && not masterOn
-                    objWins =
-                        masterOff
-                            || not bgOpaque
-                            || not (objPriority || bgPriority)
-                 in if objWins
-                        then
-                            let pal =
-                                    if testBit (spriteAttr s) 4
-                                        then obp1
-                                        else obp0
-                             in pure (paletteApply pal sIdx, Just (s, sIdx))
-                        else pure (bgS, Nothing)
-
     foreMostHit :: Int -> [Sprite] -> Int -> IO (Maybe (Sprite, Word8))
     foreMostHit _ [] _ = pure Nothing
-    foreMostHit height (s : rest) x
-        | x < spriteX s || x >= spriteX s + 8 = foreMostHit height rest x
+    foreMostHit height (s : rest) px
+        | px < spriteX s || px >= spriteX s + 8 = foreMostHit height rest px
         | otherwise = do
-            mIdx <- spritePixelIdx (ppuVram ps) cgb ly height s x
+            mIdx <- spritePixelIdx (ppuVram ps) (lineCgb ctx) (lineLy ctx) height s px
             case mIdx of
                 Just idx | idx /= 0 -> pure (Just (s, idx))
-                _ -> foreMostHit height rest x
+                _ -> foreMostHit height rest px
+
+overlapsLine :: Int -> Int -> Sprite -> Bool
+overlapsLine ly height s =
+    ly >= spriteY s && ly < spriteY s + height
 
 {- | Stable sort by sprite X coordinate. Used by DMG (and DMG-on-CGB
 compat / OPRI=1) sprite priority where the leftmost sprite wins, and

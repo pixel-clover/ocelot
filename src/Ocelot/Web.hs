@@ -13,7 +13,9 @@ module Ocelot.Web (
     framebufferRgb,
     framebufferRgbBytes,
     framebufferRgbaBytes,
+    copyFramebufferRgba,
     drainAudioSamples,
+    drainAudioSamplesVector,
     saveState,
     loadState,
     extractSaveData,
@@ -31,6 +33,7 @@ import Data.Int (Int16)
 import Data.Text (Text)
 import qualified Data.Vector.Unboxed as V
 import Data.Word (Word8)
+import Foreign.Ptr (Ptr)
 import qualified Ocelot.Apu as Apu
 import qualified Ocelot.Bus as Bus
 import qualified Ocelot.Cartridge as Cartridge
@@ -87,9 +90,17 @@ framebufferRgbaBytes :: WebSession -> IO ByteString
 framebufferRgbaBytes session =
     Ppu.framebufferRgbaBytes (Bus.busPpu (machineBus (wsMachine session)))
 
+copyFramebufferRgba :: Ptr Word8 -> WebSession -> IO ()
+copyFramebufferRgba ptr session =
+    Ppu.copyFramebufferRgba ptr (Bus.busPpu (machineBus (wsMachine session)))
+
 drainAudioSamples :: WebSession -> IO [Int16]
 drainAudioSamples session =
     Bus.drainAudioSamples (machineBus (wsMachine session))
+
+drainAudioSamplesVector :: WebSession -> IO (V.Vector Int16)
+drainAudioSamplesVector session =
+    Bus.drainAudioSamplesVector (machineBus (wsMachine session))
 
 saveState :: WebSession -> IO ByteString
 saveState = Snapshot.save . wsMachine
