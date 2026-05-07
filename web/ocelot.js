@@ -685,18 +685,17 @@ function startGpListening(rbtn, btnName) {
         }
     }, 50);
 
-    function onEsc(ev) {
-        if (ev.code === "Escape") {
-            ev.preventDefault();
-            cleanup();
-        }
+    function onKey(ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (ev.code === "Escape") cleanup();
     }
 
-    document.addEventListener("keydown", onEsc, true);
+    document.addEventListener("keydown", onKey, true);
 
     function cleanup() {
         clearInterval(interval);
-        document.removeEventListener("keydown", onEsc, true);
+        document.removeEventListener("keydown", onKey, true);
         rbtn.classList.remove("listening");
         rbtn.textContent = gpBtnDisplayName(btnName);
         activeGpRemapCleanup = null;
@@ -724,7 +723,7 @@ function pauseForOverlay() {
     overlayDepth++;
     if (running) {
         running = false;
-        if (rafId) cancelAnimationFrame(rafId);
+        if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
         if (audioCtx) audioCtx.suspend();
     }
 }
@@ -1377,6 +1376,10 @@ function updatePerf() {
     document.getElementById("perf-rom").textContent = currentRomTitle || "N/A";
     document.getElementById("perf-mode").textContent =
         emu ? (wasm.instance.exports.ocelot_is_cgb(emu) ? "CGB" : "DMG") : "N/A";
+    if (!running) {
+        document.getElementById("perf-fps").textContent = "-- FPS";
+        document.getElementById("perf-frame-ms").textContent = "-- ms";
+    }
     document.getElementById("perf-audio").textContent =
         audioCtx && audioNode
             ? `${audioCtx.state}` +
