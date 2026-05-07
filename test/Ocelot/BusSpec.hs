@@ -5,9 +5,13 @@ module Ocelot.BusSpec (spec) where
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
 import Data.IORef (writeIORef)
+import qualified Data.Vector.Unboxed as V
+import Data.Word (Word8)
 import Ocelot.Bus (Bus, advance, drainSerial, fromCartridge, installBootRom, read8, write8)
 import qualified Ocelot.Bus as Bus
 import Ocelot.Cartridge (loadRom)
+import Ocelot.Cartridge.Header (expectedHeaderChecksum)
+import Ocelot.Joypad (Button (..))
 import qualified Ocelot.Ppu as Ppu
 import Ocelot.Testing (synthNoMbcRom)
 import Test.Hspec
@@ -19,6 +23,24 @@ emptyBus = do
     case result of
         Right c -> fromCartridge c
         Left e -> error ("test setup: cartridge did not load: " ++ show e)
+
+cgbBus :: IO Bus
+cgbBus = do
+    result <- loadRom (synthCgbNoMbcRom BS.empty)
+    case result of
+        Right c -> fromCartridge c
+        Left e -> error ("test setup: CGB cartridge did not load: " ++ show e)
+
+synthCgbNoMbcRom :: BS.ByteString -> BS.ByteString
+synthCgbNoMbcRom prog =
+    let patchedFlag =
+            replaceByte 0x0143 0x80 (synthNoMbcRom prog)
+        checksum = expectedHeaderChecksum patchedFlag
+     in replaceByte 0x014D checksum patchedFlag
+
+replaceByte :: Int -> Word8 -> BS.ByteString -> BS.ByteString
+replaceByte offset byte bs =
+    BS.take offset bs <> BS.singleton byte <> BS.drop (offset + 1) bs
 
 spec :: Spec
 spec = do
@@ -241,6 +263,45 @@ spec = do
             write8 0xFF00 0x10 b
             v <- read8 0xFF00 b
             v `shouldBe` 0xDF
+
+        it "setButton routes frontend input through the bus" $ do
+            b <- emptyBus
+            write8 0xFF00 0x10 b -- Select action row.
+            Bus.setButton ButtonA True b
+            pressed <- read8 0xFF00 b
+            Bus.setButton ButtonA False b
+            released <- read8 0xFF00 b
+            (pressed .&. 0x01) `shouldBe` 0x00
+            (released .&. 0x01) `shouldBe` 0x01
+
+    describe "frontend facade" $ do
+        it "reports platform and double-speed state without exposing raw fields" $ do
+            dmg <- emptyBus
+            Bus.isCgb dmg `shouldBe` False
+            Bus.isDoubleSpeed dmg `shouldReturn` False
+
+            cgb <- cgbBus
+            Bus.isCgb cgb `shouldBe` True
+            Bus.isDoubleSpeed cgb `shouldReturn` False
+            write8 0xFF4D 0x01 cgb
+            Bus.triggerSpeedSwitch cgb `shouldReturn` True
+            Bus.isDoubleSpeed cgb `shouldReturn` True
+
+        it "exposes framebuffer snapshots through bus-level accessors" $ do
+            b <- emptyBus
+            let ppu = Bus.busPpu b
+
+            palette <- Bus.framebuffer b
+            paletteDirect <- Ppu.framebuffer ppu
+            rgb <- Bus.framebufferRgb b
+            rgbDirect <- Ppu.framebufferRgb ppu
+            rgbBytes <- Bus.framebufferRgbBytes b
+            rgbaBytes <- Bus.framebufferRgbaBytes b
+
+            palette `shouldBe` paletteDirect
+            rgb `shouldBe` rgbDirect
+            rgbBytes `shouldBe` BS.pack (V.toList rgb)
+            BS.length rgbaBytes `shouldBe` Ppu.framebufferWidth * Ppu.framebufferHeight * 4
 
     describe "boot ROM" $ do
         it "served from boot ROM bytes until 0xFF50 unmasks the cartridge" $ do
