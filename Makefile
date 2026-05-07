@@ -68,7 +68,7 @@ docs: ## Generate Haddock documentation for the project
 
 install-deps: ## Install system dependencies (for Debian-based systems)
 	@echo "Installing system dependencies..."
-	sudo apt install haskell-stack libsdl2-dev pkg-config
+	sudo apt install haskell-stack libsdl2-dev pkg-config nix
 	$(STACK) setup
 	$(STACK) install hlint fourmolu
 
