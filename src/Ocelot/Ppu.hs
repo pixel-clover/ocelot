@@ -116,6 +116,10 @@ data PpuState = PpuState
     -- frontend uses; populated by the same render pass that fills
     -- 'ppuFb'. DMG mode goes through the shade palette; CGB mode uses
     -- BG palette RAM for the BG layer and OBP0\/OBP1 for sprites.
+    , ppuFbRgba :: !(IOVector Word8)
+    -- ^ RGBA8888 color framebuffer (160 * 144 * 4 bytes). Kept so the
+    -- web frontend can copy a presentation-ready buffer without
+    -- rebuilding alpha-expanded pixels every frame.
     , ppuCgbMode :: !(IORef Bool)
     -- ^ Whether the bus is running a CGB cart. Set once at startup
     -- via 'setCgbMode'; rendering reads this to pick the BG path.
@@ -187,6 +191,13 @@ initialPpu = do
     oam <- MV.replicate 0xA0 0
     fb <- MV.replicate (framebufferWidth * framebufferHeight) 0
     fbRgb <- MV.replicate (framebufferWidth * framebufferHeight * 3) 0
+    fbRgba <- MV.replicate (framebufferWidth * framebufferHeight * 4) 0
+    let initAlpha !i
+            | i >= framebufferWidth * framebufferHeight = pure ()
+            | otherwise = do
+                MV.write fbRgba (i * 4 + 3) 255
+                initAlpha (i + 1)
+    initAlpha 0
     cgbMode <- newIORef False
     renderMode <- newIORef RenderDmg
     vbk <- newIORef 0
@@ -219,6 +230,7 @@ initialPpu = do
             , ppuOam = oam
             , ppuFb = fb
             , ppuFbRgb = fbRgb
+            , ppuFbRgba = fbRgba
             , ppuCgbMode = cgbMode
             , ppuRenderMode = renderMode
             , ppuVbk = vbk
@@ -260,20 +272,15 @@ copyFramebufferRgb ptr ps = go 0
 
 -- | Copy the RGB framebuffer into a caller-provided buffer in RGBA8888 order.
 copyFramebufferRgba :: Ptr Word8 -> PpuState -> IO ()
-copyFramebufferRgba ptr ps = go 0 0
+copyFramebufferRgba ptr ps = go 0
   where
-    rgbBytes = framebufferWidth * framebufferHeight * 3
-    go !src !dst
-        | src >= rgbBytes = pure ()
+    rgbaBytes = framebufferWidth * framebufferHeight * 4
+    go !i
+        | i >= rgbaBytes = pure ()
         | otherwise = do
-            r <- MV.unsafeRead (ppuFbRgb ps) src
-            g <- MV.unsafeRead (ppuFbRgb ps) (src + 1)
-            b <- MV.unsafeRead (ppuFbRgb ps) (src + 2)
-            pokeByteOff ptr dst r
-            pokeByteOff ptr (dst + 1) g
-            pokeByteOff ptr (dst + 2) b
-            pokeByteOff ptr (dst + 3) (255 :: Word8)
-            go (src + 3) (dst + 4)
+            px <- MV.unsafeRead (ppuFbRgba ps) i
+            pokeByteOff ptr i px
+            go (i + 1)
 
 -- | Copy the RGB framebuffer into a packed strict 'ByteString' in RGB888 order.
 framebufferRgbBytes :: PpuState -> IO ByteString
@@ -685,6 +692,7 @@ renderPixelsForLine ps ctx mSpriteCtx = go 0
   where
     fbBase = lineLy ctx * framebufferWidth
     rgbBase = lineLy ctx * framebufferWidth * 3
+    rgbaBase = lineLy ctx * framebufferWidth * 4
 
     go !x
         | x >= framebufferWidth = pure ()
@@ -697,13 +705,17 @@ renderPixelsForLine ps ctx mSpriteCtx = go 0
                 Nothing -> pure (bgShade, Nothing)
             MV.write (ppuFb ps) (fbBase + x) finalShade
             rgb <- pixelRgb ps (lineRenderMode ctx) bgIdx bgAttr finalShade mHit
-            writeRgbPixel (rgbBase + x * 3) rgb
+            writeRgbPixel (rgbBase + x * 3) (rgbaBase + x * 4) rgb
             go (x + 1)
 
-    writeRgbPixel off (r, g, b) = do
-        MV.write (ppuFbRgb ps) off r
-        MV.write (ppuFbRgb ps) (off + 1) g
-        MV.write (ppuFbRgb ps) (off + 2) b
+    writeRgbPixel rgbOff rgbaOff (r, g, b) = do
+        MV.write (ppuFbRgb ps) rgbOff r
+        MV.write (ppuFbRgb ps) (rgbOff + 1) g
+        MV.write (ppuFbRgb ps) (rgbOff + 2) b
+        MV.write (ppuFbRgba ps) rgbaOff r
+        MV.write (ppuFbRgba ps) (rgbaOff + 1) g
+        MV.write (ppuFbRgba ps) (rgbaOff + 2) b
+        MV.write (ppuFbRgba ps) (rgbaOff + 3) 255
 
 bgPixelAt :: PpuState -> LineRenderContext -> Int -> IO (Word8, Word8)
 bgPixelAt ps ctx x
