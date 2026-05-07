@@ -469,6 +469,9 @@ async function createWasiBridge() {
         imports: {wasi_snapshot_preview1: wasiImport},
         initialize(instance) {
             memory = instance.exports.memory;
+            if (typeof instance.exports._initialize === "function") {
+                instance.exports._initialize();
+            }
         },
     };
 }
@@ -862,8 +865,17 @@ async function populateRecentRoms() {
         select.style.display = "none";
         return;
     }
-    const entries = await getRecentRoms();
-    entries.sort((a, b) => b.timestamp - a.timestamp);
+    const allEntries = await getRecentRoms();
+    allEntries.sort((a, b) => b.timestamp - a.timestamp);
+    // Deduplicate by name: keep only the most recent entry per ROM name.
+    // Old entries used the filename as the DB key; new entries use sha256:<hash>.
+    // Both can coexist after a schema migration, producing visual duplicates.
+    const seen = new Set();
+    const entries = allEntries.filter(e => {
+        if (seen.has(e.name)) return false;
+        seen.add(e.name);
+        return true;
+    });
     if (entries.length === 0) {
         select.style.display = "none";
         return;
