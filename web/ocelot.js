@@ -1162,13 +1162,19 @@ function applyIntegerScale(n) {
     const availH = isFs ? window.innerHeight : windowAvailH();
 
     let w, h;
-    if (n === -1) {
-        const s = Math.min(availW / 160, availH / 144);
-        w = Math.floor(160 * s);
-        h = Math.floor(144 * s);
-    } else if (n === -2) {
-        w = Math.floor(availW);
-        h = Math.floor(availH);
+    if (n === -1 || isFs) {
+        // Fit mode, or fullscreen: scale to fill available space preserving AR.
+        // In fullscreen we always use the best integer fit (matching desktop behaviour)
+        // regardless of which scale button is selected.
+        if (isFs) {
+            const s = Math.max(1, Math.floor(Math.min(availW / 160, availH / 144)));
+            w = 160 * s;
+            h = 144 * s;
+        } else {
+            const s = Math.min(availW / 160, availH / 144);
+            w = Math.floor(160 * s);
+            h = Math.floor(144 * s);
+        }
     } else {
         const s = n > 0 ? n : computeBestScale();
         w = 160 * s;
@@ -1178,9 +1184,9 @@ function applyIntegerScale(n) {
     if (canvas) {
         canvas.style.width = w + "px";
         canvas.style.height = h + "px";
-        // Integer modes (n >= 0): nearest-neighbour keeps pixels sharp.
-        // Non-integer modes (Fit / Stretch): bilinear avoids jagged artefacts.
-        canvas.style.imageRendering = n < 0 ? "auto" : "pixelated";
+        // Integer modes and fullscreen use nearest-neighbour (sharp pixels).
+        // Fit mode outside fullscreen uses bilinear (no jagged edges at non-integer ratios).
+        canvas.style.imageRendering = (n < 0 && !isFs) ? "auto" : "pixelated";
     }
 
     // In fullscreen the canvas is flex-centered inside a 100vw×100vh container,
