@@ -14,7 +14,7 @@ DOC_OUT       := docs/haskell
 # Targets
 ################################################################################
 
-.PHONY: all build rebuild run test cov lint format format-check doc clean install-deps release help coverage \
+.PHONY: all build rebuild run test cov lint format format-check docs clean install-deps release help coverage \
  repl setup-hooks test-hooks mooneye-roms acid2-roms test-roms tools sameboy-core sameboy-trace web-build \
  docker-build docker-run
 
@@ -23,7 +23,7 @@ DOC_OUT       := docs/haskell
 help: ## Show the help messages for all targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## ' Makefile | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-15s %s\n", $$1, $$2}'
 
-all: build test lint doc  ## build, test, lint, and doc
+all: build test lint docs  ## build, test, lint, and docs
 
 build: ## Build project
 	@echo "Building project with $(JOBS) concurrent jobs..."
@@ -60,7 +60,7 @@ format-check: ## Check formatting without modifying files
 	@echo "Checking Haskell formatting..."
 	$(STACK) exec -- fourmolu --mode check $(SRC_DIR) $(APP_DIR) $(APP_WEB_DIR) $(TEST_DIR)
 
-doc: ## Generate Haddock documentation for the project
+docs: ## Generate Haddock documentation for the project
 	@echo "Generating documentation to $(DOC_OUT)..."
 	$(STACK) haddock --no-haddock-deps
 	@mkdir -p $(DOC_OUT)
