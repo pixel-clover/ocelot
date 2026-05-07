@@ -31,6 +31,7 @@ module Ocelot.Bus (
     cpuMCyclesPerLcdFrame,
     isCgb,
     isDoubleSpeed,
+    takeFrameReady,
     read8,
     write8,
     advance,
@@ -86,6 +87,7 @@ data Bus = Bus
     , busApu :: !ApuState
     , busJoypad :: !JoypadState
     , busSerialOut :: !(IORef [Word8])
+    , busFrameReady :: !(IORef Bool)
     , busCgb :: !Bool
     -- ^ True when the host hardware is CGB. Gates CGB-only registers
     -- (VBK, BCPS, etc.). Note: this is currently host-driven, NOT
@@ -206,6 +208,13 @@ isCgb = busCgb
 isDoubleSpeed :: Bus -> IO Bool
 isDoubleSpeed = readIORef . busDoubleSpeed
 
+takeFrameReady :: Bus -> IO Bool
+takeFrameReady b =
+    atomicModifyIORef' (busFrameReady b) clearFrameReady
+
+clearFrameReady :: Bool -> (Bool, Bool)
+clearFrameReady ready = (False, ready)
+
 {- | Construct a bus with an explicit host-hardware choice. Lets you run
 a DMG cart on a CGB host (matching real-hardware backwards
 compatibility, with the auto-palette pre-loaded) or vice versa. The
@@ -223,6 +232,7 @@ fromCartridgeOnHost host bootMode c = do
     apu <- Apu.initial
     joypad <- Joypad.initial
     serial <- newIORef []
+    frameReady <- newIORef False
     wramBank <- newIORef 0x01
     key1 <- newIORef 0x00
     hdmaSrc <- newIORef 0
@@ -313,6 +323,7 @@ fromCartridgeOnHost host bootMode c = do
             , busApu = apu
             , busJoypad = joypad
             , busSerialOut = serial
+            , busFrameReady = frameReady
             , busCgb = cgb
             , busCgbDmgCompat = cgb && not cgbCart
             , busWramBank = wramBank
@@ -971,7 +982,9 @@ advance mCycles b = do
     -- first M-cycle, matching the documented 1-cycle startup delay.
     writeIORef (busOamDmaStarting b) False
     when overflow (setIfBit 2 b) -- Timer
-    when (testBit ppuIrqs 0) (setIfBit 0 b) -- VBlank
+    when (testBit ppuIrqs 0) $ do
+        writeIORef (busFrameReady b) True
+        setIfBit 0 b -- VBlank
     when (testBit ppuIrqs 1) (setIfBit 1 b) -- LCD STAT
     -- HBlank-entered signal (bit 2): step one HDMA chunk, not an interrupt.
     when (testBit ppuIrqs 2) (stepHdmaHBlank b)

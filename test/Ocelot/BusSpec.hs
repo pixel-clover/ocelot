@@ -303,6 +303,13 @@ spec = do
             rgbBytes `shouldBe` BS.pack (V.toList rgb)
             BS.length rgbaBytes `shouldBe` Ppu.framebufferWidth * Ppu.framebufferHeight * 4
 
+        it "latches a completed visible frame on VBlank entry" $ do
+            b <- emptyBus
+            Bus.takeFrameReady b `shouldReturn` False
+            advance 17556 b
+            Bus.takeFrameReady b `shouldReturn` True
+            Bus.takeFrameReady b `shouldReturn` False
+
     describe "boot ROM" $ do
         it "served from boot ROM bytes until 0xFF50 unmasks the cartridge" $ do
             b <- emptyBus

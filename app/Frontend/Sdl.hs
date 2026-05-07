@@ -50,7 +50,7 @@ import qualified Ocelot.Apu as Apu
 import qualified Ocelot.Bus as Bus
 import Ocelot.Cartridge (Cartridge)
 import qualified Ocelot.Cartridge as Cartridge
-import Ocelot.Cpu.Execute (runFor)
+import Ocelot.Cpu.Execute (runUntilFrame)
 import Ocelot.Joypad (Button (..))
 import Ocelot.Machine (Machine (..), machineFromCartridgeWithBoot)
 import qualified Ocelot.Snapshot as Snap
@@ -428,7 +428,7 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode au
             mapM_
                 ( \_ -> do
                     frameCycles <- Bus.cpuMCyclesPerLcdFrame (machineBus machine')
-                    _ <- runFor frameCycles machine'
+                    _ <- runUntilFrame (frameCycles + 32) machine'
                     pure ()
                 )
                 [1 .. frames]

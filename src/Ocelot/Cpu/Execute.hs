@@ -27,6 +27,7 @@ module Ocelot.Cpu.Execute (
     step,
     runUntilHalt,
     runFor,
+    runUntilFrame,
     flagsToByte,
     byteToFlags,
     pendingInterrupt,
@@ -300,6 +301,25 @@ runFor cap = go 0
             step m
             c1 <- cpuCycles <$> getCpu m
             go (n + fromIntegral (c1 - c0)) m
+
+{- | Run until the PPU completes the visible frame and enters VBlank.
+The cycle cap is a safety fallback for LCD-off periods and keeps callers
+from hanging if no frame-ready edge is produced.
+-}
+runUntilFrame :: Int -> Machine -> IO Int
+runUntilFrame cap m = do
+    _ <- Bus.takeFrameReady (machineBus m)
+    go 0 m
+  where
+    go !n !m'
+        | n >= cap = pure n
+        | otherwise = do
+            c0 <- cpuCycles <$> getCpu m'
+            step m'
+            c1 <- cpuCycles <$> getCpu m'
+            ready <- Bus.takeFrameReady (machineBus m')
+            let !n' = n + fromIntegral (c1 - c0)
+            if ready then pure n' else go n' m'
 
 ----------------------------------------------------------------------
 -- Per-instruction handlers

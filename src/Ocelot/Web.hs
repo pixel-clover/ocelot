@@ -39,7 +39,7 @@ import qualified Ocelot.Apu as Apu
 import qualified Ocelot.Bus as Bus
 import qualified Ocelot.Cartridge as Cartridge
 import qualified Ocelot.Cartridge.Header as Header
-import Ocelot.Cpu.Execute (runFor)
+import Ocelot.Cpu.Execute (runUntilFrame)
 import Ocelot.Joypad (Button)
 import Ocelot.Machine (Machine (..), machineFromCartridge)
 import qualified Ocelot.Ppu as Ppu
@@ -71,7 +71,7 @@ loadSession romBytes = do
 runFrame :: WebSession -> IO ()
 runFrame session = do
     frameCycles <- Bus.cpuMCyclesPerLcdFrame (machineBus (wsMachine session))
-    _ <- runFor frameCycles (wsMachine session)
+    _ <- runUntilFrame (frameCycles + 32) (wsMachine session)
     pure ()
 
 setButton :: Button -> Bool -> WebSession -> IO ()
