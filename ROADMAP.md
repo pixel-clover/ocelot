@@ -25,8 +25,7 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Optional DMG/CGB boot ROM execution path: `ocelot play --boot-rom <path>` installs the boot ROM at `0x0000-0x00FF` (and `0x0200-0x08FF` on CGB)
   until the cartridge writes `0xFF50`. Without `--boot-rom`, falls back to the post-boot register state per platform.
 - [x] Boot-ROM-aware peripheral power-on state: when a boot ROM is supplied, LCDC/BGP/OBP*/NR52 start at hardware power-on values (LCD off, palettes
-  0,
-  APU off) rather than post-boot defaults, so the boot ROM observes the same registers a real DMG/CGB does at reset
+  0, APU off) rather than post-boot defaults, so the boot ROM observes the same registers a real DMG/CGB does at reset
 - [x] CGB double-speed mode (KEY1)
 
 ### Memory and Cartridge
@@ -49,9 +48,7 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [ ] HuC3, MMM01, and TAMA5
 - [x] Battery-backed save persistence: `.sav` load and store on emulator entry/exit, RAM plus VBA-M-compatible 48-byte RTC suffix when the cart has a
   timer
-- [x] General-purpose HDMA blocking timing: peripherals advance by `length / 2` M-cycles in single-speed (`length`
-  in double-speed) during the copy, matching the 8 µs / 16 bytes Pan Docs spec; covered by the "advances
-  peripherals during the copy block" regression in `Ocelot.CgbSpec`
+- [x] General-purpose HDMA blocking timing: peripherals advance by `length / 2` M-cycles in single-speed (`length` in double-speed) during the copy, matching the 8 µs / 16 bytes Pan Docs spec; covered by the "advances peripherals during the copy block" regression in `Ocelot.CgbSpec`
 
 ### Timer and Serial
 
@@ -78,8 +75,7 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] CGB sprite priority resolution (master priority bit, BG-to-OAM, OAM-order)
 - [x] RGB framebuffer alongside the palette-index framebuffer (DMG via fixed shade palette, CGB via BG/OBJ palette RAM with RGB555 decoding)
 - [ ] LCD on/off transitions and STAT/LY behavior on reset (LCD-off freeze is implemented; full reset semantics not audited)
-- [x] Validation: dmg-acid2 golden frame hash (FNV-1a baseline locked; cross-check vs Matt Currie's reference image
-  at https://github.com/mattcurrie/dmg-acid2 to claim conformance)
+- [x] Validation: dmg-acid2 golden frame hash (FNV-1a baseline locked; cross-check vs reference image at https://github.com/mattcurrie/dmg-acid2 to claim conformance)
 - [x] Validation: cgb-acid2 golden frame hash (same caveat; baseline locked from current PPU output)
 - [ ] Validation: mooneye PPU acceptance suite
 
@@ -176,7 +172,7 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [ ] Debugger: instruction-level breakpoints with run-to-breakpoint
 - [ ] Debugger: disassembler view around PC
 
-### Gameboy Color Support
+### Game Boy Color Support
 
 - [x] CGB system detection from cartridge header CGB flag (`busCgb`)
 - [x] Dual-mode (DMG/CGB) machine selection from header (`Ppu.setCgbMode`, `busCgb`)
@@ -194,9 +190,9 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 ### Future Goals
 
 - [ ] Link cable peer mode over a local socket (two-emulator multiplayer)
-- [ ] Super Gameboy palette and border emulation
-- [ ] Gameboy Printer peripheral (image capture sink)
-- [ ] Gameboy Camera cartridge support
+- [ ] Super Game Boy palette and border emulation
+- [ ] Game Boy Printer peripheral (image capture sink)
+- [ ] Game Boy Camera cartridge support
 - [ ] Rewind functionality (per-frame state ring buffer)
 - [ ] Configurable color correction (CGB LCD color profile, no-correction)
 - [x] WebAssembly build with Canvas rendering and Web Audio playback (GHC WASM cross-compilation; browser host now uses RGBA framebuffer exports,
@@ -207,8 +203,8 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 
 ### Input Peripherals
 
-- [ ] Standard Gameboy controller (built-in)
-- [ ] Gameboy Printer
-- [ ] Gameboy Camera
+- [ ] Standard Game Boy controller (built-in)
+- [ ] Game Boy Printer
+- [ ] Game Boy Camera
 - [ ] Four Player Adapter (DMG-07)
 - [ ] Mobile Adapter GB (network stub)

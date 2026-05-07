@@ -147,9 +147,9 @@ PPU's render path swaps between greenish-DMG shades ('Ppu.RenderDmg')
 and the full CGB color pipeline ('Ppu.RenderCgbFull').
 -}
 data HostHardware
-    = -- | Original Gameboy / Gameboy Pocket. Greenish-DMG palette.
+    = -- | Original Game Boy / Game Boy Pocket. Greenish-DMG palette.
       HostDmg
-    | -- | Gameboy Color. CGB-only registers fully accessible. DMG carts
+    | -- | Game Boy Color. CGB-only registers fully accessible. DMG carts
       -- run in compatibility mode with the auto-palette.
       HostCgb
     deriving (Eq, Show)

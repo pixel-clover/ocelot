@@ -65,8 +65,8 @@ const DEFAULT_KEY_MAP = Object.freeze({
     ArrowDown: "Down",
     ArrowLeft: "Left",
     ArrowRight: "Right",
-    KeyZ: "A",
-    KeyX: "B",
+    KeyS: "A",
+    KeyA: "B",
     Enter: "Start",
     ShiftRight: "Select",
 });
@@ -349,14 +349,16 @@ function applyTheme(theme) {
 
 function keyDisplayName(code) {
     if (!code) return "·";
-    if (code.startsWith("Key")) return code.slice(3);
-    if (code.startsWith("Arrow")) return code.slice(5);
-    if (code.startsWith("Digit")) return code.slice(5);
-    if (code === "ShiftRight") return "R-Shift";
-    if (code === "ShiftLeft") return "L-Shift";
-    if (code === "Enter") return "Enter";
-    if (code === "Space") return "Space";
-    return code.replace(/([a-z])([A-Z])/g, "$1 $2");
+    let name;
+    if (code.startsWith("Key")) name = code.slice(3);
+    else if (code.startsWith("Arrow")) name = code.slice(5);
+    else if (code.startsWith("Digit")) name = code.slice(5);
+    else if (code === "ShiftRight") name = "R-Shift";
+    else if (code === "ShiftLeft") name = "L-Shift";
+    else if (code === "Enter") name = "Enter";
+    else if (code === "Space") name = "Space";
+    else name = code.replace(/([a-z])([A-Z])/g, "$1 $2");
+    return `[${name}]`;
 }
 
 function keyForButton(btn) {
@@ -439,7 +441,7 @@ function resetKeyMap() {
 
 function gpBtnDisplayName(btnName) {
     const idx = gpMap[btnName];
-    return idx !== undefined ? `Btn ${idx}` : "·";
+    return idx !== undefined ? `(Btn ${idx})` : "·";
 }
 
 function initGpRemapUI() {

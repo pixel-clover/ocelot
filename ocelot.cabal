@@ -6,7 +6,7 @@ cabal-version: 1.12
 
 name:           ocelot
 version:        0.1.0.0
-synopsis:       A Gameboy and Gameboy Color emulator in Haskell
+synopsis:       A Game Boy and Game Boy Color emulator in Haskell
 description:    Please see the README on GitHub at <https://github.com/pixel-clover/ocelot#readme>
 category:       Emulator
 homepage:       https://github.com/pixel-clover/ocelot#readme

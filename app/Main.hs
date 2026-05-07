@@ -72,7 +72,7 @@ cliInfo =
     info
         (helper <*> versionFlag <*> commandParser)
         ( fullDesc
-            <> header (T.unpack version <> " - Gameboy (DMG) and Gameboy Color (CGB) emulator in Haskell")
+            <> header (T.unpack version <> " - Game Boy (DMG) and Game Boy Color (CGB) emulator in Haskell")
             <> footer
                 ( "SDL key bindings (play): Z=A, X=B, Enter=Start, RShift=Select, "
                     <> "Arrows=D-pad, Space=pause, F1=help overlay, .=frame step, Tab=fast-fwd (held), "

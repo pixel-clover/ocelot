@@ -11,7 +11,7 @@ extra-source-files:
   - LICENSE
   - web/**
 
-synopsis: A Gameboy and Gameboy Color emulator in Haskell
+synopsis: A Game Boy and Game Boy Color emulator in Haskell
 category: Emulator
 description: Please see the README on GitHub at <https://github.com/pixel-clover/ocelot#readme>
 
