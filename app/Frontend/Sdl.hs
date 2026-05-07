@@ -462,11 +462,17 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode au
         frame <- recordPresentedFrame ui
 
         -- Capture every other frame to halve GIF file size (~30 fps effective).
+        -- Hard cap at 1800 frames (60 s); auto-stop when reached.
         gifRec <- readIORef (uiGifFrames ui)
         case gifRec of
-            Just fs | even frame -> do
-                fbRgbFrame <- Bus.framebufferRgb (machineBus machine')
-                writeIORef (uiGifFrames ui) (Just (fbRgbFrame : fs))
+            Just fs | even frame ->
+                if length fs >= 1800
+                    then do
+                        writeIORef (uiGifFrames ui) Nothing
+                        saveGifRecording romPath ui fs
+                    else do
+                        fbRgbFrame <- Bus.framebufferRgb (machineBus machine')
+                        writeIORef (uiGifFrames ui) (Just (fbRgbFrame : fs))
             _ -> pure ()
 
         unless fast (paceFrame paceMode frameStartNs)
@@ -997,6 +1003,39 @@ glyphRows raw = case toUpper raw of
     '>' -> [0x10, 0x08, 0x04, 0x02, 0x04, 0x08, 0x10]
     _ -> [0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04]
 
+saveGifRecording :: FilePath -> UiState -> [V.Vector Word8] -> IO ()
+saveGifRecording romPath ui capturedFrames = do
+    let n = length capturedFrames
+    if n == 0
+        then pushToast ui ToastInfo "No frames recorded"
+        else do
+            ts <- floor <$> getPOSIXTime :: IO Int
+            let path = romDir romPath </> ("recording-" <> show ts <> ".gif")
+                opts =
+                    PaletteOptions
+                        { paletteCreationMethod = MedianMeanCut
+                        , enableImageDithering = False
+                        , paletteColorCount = 64
+                        }
+                images =
+                    [ (pal, 3 :: GifDelay, idx)
+                    | f <- reverse capturedFrames
+                    , let (idx, pal) = palettize opts (toGifImage f)
+                    ]
+            case writeGifImages path LoopingForever images of
+                Left err -> do
+                    putStrLn ("gif:      encode failed: " <> err)
+                    pushToast ui ToastFailure "GIF encode failed"
+                Right writeAction -> do
+                    r <- try (createDirectoryIfMissing True (romDir romPath) >> writeAction) :: IO (Either IOException ())
+                    case r of
+                        Right () -> do
+                            putStrLn ("gif:      wrote " <> path <> " (" <> show n <> " frames)")
+                            pushToast ui ToastSuccess "GIF saved"
+                        Left e -> do
+                            putStrLn ("gif:      write failed: " <> show e)
+                            pushToast ui ToastFailure "GIF write failed"
+
 handlePending ::
     FilePath ->
     Hotkeys ->
@@ -1064,38 +1103,7 @@ handlePending romPath hk ui machineRef cart bootRom = do
                 pushToast ui ToastInfo "Recording GIF..."
             Just capturedFrames -> do
                 writeIORef (uiGifFrames ui) Nothing
-                let n = length capturedFrames
-                if n == 0
-                    then pushToast ui ToastInfo "No frames recorded"
-                    else do
-                        ts <- floor <$> getPOSIXTime :: IO Int
-                        let path = romDir romPath </> ("recording-" <> show ts <> ".gif")
-                            opts =
-                                PaletteOptions
-                                    { paletteCreationMethod = MedianMeanCut
-                                    , enableImageDithering = False
-                                    , paletteColorCount = 64 -- GB games use ≤56 colours
-                                    }
-                            -- palettize returns (Image Pixel8, Palette); writeGifImages wants (Palette, GifDelay, Image Pixel8)
-                            -- 3cs delay matches the every-other-frame capture rate (≈33 fps)
-                            images =
-                                [ (pal, 3 :: GifDelay, idx)
-                                | f <- reverse capturedFrames
-                                , let (idx, pal) = palettize opts (toGifImage f)
-                                ]
-                        case writeGifImages path LoopingForever images of
-                            Left err -> do
-                                putStrLn ("gif:      encode failed: " <> err)
-                                pushToast ui ToastFailure "GIF encode failed"
-                            Right writeAction -> do
-                                r <- try (createDirectoryIfMissing True (romDir romPath) >> writeAction) :: IO (Either IOException ())
-                                case r of
-                                    Right () -> do
-                                        putStrLn ("gif:      wrote " <> path <> " (" <> show n <> " frames)")
-                                        pushToast ui ToastSuccess "GIF saved"
-                                    Left e -> do
-                                        putStrLn ("gif:      write failed: " <> show e)
-                                        pushToast ui ToastFailure "GIF write failed"
+                saveGifRecording romPath ui capturedFrames
     resetReq <- readIORef (hkResetReq hk)
     when resetReq $ do
         writeIORef (hkResetReq hk) False
