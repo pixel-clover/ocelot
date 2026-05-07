@@ -35,6 +35,7 @@ module Ocelot.Ppu (
     framebuffer,
     framebufferRgb,
     copyFramebufferRgb,
+    copyFramebufferRgbWithPitch,
     copyFramebufferRgba,
     framebufferRgbBytes,
     framebufferRgbaBytes,
@@ -269,6 +270,26 @@ copyFramebufferRgb ptr ps = go 0
             px <- MV.unsafeRead (ppuFbRgb ps) i
             pokeByteOff ptr i px
             go (i + 1)
+
+-- | Copy the RGB framebuffer into a caller-provided buffer whose rows are separated by @pitch@ bytes.
+copyFramebufferRgbWithPitch :: Ptr Word8 -> Int -> PpuState -> IO ()
+copyFramebufferRgbWithPitch ptr pitch ps
+    | pitch == rowBytes = copyFramebufferRgb ptr ps
+    | otherwise = copyRows 0 0
+  where
+    rowBytes = framebufferWidth * 3
+    totalRows = framebufferHeight
+    copyRows !row !srcOff
+        | row >= totalRows = pure ()
+        | otherwise = do
+            copyRow srcOff (row * pitch) 0
+            copyRows (row + 1) (srcOff + rowBytes)
+
+    copyRow !_ !_ !col | col >= rowBytes = pure ()
+    copyRow !srcOff !dstOff !col = do
+        px <- MV.unsafeRead (ppuFbRgb ps) (srcOff + col)
+        pokeByteOff ptr (dstOff + col) px
+        copyRow srcOff dstOff (col + 1)
 
 -- | Copy the RGB framebuffer into a caller-provided buffer in RGBA8888 order.
 copyFramebufferRgba :: Ptr Word8 -> PpuState -> IO ()

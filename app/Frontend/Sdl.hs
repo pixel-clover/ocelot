@@ -30,11 +30,10 @@ import Codec.Picture (Image, PaletteCreationMethod (..), PaletteOptions (..), Pi
 import Codec.Picture.Gif (GifDelay, GifLooping (..), writeGifImages)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar)
-import Control.Exception (IOException, SomeException, try)
+import Control.Exception (IOException, SomeException, bracket, try)
 import Control.Monad (forM_, unless, when)
 import Data.Bits (testBit)
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Internal as BSI
 import Data.Char (isSpace, toUpper)
 import Data.Foldable (toList)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
@@ -50,7 +49,7 @@ import Data.Word (Word64, Word8)
 import Development.GitRev (gitBranch, gitHash)
 import Foreign.C.String (peekCString)
 import Foreign.C.Types (CInt)
-import Foreign.ForeignPtr (ForeignPtr, withForeignPtr)
+import Foreign.Ptr (castPtr)
 import GHC.Clock (getMonotonicTimeNSec)
 import qualified Ocelot.Apu as Apu
 import qualified Ocelot.Bus as Bus
@@ -101,24 +100,6 @@ maxBufferedSamples = 9600 -- ~100 ms of stereo samples at 48 kHz
 
 maxFrameTimeHistory :: Int
 maxFrameTimeHistory = 61
-
-rgbFramebufferBytes :: Int
-rgbFramebufferBytes = gbWidth * gbHeight * 3
-
-data RgbFrameStage = RgbFrameStage
-    { rgbFramePtr :: !(ForeignPtr Word8)
-    , rgbFrameBytes :: !BS.ByteString
-    }
-
-newRgbFrameStage :: IO RgbFrameStage
-newRgbFrameStage = do
-    fp <- BSI.mallocByteString rgbFramebufferBytes
-    pure
-        ( RgbFrameStage
-            { rgbFramePtr = fp
-            , rgbFrameBytes = BSI.fromForeignPtr fp 0 rgbFramebufferBytes
-            }
-        )
 
 data AudioQueueState = AudioQueueState
     { audioQueueBuffer :: !(VSM.IOVector Int16)
@@ -305,8 +286,6 @@ play romPath cart bootRom title scale = do
             SDL.RGB24
             SDL.TextureAccessStreaming
             (SDL.V2 (fromIntegral gbWidth) (fromIntegral gbHeight))
-    rgbStage <- newRgbFrameStage
-
     audioBuf <- newAudioQueue
     audioDev <- openAudio audioBuf
     audioPlaying <- newIORef True
@@ -318,7 +297,7 @@ play romPath cart bootRom title scale = do
 
     SDL.setAudioDevicePlaybackState audioDev SDL.Play
 
-    loop romPath titleStr hk ui machineRef cart bootRom renderer texture rgbStage paceMode audioDev audioPlaying audioBuf window
+    loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode audioDev audioPlaying audioBuf window
 
     SDL.setAudioDevicePlaybackState audioDev SDL.Pause
     SDL.closeAudioDevice audioDev
@@ -397,14 +376,13 @@ loop ::
     Maybe BS.ByteString ->
     SDL.Renderer ->
     SDL.Texture ->
-    RgbFrameStage ->
     PaceMode ->
     SDL.AudioDevice ->
     IORef Bool ->
     MVar AudioQueueState ->
     SDL.Window ->
     IO ()
-loop romPath titleStr hk ui machineRef cart bootRom renderer texture rgbStage paceMode audioDev audioPlaying audioBuf window = do
+loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode audioDev audioPlaying audioBuf window = do
     quit <- readIORef (hkQuit hk)
     unless quit $ do
         machine <- readIORef machineRef
@@ -481,9 +459,7 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture rgbStage pa
                     (SDL.P (SDL.V2 (fromIntegral dstX) (fromIntegral dstY)))
                     (SDL.V2 (fromIntegral dstW) (fromIntegral dstH))
 
-        withForeignPtr (rgbFramePtr rgbStage) $ \ptr ->
-            Ppu.copyFramebufferRgb ptr (Bus.busPpu (machineBus machine'))
-        updateTextureRgb texture (rgbFrameBytes rgbStage)
+        uploadTextureRgb texture (Bus.busPpu (machineBus machine'))
         SDL.rendererDrawColor renderer $= SDL.V4 0 0 0 255
         SDL.clear renderer
         SDL.copy renderer texture Nothing (Just dst)
@@ -508,7 +484,7 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture rgbStage pa
             modifyIORef' (uiFrameTimes ui) $ \ts ->
                 let ts' = ts Seq.|> frameEndNs
                  in if Seq.length ts' > maxFrameTimeHistory then Seq.drop 1 ts' else ts'
-        loop romPath titleStr hk ui machineRef cart bootRom renderer texture rgbStage paceMode audioDev audioPlaying audioBuf window
+        loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode audioDev audioPlaying audioBuf window
 
 gatherEvents :: Bool -> Word64 -> Maybe Word64 -> IO [SDL.Event]
 gatherEvents waitMode nowNs mDeadline
@@ -1262,13 +1238,13 @@ mapPad b = case b of
     SDLGC.ControllerButtonDpadRight -> Just ButtonRight
     _ -> Nothing
 
-{- | Streaming-update path: 'fb' is already in RGB888 with one byte per channel, so the SDL upload
-is a single 'BS.pack' away.
--}
-updateTextureRgb :: SDL.Texture -> BS.ByteString -> IO ()
-updateTextureRgb tex fb = do
-    _ <- SDL.updateTexture tex Nothing fb (fromIntegral (gbWidth * 3))
-    pure ()
+-- | Upload the current RGB888 framebuffer directly into a locked streaming texture.
+uploadTextureRgb :: SDL.Texture -> Ppu.PpuState -> IO ()
+uploadTextureRgb tex ppu =
+    bracket
+        (SDL.lockTexture tex Nothing)
+        (const (SDL.unlockTexture tex))
+        (\(ptr, pitch) -> Ppu.copyFramebufferRgbWithPitch (castPtr ptr) (fromIntegral pitch) ppu)
 
 {- | Open a native OS file picker for ROM files.  Returns 'Nothing' if no
 suitable tool is available or the user cancels.

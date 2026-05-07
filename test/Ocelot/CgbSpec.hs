@@ -257,6 +257,14 @@ spec = do
             v <- Bus.read8 0xFF4D b
             v `shouldBe` 0xFF
 
+        it "DMG-on-CGB compat ignores KEY1 writes and speed switches" $ do
+            b <- mkBusOnCgbHost mkDmgRom
+            Bus.write8 0xFF4D 0x01 b
+            v <- Bus.read8 0xFF4D b
+            switched <- Bus.triggerSpeedSwitch b
+            v `shouldBe` 0xFF
+            switched `shouldBe` False
+
         it "triggerSpeedSwitch flips bit 7 and clears prepare bit" $ do
             b <- mkBus mkCgbRom
             Bus.write8 0xFF4D 0x01 b
