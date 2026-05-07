@@ -712,11 +712,11 @@ renderPauseOverlay renderer winW title platformLabel speedLabel fast slot isCgb 
             , UiSection
                 "CONTROLS"
                 accentOrange
-                [ "Z/X    A/B"
-                , "ENTER  START"
-                , "RSHIFT SELECT"
-                , "ARROWS DPAD"
-                , "TAB    FAST FORWARD"
+                [ "[Z]/[X]  A/B"
+                , "[ENTER]  START"
+                , "[RSHIFT] SELECT"
+                , "[ARROWS] DPAD"
+                , "[TAB]  FAST FORWARD"
                 ]
             ]
     renderOverlayColumns renderer winW isCgb leftSections rightSections
@@ -727,35 +727,35 @@ renderHelpOverlay renderer winW title platformLabel speedLabel fast slot isCgb =
             [ UiSection
                 "EMULATION"
                 accentOrange
-                [ "F1     CLOSE HELP"
-                , "SPACE  PAUSE/RESUME"
-                , ".      FRAME STEP"
-                , "TAB    FAST FORWARD"
-                , "F11    FULLSCREEN"
-                , "P      PERF OVERLAY"
-                , "ESC    QUIT"
+                [ "[F1]   CLOSE HELP"
+                , "[SPC]  PAUSE/RESUME"
+                , "[.]    FRAME STEP"
+                , "[TAB]  FAST FORWARD"
+                , "[F11]  FULLSCREEN"
+                , "[P]    PERF OVERLAY"
+                , "[ESC]  QUIT"
                 ]
             , UiSection
                 "STATE"
                 accentBlue
-                [ "F5     SAVE STATE"
-                , "F7     LOAD STATE"
-                , "F6     SLOT SELECT"
-                , "F12    SCREENSHOT"
-                , "SF12   RECORD GIF"
-                , "R      HARD RESET"
-                , "O      OPEN ROM"
+                [ "[F5]   SAVE STATE"
+                , "[F7]   LOAD STATE"
+                , "[F6]   SLOT SELECT"
+                , "[F12]  SCREENSHOT"
+                , "[SF12] RECORD GIF"
+                , "[R]    HARD RESET"
+                , "[O]    OPEN ROM"
                 ]
             ]
         rightSections =
             [ UiSection
                 "INPUT"
                 accentOrange
-                [ "Z      A"
-                , "X      B"
-                , "ENTER  START"
-                , "RSHIFT SELECT"
-                , "ARROWS DPAD"
+                [ "[Z]    A"
+                , "[X]    B"
+                , "[ENTER]  START"
+                , "[RSHIFT] SELECT"
+                , "[ARROWS] DPAD"
                 ]
             , UiSection
                 "SYSTEM"
