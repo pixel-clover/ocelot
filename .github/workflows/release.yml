@@ -88,19 +88,6 @@ jobs:
           enable-stack: true
           stack-version: 'latest'
 
-      # GHC 9.6 on Windows uses Clang+LLD with --rtlib=compiler-rt.
-      # MSYS2's libSDL2main.a is compiled with GCC -fstack-protector and
-      # references __stack_chk_fail/__stack_chk_guard from libssp. LLD
-      # won't resolve these automatically; we must pass -lssp explicitly.
-      # Adding it to sdl2's ghc-options here (before the cache step so the
-      # patched stack.yaml is part of the cache key) makes Stack forward
-      # -optl-lssp/-optl-lssp_nonshared to the hsc2hs Enum_hsc_make link.
-      - name: Patch stack.yaml for Windows SSP
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          printf '\nghc-options:\n  sdl2: -optl-lssp -optl-lssp_nonshared\n' >> stack.yaml
-
       - name: Cache Stack
         uses: actions/cache@v4
         with:
@@ -132,19 +119,24 @@ jobs:
             mingw-w64-x86_64-pkg-config
           # Expose pkg-config.exe to subsequent steps (Cabal configure looks for it in PATH)
           stack exec -- sh -c 'cygpath -w /mingw64/bin' >> "$GITHUB_PATH"
+          # MSYS2's libSDL2main.a is built with GCC -fstack-protector, which
+          # references __stack_chk_fail/__stack_chk_guard from libssp. GHC 9.6
+          # on Windows uses Clang/LLD with --rtlib=compiler-rt, which does not
+          # provide those symbols. Stack's ghc-options are not forwarded to
+          # snapshot packages (like sdl2), so we cannot pass -lssp via
+          # stack.yaml. Instead, inject stub implementations directly into
+          # libSDL2main.a so LLD resolves the symbols without -lssp.
+          stack exec -- bash -c '
+            printf "#include <stdint.h>\nvoid *__stack_chk_guard = (void*)(uintptr_t)0xdeadbeef01010101ULL;\nvoid __attribute__((noreturn)) __stack_chk_fail(void) { __builtin_trap(); }\n" > /tmp/ssp_stub.c
+            gcc -fno-stack-protector -c /tmp/ssp_stub.c -o /tmp/ssp_stub.o
+            ar q /mingw64/lib/libSDL2main.a /tmp/ssp_stub.o
+            rm /tmp/ssp_stub.c /tmp/ssp_stub.o
+          '
 
       - name: Build release binary
         shell: bash
         run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            stack build ocelot:exe:ocelot \
-              --ghc-options="-O2" \
-              --ld-option="-lssp" \
-              --ld-option="-lssp_nonshared" \
-              --flag ocelot:desktop
-          else
-            stack build ocelot:exe:ocelot --ghc-options="-O2" --flag ocelot:desktop
-          fi
+          stack build ocelot:exe:ocelot --ghc-options="-O2" --flag ocelot:desktop
 
       - name: Package artifact (Linux / macOS)
         if: runner.os != 'Windows'
