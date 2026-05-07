@@ -132,6 +132,7 @@ docs/api/
 *_output.txt
 .codex
 .claude/
+.agents/
 roms/
 *.prof
 
