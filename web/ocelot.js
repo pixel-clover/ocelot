@@ -75,6 +75,11 @@ let keyMap = {...DEFAULT_KEY_MAP};
 // GB buttons available for remapping (in display order)
 const REMAP_BUTTONS = ["Up", "Down", "Left", "Right", "A", "B", "Start", "Select"];
 
+// Gamepad button index map. Keys are GB button names, values are gamepad button indices.
+// Defaults follow the W3C standard gamepad layout (Xbox / PlayStation in standard mode).
+const DEFAULT_GP_MAP = Object.freeze({Up: 12, Down: 13, Left: 14, Right: 15, A: 0, B: 1, Start: 9, Select: 8});
+let gpMap = {...DEFAULT_GP_MAP};
+
 const AXIS_THRESHOLD = 0.5;
 
 async function init() {
@@ -147,6 +152,7 @@ async function init() {
     document.getElementById("about-btn").addEventListener("click", toggleAbout);
     document.getElementById("about-close").addEventListener("click", toggleAbout);
     document.getElementById("remap-reset").addEventListener("click", resetKeyMap);
+    document.getElementById("gp-remap-reset").addEventListener("click", resetGpMap);
     document.getElementById("scanlines-toggle").addEventListener("click", () => {
         applyScanlines(!scanlinesEnabled);
         saveSettings();
@@ -210,6 +216,7 @@ async function init() {
 
     loadSettings();
     initRemapUI();
+    initGpRemapUI();
 
     setStatus(`Ready: ${readStaticString(e.ocelot_version_ptr, e.ocelot_version_len)}. Load a ROM to start playing.`);
 }
@@ -298,6 +305,7 @@ function loadSettings() {
             document.getElementById("slot-select").value = saved.slot;
         }
         if (saved.keyMap) keyMap = {...DEFAULT_KEY_MAP, ...saved.keyMap};
+        if (saved.gpMap) gpMap = {...DEFAULT_GP_MAP, ...saved.gpMap};
         if (saved.theme) applyTheme(saved.theme);
         if (saved.integerScale !== undefined) applyIntegerScale(saved.integerScale);
         else applyIntegerScale(4);
@@ -315,6 +323,7 @@ function saveSettings() {
             masterVolume,
             slot: currentSlot,
             keyMap,
+            gpMap,
             theme: document.documentElement.getAttribute("data-theme") || "dark",
             integerScale,
             scanlines: scanlinesEnabled,
@@ -424,6 +433,94 @@ function resetKeyMap() {
     keyMap = {...DEFAULT_KEY_MAP};
     saveSettings();
     refreshRemapLabels();
+}
+
+// ─── Gamepad remapping ────────────────────────────────────────────────────────
+
+function gpBtnDisplayName(btnName) {
+    const idx = gpMap[btnName];
+    return idx !== undefined ? `Btn ${idx}` : "·";
+}
+
+function initGpRemapUI() {
+    const grid = document.getElementById("gp-remap-grid");
+    if (!grid) return;
+    grid.innerHTML = "";
+    for (const btn of REMAP_BUTTONS) {
+        const row = document.createElement("div");
+        row.className = "remap-row";
+        const lbl = document.createElement("label");
+        lbl.textContent = btn;
+        const rbtn = document.createElement("button");
+        rbtn.className = "remap-btn";
+        rbtn.dataset.gpBtn = btn;
+        rbtn.textContent = gpBtnDisplayName(btn);
+        rbtn.title = "Click then press a gamepad button to bind " + btn;
+        rbtn.addEventListener("click", () => startGpListening(rbtn, btn));
+        row.append(lbl, rbtn);
+        grid.appendChild(row);
+    }
+}
+
+let activeGpRemapCleanup = null;
+
+function startGpListening(rbtn, btnName) {
+    if (activeGpRemapCleanup) activeGpRemapCleanup();
+    if (activeRemapCleanup) activeRemapCleanup();
+    rbtn.classList.add("listening");
+    rbtn.textContent = "Press a button…";
+
+    const interval = setInterval(() => {
+        const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+        for (const gp of gamepads) {
+            if (!gp || !gp.connected) continue;
+            for (let i = 0; i < gp.buttons.length; i++) {
+                if (gp.buttons[i].pressed) {
+                    cleanup();
+                    // Swap indices if another action already uses this button.
+                    const prev = gpMap[btnName];
+                    for (const name of Object.keys(gpMap)) {
+                        if (gpMap[name] === i && name !== btnName) gpMap[name] = prev;
+                    }
+                    gpMap[btnName] = i;
+                    saveSettings();
+                    refreshGpRemapLabels();
+                    return;
+                }
+            }
+        }
+    }, 50);
+
+    function onEsc(ev) {
+        if (ev.code === "Escape") {
+            ev.preventDefault();
+            cleanup();
+        }
+    }
+
+    document.addEventListener("keydown", onEsc, true);
+
+    function cleanup() {
+        clearInterval(interval);
+        document.removeEventListener("keydown", onEsc, true);
+        rbtn.classList.remove("listening");
+        rbtn.textContent = gpBtnDisplayName(btnName);
+        activeGpRemapCleanup = null;
+    }
+
+    activeGpRemapCleanup = cleanup;
+}
+
+function refreshGpRemapLabels() {
+    for (const rbtn of document.querySelectorAll(".remap-btn[data-gp-btn]")) {
+        rbtn.textContent = gpBtnDisplayName(rbtn.dataset.gpBtn);
+    }
+}
+
+function resetGpMap() {
+    gpMap = {...DEFAULT_GP_MAP};
+    saveSettings();
+    refreshGpRemapLabels();
 }
 
 // ─── Overlay helpers ──────────────────────────────────────────────────────────
@@ -922,19 +1019,15 @@ function pollGamepads() {
         const btn = (i) => gp.buttons.length > i && gp.buttons[i].pressed;
         const lx = gp.axes.length >= 2 ? gp.axes[0] : 0;
         const ly = gp.axes.length >= 2 ? gp.axes[1] : 0;
-        // W3C standard layout: Select=8, Start=9; non-standard gamepads often use 6/7.
-        const isStandard = gp.mapping === "standard";
-        const selectPressed = isStandard ? btn(8) : (btn(8) || btn(6));
-        const startPressed  = isStandard ? btn(9) : (btn(9) || btn(7));
 
-        e.ocelot_set_button(emu, BUTTONS.A, btn(0) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.B, btn(1) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Select, selectPressed ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Start, startPressed ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Up, (btn(12) || ly < -AXIS_THRESHOLD) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Down, (btn(13) || ly > AXIS_THRESHOLD) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Left, (btn(14) || lx < -AXIS_THRESHOLD) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Right, (btn(15) || lx > AXIS_THRESHOLD) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.A, btn(gpMap.A) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.B, btn(gpMap.B) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Select, btn(gpMap.Select) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Start, btn(gpMap.Start) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Up, (btn(gpMap.Up) || ly < -AXIS_THRESHOLD) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Down, (btn(gpMap.Down) || ly > AXIS_THRESHOLD) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Left, (btn(gpMap.Left) || lx < -AXIS_THRESHOLD) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Right, (btn(gpMap.Right) || lx > AXIS_THRESHOLD) ? 1 : 0);
 
         // Only use the first connected gamepad
         break;
