@@ -52,8 +52,6 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString.Internal as BSI
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int8)
-import Data.List (sortBy)
-import Data.Ord (comparing)
 import Data.Vector.Unboxed (Vector)
 import qualified Data.Vector.Unboxed as V
 import Data.Vector.Unboxed.Mutable (IOVector)
@@ -966,13 +964,20 @@ overlapsLine :: Int -> Int -> Sprite -> Bool
 overlapsLine ly height s =
     ly >= spriteY s && ly < spriteY s + height
 
-{- | Stable sort by sprite X coordinate. Used by DMG (and DMG-on-CGB
-compat / OPRI=1) sprite priority where the leftmost sprite wins, and
-ties break on OAM order. 'Data.List.sortBy' is documented as stable,
-so equal-X sprites keep their original relative order.
+{- | Stable sort by sprite X coordinate. Leftmost sprite wins; equal-X
+sprites keep their original OAM order (lower index earlier). Uses a
+simple insertion sort: the list holds at most 10 elements so merge sort's
+O(n log n) intermediate allocation is more expensive than O(n^2) here.
 -}
 stableSortByX :: [Sprite] -> [Sprite]
-stableSortByX = sortBy (comparing spriteX)
+stableSortByX = foldr insertByX []
+
+insertByX :: Sprite -> [Sprite] -> [Sprite]
+{-# INLINE insertByX #-}
+insertByX x [] = [x]
+insertByX x (y : ys)
+    | spriteX x <= spriteX y = x : y : ys
+    | otherwise = y : insertByX x ys
 
 spritePixelIdx :: IOVector Word8 -> Bool -> Int -> Int -> Sprite -> Int -> IO (Maybe Word8)
 spritePixelIdx vram cgb ly height s x

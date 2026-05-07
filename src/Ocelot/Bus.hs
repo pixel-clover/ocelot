@@ -39,7 +39,7 @@ module Ocelot.Bus (
     installBootRom,
 ) where
 
-import Control.Monad (replicateM_, when)
+import Control.Monad (when)
 import Data.Bits (complement, setBit, shiftL, testBit, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -334,6 +334,7 @@ unusable region) but can still poke at the I/O register file
 (@0xFFFF@) since those sit on a different bus internally.
 -}
 addrAccessibleDuringDma :: Word16 -> Bool
+{-# INLINE addrAccessibleDuringDma #-}
 addrAccessibleDuringDma addr = addr >= 0xFF00
 
 ppuCpuCanAccessVram :: Bus -> IO Bool
@@ -943,7 +944,9 @@ advance mCycles b = do
     -- white-screen reboot loop. Matches SameBoy 'GB_advance_cycles'
     -- 'gb->dma_cycles = cycles' (line 455) which captures the count
     -- \*before* the single-speed 'cycles <<= 1' doubling.
-    replicateM_ mCycles (stepOamDma b)
+    let stepOamDmaLoop 0 = pure ()
+        stepOamDmaLoop !n = stepOamDma b >> stepOamDmaLoop (n - 1)
+    stepOamDmaLoop mCycles
     -- The "starting" flag holds the DMA off for the duration of the
     -- triggering instruction (we run advance after the instruction has
     -- already completed its register-store side-effect). Clearing it at
@@ -968,6 +971,7 @@ drainAudioSamplesVector :: Bus -> IO (Vector Int16)
 drainAudioSamplesVector b = Apu.drainSamplesVector (busApu b)
 
 setIfBit :: Int -> Bus -> IO ()
+{-# INLINE setIfBit #-}
 setIfBit n b = do
     iflag <- MV.read (busIo b) 0x0F
     MV.write (busIo b) 0x0F (setBit iflag n)

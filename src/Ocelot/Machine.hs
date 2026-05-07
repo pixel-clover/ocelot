@@ -269,12 +269,15 @@ machineFromCartridgeWithBoot mBoot c = do
     pure (Machine cpuRef bus internalAdvance)
 
 readMem :: Word16 -> Machine -> IO Word8
+{-# INLINE readMem #-}
 readMem addr m = Bus.read8 addr (machineBus m)
 
 writeMem :: Word16 -> Word8 -> Machine -> IO ()
+{-# INLINE writeMem #-}
 writeMem addr !v m = Bus.write8 addr v (machineBus m)
 
 advanceBus :: Int -> Machine -> IO ()
+{-# INLINE advanceBus #-}
 advanceBus n m = Bus.advance n (machineBus m)
 
 {- | Variant of 'advanceBus' for use inside instruction-level handlers
@@ -285,6 +288,7 @@ subtracts it from the instruction's cycle count, avoiding a
 double-advance.
 -}
 advanceBusInline :: Int -> Machine -> IO ()
+{-# INLINE advanceBusInline #-}
 advanceBusInline n m = do
     Bus.advance n (machineBus m)
     modifyIORef' (machineInternalAdvance m) (+ n)
@@ -295,6 +299,7 @@ ticked cycle, matching SameBoy's @cycle_read@ semantics. The internal
 advance counter is bumped so the dispatcher does not double-tick.
 -}
 cycleRead :: Word16 -> Machine -> IO Word8
+{-# INLINE cycleRead #-}
 cycleRead addr m = do
     advanceBusInline 1 m
     Bus.read8 addr (machineBus m)
@@ -303,26 +308,33 @@ cycleRead addr m = do
 the byte. Mirrors 'cycleRead' for the write path.
 -}
 cycleWrite :: Word16 -> Word8 -> Machine -> IO ()
+{-# INLINE cycleWrite #-}
 cycleWrite addr !v m = do
     advanceBusInline 1 m
     Bus.write8 addr v (machineBus m)
 
 -- | Tick the bus by 1 M-cycle without an access (internal cycles).
 cycleNoAccess :: Machine -> IO ()
+{-# INLINE cycleNoAccess #-}
 cycleNoAccess = advanceBusInline 1
 
 getCpu :: Machine -> IO CpuState
+{-# INLINE getCpu #-}
 getCpu m = readIORef (machineCpu m)
 
 putCpu :: CpuState -> Machine -> IO ()
+{-# INLINE putCpu #-}
 putCpu c m = writeIORef (machineCpu m) c
 
 getCpuRegs :: Machine -> IO Registers
+{-# INLINE getCpuRegs #-}
 getCpuRegs m = cpuRegs <$> readIORef (machineCpu m)
 
 mapCpu :: (CpuState -> CpuState) -> Machine -> IO ()
+{-# INLINE mapCpu #-}
 mapCpu f m = modifyIORef' (machineCpu m) f
 
 mapCpuRegs :: (Registers -> Registers) -> Machine -> IO ()
+{-# INLINE mapCpuRegs #-}
 mapCpuRegs f m =
     modifyIORef' (machineCpu m) (\c -> c{cpuRegs = f (cpuRegs c)})

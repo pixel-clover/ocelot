@@ -213,6 +213,7 @@ interruptVector :: Int -> Word16
 interruptVector n = 0x40 + fromIntegral n * 8
 
 lowestSetBit :: Word8 -> Int
+{-# INLINE lowestSetBit #-}
 lowestSetBit = go 0
   where
     go i w
@@ -661,11 +662,13 @@ execute instr m = case instr of
     Unknown _ -> mapCpu (\c -> c{cpuHalted = True}) m >> pure 1
 
 ldRRcycles :: Reg8 -> Reg8 -> MCycles
+{-# INLINE ldRRcycles #-}
 ldRRcycles RIndHL _ = 2
 ldRRcycles _ RIndHL = 2
 ldRRcycles _ _ = 1
 
 applyInc :: Reg8 -> Machine -> IO MCycles
+{-# INLINE applyInc #-}
 applyInc r m = do
     v <- getReg8 r m
     cIn <- getFlagC m
@@ -675,6 +678,7 @@ applyInc r m = do
     pure (if r == RIndHL then 3 else 1)
 
 applyDec :: Reg8 -> Machine -> IO MCycles
+{-# INLINE applyDec #-}
 applyDec r m = do
     v <- getReg8 r m
     cIn <- getFlagC m
@@ -684,6 +688,7 @@ applyDec r m = do
     pure (if r == RIndHL then 3 else 1)
 
 applyAlu :: AluOp -> Word8 -> Machine -> IO ()
+{-# INLINE applyAlu #-}
 applyAlu op operand m = do
     a <- getReg8 RA m
     cIn <- getFlagC m
@@ -702,6 +707,7 @@ applyAlu op operand m = do
     setFlagsByte (flagsToByte flags) m
 
 aRotate :: (Word8 -> (Word8, Alu.Flags)) -> Machine -> IO MCycles
+{-# INLINE aRotate #-}
 aRotate op m = do
     a <- getReg8 RA m
     let (a', flags) = op a
@@ -711,6 +717,7 @@ aRotate op m = do
     pure 1
 
 aRotateC :: (Word8 -> Bool -> (Word8, Alu.Flags)) -> Machine -> IO MCycles
+{-# INLINE aRotateC #-}
 aRotateC op m = do
     a <- getReg8 RA m
     cIn <- getFlagC m
@@ -725,6 +732,7 @@ cbRotate ::
     Reg8 ->
     Machine ->
     IO MCycles
+{-# INLINE cbRotate #-}
 cbRotate op r m = do
     v <- getReg8 r m
     let (v', flags) = op v
@@ -737,6 +745,7 @@ cbRotateC ::
     Reg8 ->
     Machine ->
     IO MCycles
+{-# INLINE cbRotateC #-}
 cbRotateC op r m = do
     v <- getReg8 r m
     cIn <- getFlagC m
@@ -752,6 +761,7 @@ jumpRelative e m = do
     mapCpuRegs (\r -> r{regPC = target}) m
 
 testCond :: Cond -> Machine -> IO Bool
+{-# INLINE testCond #-}
 testCond c m = do
     f <- regF <$> getCpuRegs m
     pure $ case c of
@@ -761,6 +771,7 @@ testCond c m = do
         CondC -> testBit f 4
 
 getReg8 :: Reg8 -> Machine -> IO Word8
+{-# INLINE getReg8 #-}
 getReg8 r m = case r of
     RA -> regA <$> getCpuRegs m
     RB -> regB <$> getCpuRegs m
@@ -779,6 +790,7 @@ getReg8 r m = case r of
         cycleRead hl m
 
 setReg8 :: Reg8 -> Word8 -> Machine -> IO ()
+{-# INLINE setReg8 #-}
 setReg8 r v m = case r of
     RA -> mapCpuRegs (\rs -> rs{regA = v}) m
     RB -> mapCpuRegs (\rs -> rs{regB = v}) m
@@ -792,6 +804,7 @@ setReg8 r v m = case r of
         cycleWrite hl v m
 
 getReg16 :: Reg16 -> Machine -> IO Word16
+{-# INLINE getReg16 #-}
 getReg16 r m = case r of
     RBC -> getBC <$> getCpuRegs m
     RDE -> getDE <$> getCpuRegs m
@@ -799,6 +812,7 @@ getReg16 r m = case r of
     RSP -> regSP <$> getCpuRegs m
 
 setReg16 :: Reg16 -> Word16 -> Machine -> IO ()
+{-# INLINE setReg16 #-}
 setReg16 r v m = case r of
     RBC -> mapCpuRegs (setBC v) m
     RDE -> mapCpuRegs (setDE v) m
@@ -820,6 +834,7 @@ setReg16Stack s v m = case s of
     SHL -> mapCpuRegs (setHL v) m
 
 flagsToByte :: Alu.Flags -> Word8
+{-# INLINE flagsToByte #-}
 flagsToByte (Alu.Flags z n h c) =
     (if z then 0x80 else 0)
         .|. (if n then 0x40 else 0)
@@ -827,11 +842,14 @@ flagsToByte (Alu.Flags z n h c) =
         .|. (if c then 0x10 else 0)
 
 byteToFlags :: Word8 -> Alu.Flags
+{-# INLINE byteToFlags #-}
 byteToFlags b =
     Alu.Flags (testBit b 7) (testBit b 6) (testBit b 5) (testBit b 4)
 
 setFlagsByte :: Word8 -> Machine -> IO ()
+{-# INLINE setFlagsByte #-}
 setFlagsByte b = mapCpuRegs (\r -> r{regF = b .&. 0xF0})
 
 getFlagC :: Machine -> IO Bool
+{-# INLINE getFlagC #-}
 getFlagC m = (\r -> testBit (regF r) 4) <$> getCpuRegs m

@@ -95,6 +95,14 @@ data ApuInternal = ApuInternal
     , apuSampleAcc :: !Int
     -- ^ Sample-rate accumulator. Increments by 'sampleRate' per T-cycle;
     -- when it reaches 'gbTCycleRate' a sample is emitted.
+    , apuCh1Timer :: !Int
+    -- ^ Frequency timer for ch1 (square). Kept here rather than in 'Square'
+    -- so 'batchAdvance' can update it without allocating a new channel record.
+    , apuCh2Timer :: !Int
+    , apuCh3Timer :: !Int
+    -- ^ Frequency timer for ch3 (wave).
+    , apuCh4Timer :: !Int
+    -- ^ Frequency timer for ch4 (noise).
     , apuVolL :: !Word8
     , apuVolR :: !Word8
     , apuNr50 :: !Word8
@@ -143,7 +151,6 @@ data Square = Square
     -- ^ True if at least one sweep calculation has been performed in
     -- negate mode since the last channel trigger. Clearing the negate
     -- bit (NR10 bit 3) while this flag is set immediately disables ch1.
-    , sqFreqTimer :: !Int
     , sqDutyPos :: !Int
     }
     deriving (Eq, Show)
@@ -169,7 +176,6 @@ initialSquare =
         , sqSweepShadow = 0
         , sqSweepEnabled = False
         , sqSweepNegUsed = False
-        , sqFreqTimer = 1
         , sqDutyPos = 0
         }
 
@@ -181,7 +187,6 @@ data Wave = Wave
     -- ^ 0=mute, 1=100%, 2=50%, 3=25%
     , wvLength :: !Int
     , wvLengthEn :: !Bool
-    , wvFreqTimer :: !Int
     , wvPos :: !Int
     -- ^ 0..31 (each step is one 4-bit sample)
     , wvJustRead :: !Bool
@@ -205,7 +210,6 @@ initialWave =
         , wvVolumeShift = 0
         , wvLength = 0
         , wvLengthEn = False
-        , wvFreqTimer = 1
         , wvPos = 0
         , wvJustRead = False
         , wvJustReadCountdown = 0
@@ -225,7 +229,6 @@ data Noise = Noise
     , noWidthMode7 :: !Bool
     -- ^ True = 7-bit LFSR, False = 15-bit
     , noDivisorCode :: !Int
-    , noFreqTimer :: !Int
     , noLfsr :: !Int
     -- ^ 15-bit shift register, init to 0x7FFF on trigger.
     }
@@ -246,7 +249,6 @@ initialNoise =
         , noClockShift = 0
         , noWidthMode7 = False
         , noDivisorCode = 0
-        , noFreqTimer = 1
         , noLfsr = 0x7FFF
         }
 
@@ -260,6 +262,10 @@ initialApuInternal =
         , apuFrameStep = 0
         , apuFrameTimer = frameSequencerPeriod
         , apuSampleAcc = 0
+        , apuCh1Timer = 1
+        , apuCh2Timer = 1
+        , apuCh3Timer = 1
+        , apuCh4Timer = 1
         , apuVolL = 7
         , apuVolR = 7
         , apuNr50 = 0x77
@@ -383,6 +389,10 @@ encodeApu s =
         <> Snap.putU32 (fromIntegral (apuFrameStep s))
         <> Snap.putU32 (fromIntegral (apuFrameTimer s))
         <> Snap.putU32 (fromIntegral (apuSampleAcc s))
+        <> Snap.putU32 (fromIntegral (apuCh1Timer s))
+        <> Snap.putU32 (fromIntegral (apuCh2Timer s))
+        <> Snap.putU32 (fromIntegral (apuCh3Timer s))
+        <> Snap.putU32 (fromIntegral (apuCh4Timer s))
         <> Snap.putU8 (apuVolL s)
         <> Snap.putU8 (apuVolR s)
         <> Snap.putU8 (apuNr50 s)
@@ -401,6 +411,10 @@ decodeApu = do
     fstep <- fromIntegral <$> Snap.getU32
     ftimer <- fromIntegral <$> Snap.getU32
     sacc <- fromIntegral <$> Snap.getU32
+    ch1t <- fromIntegral <$> Snap.getU32
+    ch2t <- fromIntegral <$> Snap.getU32
+    ch3t <- fromIntegral <$> Snap.getU32
+    ch4t <- fromIntegral <$> Snap.getU32
     volL <- Snap.getU8
     volR <- Snap.getU8
     nr50 <- Snap.getU8
@@ -418,6 +432,10 @@ decodeApu = do
             , apuFrameStep = fstep
             , apuFrameTimer = ftimer
             , apuSampleAcc = sacc
+            , apuCh1Timer = ch1t
+            , apuCh2Timer = ch2t
+            , apuCh3Timer = ch3t
+            , apuCh4Timer = ch4t
             , apuVolL = volL
             , apuVolR = volR
             , apuNr50 = nr50
@@ -452,7 +470,6 @@ encodeSquare q =
         <> Snap.putU8 (fromIntegral (sqSweepTimer q))
         <> Snap.putU16 (fromIntegral (sqSweepShadow q))
         <> Snap.putBool (sqSweepEnabled q)
-        <> Snap.putU16 (fromIntegral (sqFreqTimer q))
         <> Snap.putU8 (fromIntegral (sqDutyPos q))
 
 decodeSquare :: Snap.Cursor Square
@@ -474,7 +491,6 @@ decodeSquare = do
     swT <- fromIntegral <$> Snap.getU8
     swSha <- fromIntegral <$> Snap.getU16
     swEn <- Snap.getBool
-    fT <- fromIntegral <$> Snap.getU16
     dPos <- fromIntegral <$> Snap.getU8
     pure
         Square
@@ -496,7 +512,6 @@ decodeSquare = do
             , sqSweepShadow = swSha
             , sqSweepEnabled = swEn
             , sqSweepNegUsed = False -- transient: cleared on every trigger
-            , sqFreqTimer = fT
             , sqDutyPos = dPos
             }
 
@@ -508,7 +523,6 @@ encodeWave w =
         <> Snap.putU8 (fromIntegral (wvVolumeShift w))
         <> Snap.putU16 (fromIntegral (wvLength w))
         <> Snap.putBool (wvLengthEn w)
-        <> Snap.putU16 (fromIntegral (wvFreqTimer w))
         <> Snap.putU8 (fromIntegral (wvPos w))
 
 decodeWave :: Snap.Cursor Wave
@@ -519,7 +533,6 @@ decodeWave = do
     volSh <- fromIntegral <$> Snap.getU8
     len <- fromIntegral <$> Snap.getU16
     lenEn <- Snap.getBool
-    fT <- fromIntegral <$> Snap.getU16
     pos <- fromIntegral <$> Snap.getU8
     pure
         Wave
@@ -529,7 +542,6 @@ decodeWave = do
             , wvVolumeShift = volSh
             , wvLength = len
             , wvLengthEn = lenEn
-            , wvFreqTimer = fT
             , wvPos = pos
             , -- Transient latches; safe to default to zero / False on
               -- snapshot load. Worst case the very next CPU wave-RAM
@@ -553,7 +565,6 @@ encodeNoise n =
         <> Snap.putU8 (fromIntegral (noClockShift n))
         <> Snap.putBool (noWidthMode7 n)
         <> Snap.putU8 (fromIntegral (noDivisorCode n))
-        <> Snap.putU16 (fromIntegral (noFreqTimer n))
         <> Snap.putU16 (fromIntegral (noLfsr n))
 
 decodeNoise :: Snap.Cursor Noise
@@ -570,7 +581,6 @@ decodeNoise = do
     cs <- fromIntegral <$> Snap.getU8
     w7 <- Snap.getBool
     dc <- fromIntegral <$> Snap.getU8
-    fT <- fromIntegral <$> Snap.getU16
     lfsr <- fromIntegral <$> Snap.getU16
     pure
         Noise
@@ -586,7 +596,6 @@ decodeNoise = do
             , noClockShift = cs
             , noWidthMode7 = w7
             , noDivisorCode = dc
-            , noFreqTimer = fT
             , noLfsr = lfsr
             }
 
@@ -902,19 +911,18 @@ writeNr14 v s =
         !ch2 = if trigger then triggerSquare ch1 True else ch1
         !postClock = trigger && lengthEn && firstHalf && (lenJustEn || preTrigLen == 0)
         !ch3 = applyExtraClockSq postClock True ch2
-     in s{apuCh1 = ch3}
+        !t1' = if trigger then (2048 - freq) * 4 else apuCh1Timer s
+     in s{apuCh1 = ch3, apuCh1Timer = t1'}
 
 triggerSquare :: Square -> Bool -> Square
 triggerSquare ch hasSweep =
     let !lengthRel = if sqLength ch == 0 then 64 else sqLength ch
-        !period = (2048 - sqFreq ch) * 4
         !ch1 =
             ch
                 { sqEnabled = sqDacOn ch
                 , sqLength = lengthRel
                 , sqVolume = sqEnvInitial ch
                 , sqEnvTimer = if sqEnvPeriod ch == 0 then 8 else sqEnvPeriod ch
-                , sqFreqTimer = period
                 , sqDutyPos = 0
                 }
         !ch2 =
@@ -1007,7 +1015,8 @@ writeNr24 v s =
         !ch2 = if trigger then triggerSquare ch1 False else ch1
         !postClock = trigger && lengthEn && firstHalf && (lenJustEn || preTrigLen == 0)
         !ch3 = applyExtraClockSq postClock True ch2
-     in s{apuCh2 = ch3}
+        !t2' = if trigger then (2048 - freq) * 4 else apuCh2Timer s
+     in s{apuCh2 = ch3, apuCh2Timer = t2'}
 
 writeNr30 :: Word8 -> ApuInternal -> ApuInternal
 writeNr30 v s =
@@ -1063,12 +1072,12 @@ writeNr34 cgb v s =
         -- positions 0..3 of wave RAM. Per Lior Halphon's SameBoy, the
         -- "just about to read" condition lines up with the cycle the
         -- frequency timer is about to wrap (we approximate with the
-        -- low watermark of 'wvFreqTimer'). On CGB this glitch is fixed.
+        -- low watermark of 'apuCh3Timer'). On CGB this glitch is fixed.
         !shouldCorrupt =
             trigger
                 && not cgb
                 && wvEnabled ch1
-                && wvFreqTimer ch1 <= 2
+                && apuCh3Timer s <= 2
         !waveRam' =
             if shouldCorrupt
                 then corruptWaveRam (wvPos ch1) (apuWaveRam s)
@@ -1079,13 +1088,13 @@ writeNr34 cgb v s =
                     ch1
                         { wvEnabled = wvDacOn ch1
                         , wvLength = if wvLength ch1 == 0 then 256 else wvLength ch1
-                        , wvFreqTimer = (2048 - freq) * 2
                         , wvPos = 0
                         }
                 else ch1
         !postClock = trigger && lengthEn && firstHalf && (lenJustEn || preTrigLen == 0)
         !ch3 = applyExtraClockWave postClock True ch2
-     in s{apuCh3 = ch3, apuWaveRam = waveRam'}
+        !t3' = if trigger then (2048 - freq) * 2 else apuCh3Timer s
+     in s{apuCh3 = ch3, apuWaveRam = waveRam', apuCh3Timer = t3'}
 
 {- | Apply the DMG wave-RAM corruption transform. The byte index of the
 upcoming wave-RAM read is @offset = ((pos + 1) \`div\` 2) \`mod\` 16@.
@@ -1155,13 +1164,13 @@ writeNr44 v s =
                         , noVolume = noEnvInitial ch1
                         , noEnvTimer =
                             if noEnvPeriod ch1 == 0 then 8 else noEnvPeriod ch1
-                        , noFreqTimer = noiseTimerPeriod ch1
                         , noLfsr = 0x7FFF
                         }
                 else ch1
         !postClock = trigger && lengthEn && firstHalf && (lenJustEn || preTrigLen == 0)
         !ch3 = applyExtraClockNoise postClock True ch2
-     in s{apuCh4 = ch3}
+        !t4' = if trigger then noiseTimerPeriod ch1 else apuCh4Timer s
+     in s{apuCh4 = ch3, apuCh4Timer = t4'}
 
 noiseTimerPeriod :: Noise -> Int
 noiseTimerPeriod n =
@@ -1175,6 +1184,7 @@ noiseTimerPeriod n =
 ----------------------------------------------------------------------
 
 advance :: Int -> ApuState -> IO ()
+{-# INLINE advance #-}
 advance mCycles apu = do
     s0 <- readIORef (apuRef apu)
     let !totalT = mCycles * 4
@@ -1207,10 +1217,10 @@ stepCycles totalT s0 sampleQueue = go totalT s0
 
     -- Smallest cycle count until any timer fires its event.
     computeChunk !remaining !s =
-        let !c1 = sqFreqTimer (apuCh1 s)
-            !c2 = sqFreqTimer (apuCh2 s)
-            !c3 = wvFreqTimer (apuCh3 s)
-            !c4 = noFreqTimer (apuCh4 s)
+        let !c1 = apuCh1Timer s
+            !c2 = apuCh2Timer s
+            !c3 = apuCh3Timer s
+            !c4 = apuCh4Timer s
             !cf = apuFrameTimer s
             -- ceil((gbTCycleRate - sa) / sampleRate): cycles until the
             -- accumulator first crosses the emission threshold.
@@ -1225,17 +1235,25 @@ stepCycles totalT s0 sampleQueue = go totalT s0
                                     min cf cs
 
     batchAdvance !t !s =
-        let !ch1 = tickSquare t (apuCh1 s)
-            !ch2 = tickSquare t (apuCh2 s)
-            !ch3 = tickWave t (apuCh3 s)
-            !ch4 = tickNoise t (apuCh4 s)
+        let !c1 = apuCh1Timer s
+            !c2 = apuCh2Timer s
+            !c3 = apuCh3Timer s
+            !c4 = apuCh4Timer s
+            (!t1', !ch1') = tickSquare t c1 (apuCh1 s)
+            (!t2', !ch2') = tickSquare t c2 (apuCh2 s)
+            (!t3', !ch3') = tickWave t c3 (apuCh3 s)
+            (!t4', !ch4') = tickNoise t c4 (apuCh4 s)
             !ft = apuFrameTimer s - t
             !sa = apuSampleAcc s + t * sampleRate
          in s
-                { apuCh1 = ch1
-                , apuCh2 = ch2
-                , apuCh3 = ch3
-                , apuCh4 = ch4
+                { apuCh1 = ch1'
+                , apuCh2 = ch2'
+                , apuCh3 = ch3'
+                , apuCh4 = ch4'
+                , apuCh1Timer = t1'
+                , apuCh2Timer = t2'
+                , apuCh3Timer = t3'
+                , apuCh4Timer = t4'
                 , apuFrameTimer = ft
                 , apuSampleAcc = sa
                 }
@@ -1257,42 +1275,42 @@ stepCycles totalT s0 sampleQueue = go totalT s0
                     pure s''
         | otherwise = pure s
 
-{- | Tick the square channel by @t@ T-cycles. Handles multi-cycle ticks
-correctly: when @t@ crosses one or more period boundaries, advances
-@sqDutyPos@ by the number of crossings and computes the residual
-timer. Allows the outer @stepCycles@ loop to batch many T-cycles
-into one allocation per channel instead of one per cycle.
+{- | Tick the square channel by @t@ T-cycles.
+
+Returns @(newTimer, newSquare)@. When @t < curr@ (timer has not yet
+fired) the returned Square is the same pointer as the input — no
+allocation. Only a timer expiry (the @otherwise@ branch) allocates a
+new Square, and only one channel expires per chunk by construction.
 -}
-tickSquare :: Int -> Square -> Square
-tickSquare !t sq
-    | t == 0 = sq
-    | t < curr = sq{sqFreqTimer = curr - t}
+tickSquare :: Int -> Int -> Square -> (Int, Square)
+{-# INLINE tickSquare #-}
+tickSquare !t !curr sq
+    | t == 0 = (curr, sq)
+    | t < curr = (curr - t, sq)
     | otherwise =
         let !period = max 1 ((2048 - sqFreq sq) * 4)
             !overshoot = t - curr
             !crossings = 1 + overshoot `div` period
             !pos' = (sqDutyPos sq + crossings) `mod` 8
             !timer' = period - overshoot `mod` period
-         in sq{sqFreqTimer = timer', sqDutyPos = pos'}
-  where
-    !curr = sqFreqTimer sq
+         in (timer', sq{sqDutyPos = pos'})
 
-{- | Tick the wave channel by @t@ T-cycles. Like 'tickSquare' plus the
-@wvJustRead@ pulse: the flag is True for 4 T-cycles after each
-period crossing. For multi-cycle ticks where one or more crossings
-happen, the residual countdown is @max 0 (4 - remainder)@ where
-@remainder@ is the cycles since the last crossing.
+{- | Tick the wave channel by @t@ T-cycles.
+
+Returns @(newTimer, newWave)@. In the common @t < curr@ case the Wave
+record is only replaced when the @wvJustRead@ countdown actually
+changes (i.e. when the channel just read a sample byte); otherwise the
+same pointer is returned and no heap allocation occurs.
 -}
-tickWave :: Int -> Wave -> Wave
-tickWave !t w
-    | t == 0 = w
+tickWave :: Int -> Int -> Wave -> (Int, Wave)
+{-# INLINE tickWave #-}
+tickWave !t !curr w
+    | t == 0 = (curr, w)
     | t < curr =
         let !cd = max 0 (wvJustReadCountdown w - t)
-         in w
-                { wvFreqTimer = curr - t
-                , wvJustReadCountdown = cd
-                , wvJustRead = cd > 0
-                }
+         in if cd == wvJustReadCountdown w
+                then (curr - t, w)
+                else (curr - t, w{wvJustReadCountdown = cd, wvJustRead = cd > 0})
     | otherwise =
         let !period = max 1 ((2048 - wvFreq w) * 2)
             !overshoot = t - curr
@@ -1302,33 +1320,33 @@ tickWave !t w
             !timer' = period - remainder
             -- Last crossing happened `remainder` cycles before chunk end.
             !cd = max 0 (4 - remainder)
-         in w
-                { wvFreqTimer = timer'
-                , wvPos = pos'
+         in ( timer'
+            , w
+                { wvPos = pos'
                 , wvJustRead = cd > 0
                 , wvJustReadCountdown = cd
                 }
-  where
-    !curr = wvFreqTimer w
+            )
 
-{- | Tick the noise channel by @t@ T-cycles. The LFSR advances one step
-per period crossing; for multi-cycle ticks we loop the LFSR forward
-by the crossing count (cheap word ops, no allocation) and only
-allocate one new 'Noise' record at the end.
+{- | Tick the noise channel by @t@ T-cycles.
+
+Returns @(newTimer, newNoise)@. When @t < curr@ the same Noise pointer
+is returned (no LFSR change, no allocation). Only a timer expiry
+allocates a new Noise record.
 -}
-tickNoise :: Int -> Noise -> Noise
-tickNoise !t n
-    | t == 0 = n
-    | t < curr = n{noFreqTimer = curr - t}
+tickNoise :: Int -> Int -> Noise -> (Int, Noise)
+{-# INLINE tickNoise #-}
+tickNoise !t !curr n
+    | t == 0 = (curr, n)
+    | t < curr = (curr - t, n)
     | otherwise =
         let !period = max 1 (noiseTimerPeriod n)
             !overshoot = t - curr
             !crossings = 1 + overshoot `div` period
             !lfsr' = stepLfsrN (noLfsr n) (noWidthMode7 n) crossings
             !timer' = period - overshoot `mod` period
-         in n{noFreqTimer = timer', noLfsr = lfsr'}
+         in (timer', n{noLfsr = lfsr'})
   where
-    !curr = noFreqTimer n
     stepLfsrN !lfsr _ 0 = lfsr
     stepLfsrN !lfsr !mode7 !k =
         let !bit01 = (lfsr `xor` (lfsr `shiftR` 1)) .&. 0x01

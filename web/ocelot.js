@@ -20,8 +20,8 @@ let audioBufferLevel = 0;
 let audioBufferCapacity = 0;
 let audioFrameCounter = 0;
 
-// Video scale (0 = auto, 1–4 = explicit integer multiple)
-let integerScale = 0;
+// Video scale (1–4 = explicit integer multiple, -1 = fit)
+let integerScale = 4;
 let scanlinesEnabled = false;
 
 // Storage
@@ -75,13 +75,18 @@ let keyMap = {...DEFAULT_KEY_MAP};
 // GB buttons available for remapping (in display order)
 const REMAP_BUTTONS = ["Up", "Down", "Left", "Right", "A", "B", "Start", "Select"];
 
+// Gamepad button index map. Keys are GB button names, values are gamepad button indices.
+// Defaults follow the W3C standard gamepad layout (Xbox / PlayStation in standard mode).
+const DEFAULT_GP_MAP = Object.freeze({Up: 12, Down: 13, Left: 14, Right: 15, A: 0, B: 1, Start: 9, Select: 8});
+let gpMap = {...DEFAULT_GP_MAP};
+
 const AXIS_THRESHOLD = 0.5;
 
 async function init() {
     canvas = document.getElementById("screen");
     ctx = canvas.getContext("2d");
     ctx.imageSmoothingEnabled = false;
-    applyIntegerScale(0);
+    applyIntegerScale(4);
 
     const wasi = await createWasiBridge();
 
@@ -147,6 +152,7 @@ async function init() {
     document.getElementById("about-btn").addEventListener("click", toggleAbout);
     document.getElementById("about-close").addEventListener("click", toggleAbout);
     document.getElementById("remap-reset").addEventListener("click", resetKeyMap);
+    document.getElementById("gp-remap-reset").addEventListener("click", resetGpMap);
     document.getElementById("scanlines-toggle").addEventListener("click", () => {
         applyScanlines(!scanlinesEnabled);
         saveSettings();
@@ -210,6 +216,7 @@ async function init() {
 
     loadSettings();
     initRemapUI();
+    initGpRemapUI();
 
     setStatus(`Ready: ${readStaticString(e.ocelot_version_ptr, e.ocelot_version_len)}. Load a ROM to start playing.`);
 }
@@ -298,12 +305,13 @@ function loadSettings() {
             document.getElementById("slot-select").value = saved.slot;
         }
         if (saved.keyMap) keyMap = {...DEFAULT_KEY_MAP, ...saved.keyMap};
+        if (saved.gpMap) gpMap = {...DEFAULT_GP_MAP, ...saved.gpMap};
         if (saved.theme) applyTheme(saved.theme);
         if (saved.integerScale !== undefined) applyIntegerScale(saved.integerScale);
-        else applyIntegerScale(0);
+        else applyIntegerScale(4);
         if (saved.scanlines !== undefined) applyScanlines(saved.scanlines);
     } catch (_) {
-        applyIntegerScale(0);
+        applyIntegerScale(4);
     }
     document.getElementById("audio-toggle").textContent = audioEnabled ? "ON" : "OFF";
 }
@@ -315,7 +323,8 @@ function saveSettings() {
             masterVolume,
             slot: currentSlot,
             keyMap,
-            theme: document.documentElement.getAttribute("data-theme") || "light",
+            gpMap,
+            theme: document.documentElement.getAttribute("data-theme") || "dark",
             integerScale,
             scanlines: scanlinesEnabled,
         }));
@@ -326,7 +335,7 @@ function saveSettings() {
 // ─── Theme ────────────────────────────────────────────────────────────────────
 
 function toggleTheme() {
-    const current = document.documentElement.getAttribute("data-theme") || "light";
+    const current = document.documentElement.getAttribute("data-theme") || "dark";
     applyTheme(current === "dark" ? "light" : "dark");
     saveSettings();
 }
@@ -424,6 +433,94 @@ function resetKeyMap() {
     keyMap = {...DEFAULT_KEY_MAP};
     saveSettings();
     refreshRemapLabels();
+}
+
+// ─── Gamepad remapping ────────────────────────────────────────────────────────
+
+function gpBtnDisplayName(btnName) {
+    const idx = gpMap[btnName];
+    return idx !== undefined ? `Btn ${idx}` : "·";
+}
+
+function initGpRemapUI() {
+    const grid = document.getElementById("gp-remap-grid");
+    if (!grid) return;
+    grid.innerHTML = "";
+    for (const btn of REMAP_BUTTONS) {
+        const row = document.createElement("div");
+        row.className = "remap-row";
+        const lbl = document.createElement("label");
+        lbl.textContent = btn;
+        const rbtn = document.createElement("button");
+        rbtn.className = "remap-btn";
+        rbtn.dataset.gpBtn = btn;
+        rbtn.textContent = gpBtnDisplayName(btn);
+        rbtn.title = "Click then press a gamepad button to bind " + btn;
+        rbtn.addEventListener("click", () => startGpListening(rbtn, btn));
+        row.append(lbl, rbtn);
+        grid.appendChild(row);
+    }
+}
+
+let activeGpRemapCleanup = null;
+
+function startGpListening(rbtn, btnName) {
+    if (activeGpRemapCleanup) activeGpRemapCleanup();
+    if (activeRemapCleanup) activeRemapCleanup();
+    rbtn.classList.add("listening");
+    rbtn.textContent = "Press a button…";
+
+    const interval = setInterval(() => {
+        const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+        for (const gp of gamepads) {
+            if (!gp || !gp.connected) continue;
+            for (let i = 0; i < gp.buttons.length; i++) {
+                if (gp.buttons[i].pressed) {
+                    cleanup();
+                    // Swap indices if another action already uses this button.
+                    const prev = gpMap[btnName];
+                    for (const name of Object.keys(gpMap)) {
+                        if (gpMap[name] === i && name !== btnName) gpMap[name] = prev;
+                    }
+                    gpMap[btnName] = i;
+                    saveSettings();
+                    refreshGpRemapLabels();
+                    return;
+                }
+            }
+        }
+    }, 50);
+
+    function onEsc(ev) {
+        if (ev.code === "Escape") {
+            ev.preventDefault();
+            cleanup();
+        }
+    }
+
+    document.addEventListener("keydown", onEsc, true);
+
+    function cleanup() {
+        clearInterval(interval);
+        document.removeEventListener("keydown", onEsc, true);
+        rbtn.classList.remove("listening");
+        rbtn.textContent = gpBtnDisplayName(btnName);
+        activeGpRemapCleanup = null;
+    }
+
+    activeGpRemapCleanup = cleanup;
+}
+
+function refreshGpRemapLabels() {
+    for (const rbtn of document.querySelectorAll(".remap-btn[data-gp-btn]")) {
+        rbtn.textContent = gpBtnDisplayName(rbtn.dataset.gpBtn);
+    }
+}
+
+function resetGpMap() {
+    gpMap = {...DEFAULT_GP_MAP};
+    saveSettings();
+    refreshGpRemapLabels();
 }
 
 // ─── Overlay helpers ──────────────────────────────────────────────────────────
@@ -923,14 +1020,14 @@ function pollGamepads() {
         const lx = gp.axes.length >= 2 ? gp.axes[0] : 0;
         const ly = gp.axes.length >= 2 ? gp.axes[1] : 0;
 
-        e.ocelot_set_button(emu, BUTTONS.A, btn(0) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.B, btn(1) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Select, btn(8) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Start, btn(9) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Up, (btn(12) || ly < -AXIS_THRESHOLD) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Down, (btn(13) || ly > AXIS_THRESHOLD) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Left, (btn(14) || lx < -AXIS_THRESHOLD) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Right, (btn(15) || lx > AXIS_THRESHOLD) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.A, btn(gpMap.A) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.B, btn(gpMap.B) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Select, btn(gpMap.Select) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Start, btn(gpMap.Start) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Up, (btn(gpMap.Up) || ly < -AXIS_THRESHOLD) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Down, (btn(gpMap.Down) || ly > AXIS_THRESHOLD) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Left, (btn(gpMap.Left) || lx < -AXIS_THRESHOLD) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Right, (btn(gpMap.Right) || lx > AXIS_THRESHOLD) ? 1 : 0);
 
         // Only use the first connected gamepad
         break;
@@ -1158,13 +1255,19 @@ function applyIntegerScale(n) {
     const availH = isFs ? window.innerHeight : windowAvailH();
 
     let w, h;
-    if (n === -1) {
-        const s = Math.min(availW / 160, availH / 144);
-        w = Math.floor(160 * s);
-        h = Math.floor(144 * s);
-    } else if (n === -2) {
-        w = Math.floor(availW);
-        h = Math.floor(availH);
+    if (n === -1 || isFs) {
+        // Fit mode, or fullscreen: scale to fill available space preserving AR.
+        // In fullscreen we always use the best integer fit (matching desktop behaviour)
+        // regardless of which scale button is selected.
+        if (isFs) {
+            const s = Math.max(1, Math.floor(Math.min(availW / 160, availH / 144)));
+            w = 160 * s;
+            h = 144 * s;
+        } else {
+            const s = Math.min(availW / 160, availH / 144);
+            w = Math.floor(160 * s);
+            h = Math.floor(144 * s);
+        }
     } else {
         const s = n > 0 ? n : computeBestScale();
         w = 160 * s;
@@ -1174,6 +1277,9 @@ function applyIntegerScale(n) {
     if (canvas) {
         canvas.style.width = w + "px";
         canvas.style.height = h + "px";
+        // Integer modes and fullscreen use nearest-neighbour (sharp pixels).
+        // Fit mode outside fullscreen uses bilinear (no jagged edges at non-integer ratios).
+        canvas.style.imageRendering = (n < 0 && !isFs) ? "auto" : "pixelated";
     }
 
     // In fullscreen the canvas is flex-centered inside a 100vw×100vh container,

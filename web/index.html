@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html data-theme="light" lang="en">
+<html data-theme="dark" lang="en">
 <head>
     <meta charset="utf-8">
     <meta content="width=device-width, initial-scale=1" name="viewport">
@@ -543,12 +543,14 @@
         }
 
         .page-footer a {
-            color: var(--text-muted);
+            color: var(--text-accent);
+            font-size: 0.74rem;
             text-decoration: none;
         }
 
         .page-footer a:hover {
             color: var(--text-accent);
+            opacity: 0.75;
         }
 
         .status-left {
@@ -578,6 +580,7 @@
         #settings-panel h3 {
             color: var(--text-heading);
             font-size: 0.78rem;
+            letter-spacing: 0.12em;
             margin-bottom: 10px;
             font-weight: 500;
         }
@@ -597,7 +600,7 @@
         .settings-label {
             font-size: 0.72rem;
             color: var(--text-muted);
-            min-width: 48px;
+            min-width: 64px;
         }
 
         .settings-control {
@@ -611,6 +614,7 @@
             margin-top: 4px;
         }
 
+        .settings-section h4,
         .remap-section h4 {
             color: var(--text-heading);
             font-size: 0.72rem;
@@ -998,18 +1002,12 @@
         <div class="settings-row">
             <span class="settings-label">Scale</span>
             <div class="settings-control">
-                <button class="scale-btn" data-scale="0" title="Largest integer scale that fits the window"
-                        type="button">Auto
-                </button>
                 <button class="scale-btn" data-scale="1" title="1× (160×144)" type="button">1×</button>
                 <button class="scale-btn" data-scale="2" title="2× (320×288)" type="button">2×</button>
                 <button class="scale-btn" data-scale="3" title="3× (480×432)" type="button">3×</button>
                 <button class="scale-btn" data-scale="4" title="4× (640×576)" type="button">4×</button>
                 <button class="scale-btn" data-scale="-1"
                         title="Fit: fill available space while preserving the 160×144 aspect ratio" type="button">Fit
-                </button>
-                <button class="scale-btn" data-scale="-2"
-                        title="Stretch: fill available space completely, ignoring aspect ratio" type="button">Stretch
                 </button>
             </div>
         </div>
@@ -1025,6 +1023,11 @@
         <h4>KEYBOARD</h4>
         <div class="remap-grid" id="remap-grid"></div>
         <button class="remap-reset" id="remap-reset" title="Restore default key bindings">Reset Defaults</button>
+    </div>
+    <div class="remap-section" style="margin-top: 14px;">
+        <h4>GAMEPAD</h4>
+        <div class="remap-grid" id="gp-remap-grid"></div>
+        <button class="remap-reset" id="gp-remap-reset" title="Restore default gamepad bindings">Reset Defaults</button>
     </div>
 </div>
 
