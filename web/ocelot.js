@@ -353,6 +353,36 @@ async function createWasiBridge() {
             bytes(statPtr, 1)[0] = filetypeCharacterDevice;
             return errnoSuccess;
         },
+        fd_fdstat_set_flags(fd, _flags) {
+            return fd <= 2 ? errnoSuccess : errnoBadf;
+        },
+        fd_fdstat_set_rights(fd, _fsRightsBase, _fsRightsInheriting) {
+            return fd <= 2 ? errnoSuccess : errnoBadf;
+        },
+        fd_advise() {
+            return errnoBadf;
+        },
+        fd_allocate() {
+            return errnoBadf;
+        },
+        fd_pread() {
+            return errnoBadf;
+        },
+        fd_pwrite() {
+            return errnoBadf;
+        },
+        fd_readdir() {
+            return errnoBadf;
+        },
+        fd_renumber() {
+            return errnoBadf;
+        },
+        fd_filestat_set_size() {
+            return errnoBadf;
+        },
+        fd_filestat_set_times() {
+            return errnoBadf;
+        },
         fd_seek() {
             return errnoBadf;
         },
@@ -383,7 +413,28 @@ async function createWasiBridge() {
         path_filestat_get() {
             return errnoNoent;
         },
+        path_filestat_set_times() {
+            return errnoNoent;
+        },
+        path_create_directory() {
+            return errnoNoent;
+        },
+        path_link() {
+            return errnoNoent;
+        },
+        path_remove_directory() {
+            return errnoNoent;
+        },
+        path_rename() {
+            return errnoNoent;
+        },
         path_readlink() {
+            return errnoNoent;
+        },
+        path_symlink() {
+            return errnoNoent;
+        },
+        path_unlink_file() {
             return errnoNoent;
         },
         clock_res_get(_clockId, resolutionPtr) {
