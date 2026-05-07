@@ -65,8 +65,8 @@ const DEFAULT_KEY_MAP = Object.freeze({
     ArrowDown: "Down",
     ArrowLeft: "Left",
     ArrowRight: "Right",
-    KeyZ: "A",
-    KeyX: "B",
+    KeyS: "A",
+    KeyA: "B",
     Enter: "Start",
     ShiftRight: "Select",
 });

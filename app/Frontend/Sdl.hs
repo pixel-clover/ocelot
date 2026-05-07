@@ -712,7 +712,7 @@ renderPauseOverlay renderer winW title platformLabel speedLabel fast slot isCgb 
             , UiSection
                 "CONTROLS"
                 accentOrange
-                [ "[Z]/[X]  A/B"
+                [ "[S]/[A]  A/B"
                 , "[ENTER]  START"
                 , "[RSHIFT] SELECT"
                 , "[ARROWS] DPAD"
@@ -751,8 +751,8 @@ renderHelpOverlay renderer winW title platformLabel speedLabel fast slot isCgb =
             [ UiSection
                 "INPUT"
                 accentOrange
-                [ "[Z]    A"
-                , "[X]    B"
+                [ "[S]    A"
+                , "[A]    B"
                 , "[ENTER]  START"
                 , "[RSHIFT] SELECT"
                 , "[ARROWS] DPAD"
@@ -1212,8 +1212,8 @@ handleEvent hk ui jp ev = case SDL.eventPayload ev of
 
 mapKey :: SDL.Scancode -> Maybe Button
 mapKey s = case s of
-    SDL.ScancodeZ -> Just ButtonA
-    SDL.ScancodeX -> Just ButtonB
+    SDL.ScancodeS -> Just ButtonA
+    SDL.ScancodeA -> Just ButtonB
     SDL.ScancodeReturn -> Just ButtonStart
     SDL.ScancodeRShift -> Just ButtonSelect
     SDL.ScancodeUp -> Just ButtonUp
