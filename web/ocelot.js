@@ -315,7 +315,7 @@ function saveSettings() {
             masterVolume,
             slot: currentSlot,
             keyMap,
-            theme: document.documentElement.getAttribute("data-theme") || "light",
+            theme: document.documentElement.getAttribute("data-theme") || "dark",
             integerScale,
             scanlines: scanlinesEnabled,
         }));
@@ -326,7 +326,7 @@ function saveSettings() {
 // ─── Theme ────────────────────────────────────────────────────────────────────
 
 function toggleTheme() {
-    const current = document.documentElement.getAttribute("data-theme") || "light";
+    const current = document.documentElement.getAttribute("data-theme") || "dark";
     applyTheme(current === "dark" ? "light" : "dark");
     saveSettings();
 }
@@ -922,11 +922,15 @@ function pollGamepads() {
         const btn = (i) => gp.buttons.length > i && gp.buttons[i].pressed;
         const lx = gp.axes.length >= 2 ? gp.axes[0] : 0;
         const ly = gp.axes.length >= 2 ? gp.axes[1] : 0;
+        // W3C standard layout: Select=8, Start=9; non-standard gamepads often use 6/7.
+        const isStandard = gp.mapping === "standard";
+        const selectPressed = isStandard ? btn(8) : (btn(8) || btn(6));
+        const startPressed  = isStandard ? btn(9) : (btn(9) || btn(7));
 
         e.ocelot_set_button(emu, BUTTONS.A, btn(0) ? 1 : 0);
         e.ocelot_set_button(emu, BUTTONS.B, btn(1) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Select, btn(8) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Start, btn(9) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Select, selectPressed ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Start, startPressed ? 1 : 0);
         e.ocelot_set_button(emu, BUTTONS.Up, (btn(12) || ly < -AXIS_THRESHOLD) ? 1 : 0);
         e.ocelot_set_button(emu, BUTTONS.Down, (btn(13) || ly > AXIS_THRESHOLD) ? 1 : 0);
         e.ocelot_set_button(emu, BUTTONS.Left, (btn(14) || lx < -AXIS_THRESHOLD) ? 1 : 0);
