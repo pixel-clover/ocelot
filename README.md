@@ -107,7 +107,7 @@ If the build is successful, you can find the built binary at `$(stack path --loc
 Run the `play` command to start the emulator GUI:
 
 ```bash
-ocelot play
+ocelot play [/path/to/rom.gbc]
 ```
 
 Help menu while the emulator is running:
