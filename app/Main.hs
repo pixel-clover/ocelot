@@ -35,7 +35,6 @@ import Ocelot.Cpu.Execute (runFor)
 import Ocelot.Cpu.Registers (regPC)
 import Ocelot.Cpu.State (CpuState (..))
 import Ocelot.Machine (Machine (..), getCpu, getCpuRegs, machineFromCartridge)
-import qualified Ocelot.Ppu as Ppu
 import Options.Applicative
 import System.Exit (exitFailure)
 import System.FilePath (takeExtension)
@@ -269,7 +268,7 @@ runHeadless cart = do
     cpu <- getCpu m0
     pc <- regPC <$> getCpuRegs m0
     serial <- Bus.drainSerial (machineBus m0)
-    fb <- Ppu.framebuffer (Bus.busPpu (machineBus m0))
+    fb <- Bus.framebuffer (machineBus m0)
     putStrLn ("steps:    " <> show n)
     putStrLn ("halted:   " <> show (cpuHalted cpu))
     putStrLn ("PC:       0x" <> hex16 pc)

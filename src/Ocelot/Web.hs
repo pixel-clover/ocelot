@@ -41,7 +41,6 @@ import qualified Ocelot.Cartridge as Cartridge
 import qualified Ocelot.Cartridge.Header as Header
 import Ocelot.Cpu.Execute (runFor)
 import Ocelot.Joypad (Button)
-import qualified Ocelot.Joypad as Joypad
 import Ocelot.Machine (Machine (..), machineFromCartridge)
 import qualified Ocelot.Ppu as Ppu
 import qualified Ocelot.Snapshot as Snapshot
@@ -77,23 +76,23 @@ runFrame session = do
 
 setButton :: Button -> Bool -> WebSession -> IO ()
 setButton button pressed session =
-    Joypad.setButton button pressed (Bus.busJoypad (machineBus (wsMachine session)))
+    Bus.setButton button pressed (machineBus (wsMachine session))
 
 framebufferRgb :: WebSession -> IO (V.Vector Word8)
 framebufferRgb session =
-    Ppu.framebufferRgb (Bus.busPpu (machineBus (wsMachine session)))
+    Bus.framebufferRgb (machineBus (wsMachine session))
 
 framebufferRgbBytes :: WebSession -> IO ByteString
 framebufferRgbBytes session =
-    Ppu.framebufferRgbBytes (Bus.busPpu (machineBus (wsMachine session)))
+    Bus.framebufferRgbBytes (machineBus (wsMachine session))
 
 framebufferRgbaBytes :: WebSession -> IO ByteString
 framebufferRgbaBytes session =
-    Ppu.framebufferRgbaBytes (Bus.busPpu (machineBus (wsMachine session)))
+    Bus.framebufferRgbaBytes (machineBus (wsMachine session))
 
 copyFramebufferRgba :: Ptr Word8 -> WebSession -> IO ()
 copyFramebufferRgba ptr session =
-    Ppu.copyFramebufferRgba ptr (Bus.busPpu (machineBus (wsMachine session)))
+    Bus.copyFramebufferRgba ptr (machineBus (wsMachine session))
 
 drainAudioSamples :: WebSession -> IO [Int16]
 drainAudioSamples session =
@@ -126,7 +125,7 @@ sessionHasBattery :: WebSession -> Bool
 sessionHasBattery = wsHasBattery
 
 sessionIsCgb :: WebSession -> Bool
-sessionIsCgb session = Bus.busCgb (machineBus (wsMachine session))
+sessionIsCgb session = Bus.isCgb (machineBus (wsMachine session))
 
 framebufferWidth, framebufferHeight :: Int
 framebufferWidth = Ppu.framebufferWidth

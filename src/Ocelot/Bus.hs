@@ -29,9 +29,18 @@ module Ocelot.Bus (
     HostHardware (..),
     BootMode (..),
     cpuMCyclesPerLcdFrame,
+    isCgb,
+    isDoubleSpeed,
     read8,
     write8,
     advance,
+    setButton,
+    framebuffer,
+    framebufferRgb,
+    framebufferRgbBytes,
+    framebufferRgbaBytes,
+    copyFramebufferRgbWithPitch,
+    copyFramebufferRgba,
     drainSerial,
     drainAudioSamples,
     drainAudioSamplesVector,
@@ -56,7 +65,7 @@ import qualified Ocelot.Apu as Apu
 import Ocelot.Cartridge (Cartridge)
 import qualified Ocelot.Cartridge as Cartridge
 import qualified Ocelot.Cartridge.Header as Header
-import Ocelot.Joypad (JoypadState)
+import Ocelot.Joypad (Button, JoypadState)
 import qualified Ocelot.Joypad as Joypad
 import Ocelot.Ppu (PpuState)
 import qualified Ocelot.Ppu as Ppu
@@ -190,6 +199,12 @@ cpuMCyclesPerLcdFrame :: Bus -> IO Int
 cpuMCyclesPerLcdFrame b = do
     ds <- readIORef (busDoubleSpeed b)
     pure (if ds then 17556 * 2 else 17556)
+
+isCgb :: Bus -> Bool
+isCgb = busCgb
+
+isDoubleSpeed :: Bus -> IO Bool
+isDoubleSpeed = readIORef . busDoubleSpeed
 
 {- | Construct a bus with an explicit host-hardware choice. Lets you run
 a DMG cart on a CGB host (matching real-hardware backwards
@@ -963,6 +978,27 @@ advance mCycles b = do
     -- Joypad IRQ pending edge (set by Joypad.setButton).
     jpEdge <- Joypad.takeIrqPending (busJoypad b)
     when jpEdge (setIfBit 4 b)
+
+setButton :: Button -> Bool -> Bus -> IO ()
+setButton button pressed b = Joypad.setButton button pressed (busJoypad b)
+
+framebuffer :: Bus -> IO (Vector Word8)
+framebuffer b = Ppu.framebuffer (busPpu b)
+
+framebufferRgb :: Bus -> IO (Vector Word8)
+framebufferRgb b = Ppu.framebufferRgb (busPpu b)
+
+framebufferRgbBytes :: Bus -> IO ByteString
+framebufferRgbBytes b = Ppu.framebufferRgbBytes (busPpu b)
+
+framebufferRgbaBytes :: Bus -> IO ByteString
+framebufferRgbaBytes b = Ppu.framebufferRgbaBytes (busPpu b)
+
+copyFramebufferRgbWithPitch :: Ptr Word8 -> Int -> Bus -> IO ()
+copyFramebufferRgbWithPitch ptr pitch b = Ppu.copyFramebufferRgbWithPitch ptr pitch (busPpu b)
+
+copyFramebufferRgba :: Ptr Word8 -> Bus -> IO ()
+copyFramebufferRgba ptr b = Ppu.copyFramebufferRgba ptr (busPpu b)
 
 -- | Drain the APU's pending stereo samples (interleaved L,R) for the frontend.
 drainAudioSamples :: Bus -> IO [Int16]

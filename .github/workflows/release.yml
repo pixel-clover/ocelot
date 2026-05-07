@@ -122,15 +122,39 @@ jobs:
           # MSYS2's libSDL2main.a is built with GCC -fstack-protector, which
           # references __stack_chk_fail/__stack_chk_guard from libssp. GHC 9.6
           # on Windows uses Clang/LLD with --rtlib=compiler-rt, which does not
-          # provide those symbols. Stack's ghc-options are not forwarded to
-          # snapshot packages (like sdl2), so we cannot pass -lssp via
-          # stack.yaml. Instead, inject stub implementations directly into
-          # libSDL2main.a so LLD resolves the symbols without -lssp.
-          stack exec -- bash -c '
-            printf "#include <stdint.h>\nvoid *__stack_chk_guard=(void*)(uintptr_t)0xdeadbeef01010101ULL;\nvoid __attribute__((noreturn)) __stack_chk_fail(void){__builtin_trap();}\n" > ssp_stub.c
-            /mingw64/bin/gcc -fno-stack-protector -c ssp_stub.c -o ssp_stub.o
-            /mingw64/bin/ar qs /mingw64/lib/libSDL2main.a ssp_stub.o
-            rm -f ssp_stub.c ssp_stub.o
+          # provide those symbols while Cabal builds the sdl2 package. Replace
+          # every libSDL2main.a visible in Stack's MSYS2 sysroot with a small
+          # object that preserves SDL's startup marker and provides the SSP
+          # symbols before any Haskell package tries to link against SDL2main.
+          stack exec -- sh -c '
+            set -eu
+            cd /tmp
+            cat > sdl2main_stub.c << "CEOF"
+          #include <windows.h>
+          #include <stdint.h>
+          void *__stack_chk_guard = (void *)(uintptr_t)0xdeadbeef01010101ULL;
+          void __attribute__((noreturn)) __stack_chk_fail(void) { __builtin_trap(); }
+          void SDL_SetMainReady(void);
+          extern int SDL_main(int argc, char **argv);
+          extern int __argc;
+          extern char **__argv;
+          int WINAPI WinMain(HINSTANCE a, HINSTANCE b, LPSTR c, int d) {
+              (void)a; (void)b; (void)c; (void)d;
+              SDL_SetMainReady();
+              return SDL_main(__argc, __argv);
+          }
+          CEOF
+            /mingw64/bin/gcc -fno-stack-protector -c sdl2main_stub.c -o sdl2main_stub.o
+            found=0
+            for archive in $(find /mingw64 -name libSDL2main.a -type f); do
+              found=1
+              echo "Replacing $archive"
+              /mingw64/bin/ar crs "$archive" sdl2main_stub.o
+              /mingw64/bin/ar t "$archive"
+            done
+            test "$found" = 1
+            /mingw64/bin/nm -g /mingw64/lib/libSDL2main.a | grep -E "__stack_chk_fail|__stack_chk_guard|WinMain"
+            rm -f sdl2main_stub.c sdl2main_stub.o
           '
 
       - name: Build release binary

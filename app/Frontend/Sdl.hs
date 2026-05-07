@@ -11,14 +11,9 @@ This module is the only place in the project that depends on @sdl2@. It opens a 
 a 48 kHz stereo audio device with a callback that drains an 'MVar'-shared sample buffer, and runs
 the emulator one frame at a time.
 
-The library is unaware of SDL: the only library calls used here are
-
-* 'machineFromCartridge', 'runFor', 'machineBus', 'busPpu', 'busJoypad'
-* 'Ppu.framebuffer'
-* 'Joypad.setButton'
-* 'Bus.drainAudioSamplesVector'
-
-so this frontend is interchangeable with the headless terminal mode.
+The library is unaware of SDL: this module drives the emulator through
+'Machine', 'Bus', and narrow framebuffer, audio, and joypad functions, so this
+frontend is interchangeable with the headless terminal mode.
 -}
 module Frontend.Sdl (
     play,
@@ -56,10 +51,8 @@ import qualified Ocelot.Bus as Bus
 import Ocelot.Cartridge (Cartridge)
 import qualified Ocelot.Cartridge as Cartridge
 import Ocelot.Cpu.Execute (runFor)
-import Ocelot.Joypad (Button (..), JoypadState)
-import qualified Ocelot.Joypad as Joypad
+import Ocelot.Joypad (Button (..))
 import Ocelot.Machine (Machine (..), machineFromCartridgeWithBoot)
-import qualified Ocelot.Ppu as Ppu
 import qualified Ocelot.Snapshot as Snap
 import SDL (($=))
 import qualified SDL
@@ -393,7 +386,7 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode au
         pruneUiDeadlines now0 ui
         deadline <- nextUiDeadline now0 ui
         events <- gatherEvents (paused0 || helpVisible0) now0 deadline
-        mapM_ (handleEvent hk ui (Bus.busJoypad (machineBus machine))) events
+        mapM_ (handleEvent hk ui (machineBus machine)) events
 
         -- One-shot hotkeys: handle save/load/screenshot/reset requests.
         handlePending romPath hk ui machineRef cart bootRom
@@ -412,7 +405,7 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode au
 
         -- Show the "DOUBLE SPEED" badge for 180 frames when double-speed activates;
         -- reset the timer when double-speed turns off so it fires again next time.
-        doubleSpeedNow <- readIORef (Bus.busDoubleSpeed (machineBus machine'))
+        doubleSpeedNow <- Bus.isDoubleSpeed (machineBus machine')
         dsBadge <- readIORef (uiDoubleSpeedBadgeUntil ui)
         if doubleSpeedNow
             then when (dsBadge == 0) $ do
@@ -460,7 +453,7 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode au
                     (SDL.P (SDL.V2 (fromIntegral dstX) (fromIntegral dstY)))
                     (SDL.V2 (fromIntegral dstW) (fromIntegral dstH))
 
-        uploadTextureRgb texture (Bus.busPpu (machineBus machine'))
+        uploadTextureRgb texture (machineBus machine')
         SDL.rendererDrawColor renderer $= SDL.V4 0 0 0 255
         SDL.clear renderer
         SDL.copy renderer texture Nothing (Just dst)
@@ -472,7 +465,7 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode au
         gifRec <- readIORef (uiGifFrames ui)
         case gifRec of
             Just fs | even frame -> do
-                fbRgbFrame <- Ppu.framebufferRgb (Bus.busPpu (machineBus machine'))
+                fbRgbFrame <- Bus.framebufferRgb (machineBus machine')
                 writeIORef (uiGifFrames ui) (Just (fbRgbFrame : fs))
             _ -> pure ()
 
@@ -640,9 +633,9 @@ renderUi renderer ui title machine paused fast paceMode nowNs winW winH = do
     dsBadgeUntil <- readIORef (uiDoubleSpeedBadgeUntil ui)
     toast <- currentToast ui
     let bus = machineBus machine
-        isCgb = Bus.busCgb bus
+        isCgb = Bus.isCgb bus
         platformLabel = if isCgb then "CGB" else "DMG"
-    doubleSpeed <- readIORef (Bus.busDoubleSpeed bus)
+    doubleSpeed <- Bus.isDoubleSpeed bus
     let speedLabel = if doubleSpeed then "DOUBLE SPEED" else "NORMAL SPEED"
         clippedTitle = fitText 28 title
         overlayVisible = paused || helpVisible
@@ -1049,7 +1042,7 @@ handlePending romPath hk ui machineRef cart bootRom = do
     shotReq <- readIORef (hkShotReq hk)
     when shotReq $ do
         writeIORef (hkShotReq hk) False
-        fb <- Ppu.framebufferRgbBytes (Bus.busPpu (machineBus machine))
+        fb <- Bus.framebufferRgbBytes (machineBus machine)
         ts <- floor <$> getPOSIXTime :: IO Int
         let path = romDir romPath </> ("screenshot-" <> show ts <> ".ppm")
         r <- try (createDirectoryIfMissing True (romDir romPath) >> writePpm path fb) :: IO (Either IOException ())
@@ -1128,13 +1121,13 @@ writePpm path fb = do
                 )
     BS.writeFile path (header <> fb)
 
-handleEvent :: Hotkeys -> UiState -> JoypadState -> SDL.Event -> IO ()
-handleEvent hk ui jp ev = case SDL.eventPayload ev of
+handleEvent :: Hotkeys -> UiState -> Bus.Bus -> SDL.Event -> IO ()
+handleEvent hk ui bus ev = case SDL.eventPayload ev of
     SDL.QuitEvent -> writeIORef (hkQuit hk) True
     SDL.ControllerButtonEvent cev ->
         let pressed = SDL.controllerButtonEventState cev == SDLGC.ControllerButtonPressed
          in case mapPad (SDL.controllerButtonEventButton cev) of
-                Just btn -> Joypad.setButton btn pressed jp
+                Just btn -> Bus.setButton btn pressed bus
                 Nothing -> pure ()
     SDL.ControllerAxisEvent aev ->
         let val = SDL.controllerAxisEventValue aev
@@ -1142,11 +1135,11 @@ handleEvent hk ui jp ev = case SDL.eventPayload ev of
             neg = val < (-axisDeadzone)
          in case SDL.controllerAxisEventAxis aev of
                 SDLGC.ControllerAxisLeftX -> do
-                    Joypad.setButton ButtonLeft neg jp
-                    Joypad.setButton ButtonRight pos jp
+                    Bus.setButton ButtonLeft neg bus
+                    Bus.setButton ButtonRight pos bus
                 SDLGC.ControllerAxisLeftY -> do
-                    Joypad.setButton ButtonUp neg jp
-                    Joypad.setButton ButtonDown pos jp
+                    Bus.setButton ButtonUp neg bus
+                    Bus.setButton ButtonDown pos bus
                 _ -> pure ()
     SDL.ControllerDeviceEvent cev ->
         when (SDL.controllerDeviceEventConnection cev == SDLGC.ControllerDeviceAdded) $ do
@@ -1208,7 +1201,7 @@ handleEvent hk ui jp ev = case SDL.eventPayload ev of
                     writeIORef (hkOpenReq hk) True
                     writeIORef (hkQuit hk) True
             _ -> case mapKey scancode of
-                Just btn -> Joypad.setButton btn pressed jp
+                Just btn -> Bus.setButton btn pressed bus
                 Nothing -> pure ()
     _ -> pure ()
 
@@ -1241,12 +1234,12 @@ mapPad b = case b of
     _ -> Nothing
 
 -- | Upload the current RGB888 framebuffer directly into a locked streaming texture.
-uploadTextureRgb :: SDL.Texture -> Ppu.PpuState -> IO ()
-uploadTextureRgb tex ppu =
+uploadTextureRgb :: SDL.Texture -> Bus.Bus -> IO ()
+uploadTextureRgb tex bus =
     bracket
         (SDL.lockTexture tex Nothing)
         (const (SDL.unlockTexture tex))
-        (\(ptr, pitch) -> Ppu.copyFramebufferRgbWithPitch (castPtr ptr) (fromIntegral pitch) ppu)
+        (\(ptr, pitch) -> Bus.copyFramebufferRgbWithPitch (castPtr ptr) (fromIntegral pitch) bus)
 
 {- | Open a native OS file picker for ROM files.  Returns 'Nothing' if no
 suitable tool is available or the user cancels.
