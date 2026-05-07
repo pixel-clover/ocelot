@@ -213,36 +213,47 @@ cgbDmgCompatPostBoot =
         }
 
 pack16 :: Word8 -> Word8 -> Word16
+{-# INLINE pack16 #-}
 pack16 hi lo = (fromIntegral hi `shiftL` 8) .|. fromIntegral lo
 
 hi8 :: Word16 -> Word8
+{-# INLINE hi8 #-}
 hi8 w = fromIntegral (w `shiftR` 8)
 
 lo8 :: Word16 -> Word8
+{-# INLINE lo8 #-}
 lo8 w = fromIntegral (w .&. 0xFF)
 
 getAF :: Registers -> Word16
+{-# INLINE getAF #-}
 getAF r = pack16 (regA r) (regF r)
 
 setAF :: Word16 -> Registers -> Registers
+{-# INLINE setAF #-}
 setAF !w r = r{regA = hi8 w, regF = lo8 w .&. 0xF0}
 
 getBC :: Registers -> Word16
+{-# INLINE getBC #-}
 getBC r = pack16 (regB r) (regC r)
 
 setBC :: Word16 -> Registers -> Registers
+{-# INLINE setBC #-}
 setBC !w r = r{regB = hi8 w, regC = lo8 w}
 
 getDE :: Registers -> Word16
+{-# INLINE getDE #-}
 getDE r = pack16 (regD r) (regE r)
 
 setDE :: Word16 -> Registers -> Registers
+{-# INLINE setDE #-}
 setDE !w r = r{regD = hi8 w, regE = lo8 w}
 
 getHL :: Registers -> Word16
+{-# INLINE getHL #-}
 getHL r = pack16 (regH r) (regL r)
 
 setHL :: Word16 -> Registers -> Registers
+{-# INLINE setHL #-}
 setHL !w r = r{regH = hi8 w, regL = lo8 w}
 
 flagBit :: Flag -> Int

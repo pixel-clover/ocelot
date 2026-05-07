@@ -99,6 +99,7 @@ readTac ts = timTac ts .|. 0xF8 -- unused upper bits read as 1
 
 -- | Bit of 'timDivider' selected by the low two bits of @TAC@.
 selectedDivBit :: Word8 -> Int
+{-# INLINE selectedDivBit #-}
 selectedDivBit tac = case tac .&. 0x03 of
     0x00 -> 9
     0x01 -> 3
@@ -107,6 +108,7 @@ selectedDivBit tac = case tac .&. 0x03 of
 
 -- | The "AND" signal: timer-enabled AND the selected divider bit.
 andSignal :: Word16 -> Word8 -> Bool
+{-# INLINE andSignal #-}
 andSignal d tac = testBit tac 2 && testBit d (selectedDivBit tac)
 
 {- | Apply a falling-edge transition: increment TIMA. If TIMA wraps from
@@ -115,6 +117,7 @@ TIMA itself reads as 0 immediately on overflow; only the @IF@ raise and
 the TMA load are delayed.)
 -}
 applyFallingEdge :: TimerState -> TimerState
+{-# INLINE applyFallingEdge #-}
 applyFallingEdge ts
     | timTima ts == 0xFF = ts{timTima = 0x00, timReloadCounter = 4}
     | otherwise = ts{timTima = timTima ts + 1}
@@ -123,6 +126,7 @@ applyFallingEdge ts
 fired this T-cycle (the bus turns that into an @IF@ bit-2 raise).
 -}
 stepT :: TimerState -> (TimerState, Bool)
+{-# INLINE stepT #-}
 stepT ts0 =
     -- 1a. Tick the post-reload "ignore" window. Writes to TIMA stay
     --     gated for the duration; we just count it down.
@@ -208,6 +212,7 @@ Returns the new state and whether the timer interrupt should be raised
 at least once during this advance.
 -}
 advance :: Int -> TimerState -> (TimerState, Bool)
+{-# INLINE advance #-}
 advance mCycles ts0 = go (mCycles * 4) ts0 False
   where
     go 0 !ts !ov = (ts, ov)
