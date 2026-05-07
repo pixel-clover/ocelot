@@ -23,6 +23,7 @@ extra-source-files:
     web/audio-worklet.js
     web/index.html
     web/ocelot.js
+    web/zip.js
 
 source-repository head
   type: git

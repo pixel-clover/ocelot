@@ -25,6 +25,7 @@ module Ocelot (
     loadRam,
     extractSave,
     loadSave,
+    resetMbc,
     parseHeader,
     HeaderError (..),
     Header (..),
@@ -51,6 +52,7 @@ import Ocelot.Cartridge (
     loadRam,
     loadRom,
     loadSave,
+    resetMbc,
  )
 import Ocelot.Cartridge.Header (
     Capabilities (..),

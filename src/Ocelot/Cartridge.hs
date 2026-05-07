@@ -27,6 +27,7 @@ module Ocelot.Cartridge (
     loadRam,
     extractSave,
     loadSave,
+    resetMbc,
     dumpMbc,
     loadMbc,
     loadRom,
@@ -254,6 +255,29 @@ loadSave bs c = do
         (ramBytes, rest) = BS.splitAt ramSize bs
     loadRam ramBytes c
     when (BS.length rest >= rtcSuffixSize) (applyRtcSuffix rest c)
+
+{- | Reset volatile MBC controller registers to their power-on values
+while preserving battery-backed RAM and MBC3 RTC timekeeping.
+-}
+resetMbc :: Cartridge -> IO ()
+resetMbc c = do
+    cur <- readIORef (cartImpl c)
+    writeIORef (cartImpl c) (resetImpl cur)
+
+resetImpl :: MbcImpl -> MbcImpl
+resetImpl NoMbcImpl = NoMbcImpl
+resetImpl (Mbc1Impl s) = Mbc1Impl initialMbc1{m1Multicart = m1Multicart s}
+resetImpl (Mbc2Impl _) = Mbc2Impl initialMbc2
+resetImpl (Mbc3Impl s) =
+    Mbc3Impl
+        s
+            { m3RamRtcEnabled = False
+            , m3RomBank = 0x01
+            , m3RamBankOrRtc = 0x00
+            , m3LatchPrev = 0xFF
+            }
+resetImpl (Mbc5Impl _) = Mbc5Impl initialMbc5
+resetImpl (HuC1Impl _) = HuC1Impl initialHuC1
 
 {- | Snapshot the live MBC bank-select state (not the RAM contents; use
 'extractSave' for those). The blob shape is fixed per MBC kind; an MBC

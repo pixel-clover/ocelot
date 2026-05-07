@@ -54,6 +54,7 @@ import GHC.Clock (getMonotonicTimeNSec)
 import qualified Ocelot.Apu as Apu
 import qualified Ocelot.Bus as Bus
 import Ocelot.Cartridge (Cartridge)
+import qualified Ocelot.Cartridge as Cartridge
 import Ocelot.Cpu.Execute (runFor)
 import Ocelot.Joypad (Button (..), JoypadState)
 import qualified Ocelot.Joypad as Joypad
@@ -1105,6 +1106,7 @@ handlePending romPath hk ui machineRef cart bootRom = do
     resetReq <- readIORef (hkResetReq hk)
     when resetReq $ do
         writeIORef (hkResetReq hk) False
+        Cartridge.resetMbc cart
         machine' <- machineFromCartridgeWithBoot bootRom cart
         writeIORef machineRef machine'
         putStrLn "reset:    machine rebuilt from cartridge"

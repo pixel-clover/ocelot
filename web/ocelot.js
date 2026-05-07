@@ -33,6 +33,7 @@ let batterySavePromise = null;
 // ROM state
 let currentRomName = "";
 let currentRomTitle = "";
+let currentRomKey = "";
 let currentSlot = 1;
 
 // Overlay state
@@ -74,6 +75,8 @@ let keyMap = {...DEFAULT_KEY_MAP};
 
 // GB buttons available for remapping (in display order)
 const REMAP_BUTTONS = ["Up", "Down", "Left", "Right", "A", "B", "Start", "Select"];
+let keyButtonsDown = new Set();
+let gamepadButtonsDown = new Set();
 
 // Gamepad button index map. Keys are GB button names, values are gamepad button indices.
 // Defaults follow the W3C standard gamepad layout (Xbox / PlayStation in standard mode).
@@ -262,21 +265,159 @@ function freeBytes(ptr, len) {
 }
 
 async function createWasiBridge() {
-    const {WASI, File, OpenFile, ConsoleStdout} =
-        await import("https://esm.sh/@bjorn3/browser_wasi_shim@0.4.2");
-    const wasi = new WASI(
-        [],
-        [],
-        [
-            new OpenFile(new File(new Uint8Array())),
-            ConsoleStdout.lineBuffered((msg) => console.log(`[wasi stdout] ${msg}`)),
-            ConsoleStdout.lineBuffered((msg) => console.warn(`[wasi stderr] ${msg}`)),
-        ],
-    );
+    let memory = null;
+    const errnoSuccess = 0;
+    const errnoBadf = 8;
+    const errnoInval = 28;
+    const errnoNoent = 44;
+    const errnoNosys = 52;
+    const filetypeCharacterDevice = 2;
+    const textDecoder = new TextDecoder();
+
+    function view() {
+        return new DataView(memory.buffer);
+    }
+
+    function bytes(ptr, len) {
+        return new Uint8Array(memory.buffer, ptr, len);
+    }
+
+    function writeU32(ptr, value) {
+        view().setUint32(ptr, value >>> 0, true);
+    }
+
+    function writeU64(ptr, value) {
+        view().setBigUint64(ptr, BigInt(value), true);
+    }
+
+    function readU32(ptr) {
+        return view().getUint32(ptr, true);
+    }
+
+    function fdWrite(fd, iovs, iovsLen, nwritten) {
+        if (fd !== 1 && fd !== 2) return errnoBadf;
+        let written = 0;
+        const chunks = [];
+        for (let i = 0; i < iovsLen; i++) {
+            const base = readU32(iovs + i * 8);
+            const len = readU32(iovs + i * 8 + 4);
+            written += len;
+            chunks.push(textDecoder.decode(bytes(base, len)));
+        }
+        const message = chunks.join("").replace(/\n$/, "");
+        if (message.length > 0) {
+            if (fd === 1) console.log(`[wasi stdout] ${message}`);
+            else console.warn(`[wasi stderr] ${message}`);
+        }
+        writeU32(nwritten, written);
+        return errnoSuccess;
+    }
+
+    const wasiImport = {
+        args_sizes_get(argc, argvBufSize) {
+            writeU32(argc, 0);
+            writeU32(argvBufSize, 0);
+            return errnoSuccess;
+        },
+        args_get() {
+            return errnoSuccess;
+        },
+        environ_sizes_get(count, bufSize) {
+            writeU32(count, 0);
+            writeU32(bufSize, 0);
+            return errnoSuccess;
+        },
+        environ_get() {
+            return errnoSuccess;
+        },
+        clock_time_get(_clockId, _precision, timePtr) {
+            writeU64(timePtr, BigInt(Math.floor(performance.timeOrigin * 1000000)) + BigInt(Math.floor(performance.now() * 1000000)));
+            return errnoSuccess;
+        },
+        random_get(ptr, len) {
+            const webCrypto = globalThis.crypto;
+            if (!webCrypto || !webCrypto.getRandomValues) return errnoInval;
+            const out = bytes(ptr, len);
+            for (let offset = 0; offset < out.length; offset += 65536) {
+                webCrypto.getRandomValues(out.subarray(offset, Math.min(offset + 65536, out.length)));
+            }
+            return errnoSuccess;
+        },
+        fd_write: fdWrite,
+        fd_close(fd) {
+            return fd <= 2 ? errnoSuccess : errnoBadf;
+        },
+        fd_fdstat_get(fd, statPtr) {
+            if (fd > 2) return errnoBadf;
+            bytes(statPtr, 24).fill(0);
+            bytes(statPtr, 1)[0] = filetypeCharacterDevice;
+            return errnoSuccess;
+        },
+        fd_seek() {
+            return errnoBadf;
+        },
+        fd_prestat_get() {
+            return errnoBadf;
+        },
+        fd_prestat_dir_name() {
+            return errnoBadf;
+        },
+        fd_read() {
+            return errnoBadf;
+        },
+        fd_tell() {
+            return errnoBadf;
+        },
+        fd_sync() {
+            return errnoBadf;
+        },
+        fd_datasync() {
+            return errnoBadf;
+        },
+        fd_filestat_get() {
+            return errnoBadf;
+        },
+        path_open() {
+            return errnoNoent;
+        },
+        path_filestat_get() {
+            return errnoNoent;
+        },
+        path_readlink() {
+            return errnoNoent;
+        },
+        clock_res_get(_clockId, resolutionPtr) {
+            writeU64(resolutionPtr, 1);
+            return errnoSuccess;
+        },
+        poll_oneoff(_inPtr, _outPtr, _nsubscriptions, neventsPtr) {
+            writeU32(neventsPtr, 0);
+            return errnoSuccess;
+        },
+        sched_yield() {
+            return errnoSuccess;
+        },
+        sock_accept() {
+            return errnoNosys;
+        },
+        sock_recv() {
+            return errnoNosys;
+        },
+        sock_send() {
+            return errnoNosys;
+        },
+        sock_shutdown() {
+            return errnoNosys;
+        },
+        proc_exit(code) {
+            throw new Error(`WASI proc_exit(${code})`);
+        },
+    };
+
     return {
-        imports: {wasi_snapshot_preview1: wasi.wasiImport},
+        imports: {wasi_snapshot_preview1: wasiImport},
         initialize(instance) {
-            wasi.initialize(instance);
+            memory = instance.exports.memory;
         },
     };
 }
@@ -634,8 +775,21 @@ function dbGet(storeName, key) {
     });
 }
 
-async function saveRecentRom(name, bytes) {
-    await dbPut("roms", name, {name, bytes, timestamp: Date.now()});
+async function sha256Hex(bytes) {
+    const webCrypto = globalThis.crypto;
+    if (!webCrypto || !webCrypto.subtle) {
+        throw new Error("WebCrypto SHA-256 is unavailable");
+    }
+    const digest = await webCrypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function romStorageKey(hash) {
+    return `sha256:${hash}`;
+}
+
+async function saveRecentRom(key, name, bytes) {
+    await dbPut("roms", key, {key, name, bytes, timestamp: Date.now()});
 }
 
 async function getRecentRoms() {
@@ -666,21 +820,21 @@ async function populateRecentRoms() {
     }
     for (const entry of entries.slice(0, 10)) {
         const opt = document.createElement("option");
-        opt.value = entry.name;
+        opt.value = entry.key || entry.name;
         opt.textContent = entry.name;
         select.appendChild(opt);
     }
     select.style.display = "";
 }
 
-async function loadRecentRom(name) {
+async function loadRecentRom(key) {
     if (!db) {
         showToast("Persistent storage unavailable");
         return;
     }
     let entry;
     try {
-        entry = await dbGet("roms", name);
+        entry = await dbGet("roms", key);
     } catch (err) {
         disableStorage(STORAGE_DISABLED_MESSAGE, err);
         return;
@@ -760,8 +914,9 @@ function renderAudio() {
 
 // ─── Battery save ─────────────────────────────────────────────────────────────
 
-async function saveBatteryIfNeeded({sessionId = emu, romName = currentRomName, silent = true} = {}) {
+async function saveBatteryIfNeeded({sessionId = emu, romKey = currentRomKey, silent = true} = {}) {
     if (!sessionId || !db) return false;
+    if (!romKey) return false;
     if (batterySavePromise) return batterySavePromise;
     const e = wasm.instance.exports;
     const trackedPromise = (async () => {
@@ -774,7 +929,7 @@ async function saveBatteryIfNeeded({sessionId = emu, romName = currentRomName, s
         const len = e.ocelot_save_buffer_len(sessionId);
         const data = readMemory(ptr, len).slice();
         try {
-            await dbPut("saves", romName, data);
+            await dbPut("saves", romKey, data);
             return true;
         } catch (err) {
             disableStorage(STORAGE_DISABLED_MESSAGE, err);
@@ -793,7 +948,7 @@ async function loadBatteryIfPresent() {
     if (!e.ocelot_cartridge_has_battery(emu)) return;
     let data;
     try {
-        data = await dbGet("saves", currentRomName);
+        data = await dbGet("saves", currentRomKey);
     } catch (err) {
         disableStorage(STORAGE_DISABLED_MESSAGE, err);
         return;
@@ -809,11 +964,11 @@ async function loadBatteryIfPresent() {
 async function destroyCurrentSession() {
     if (!emu) return;
     const sessionId = emu;
-    const romName = currentRomName;
+    const romKey = currentRomKey;
     stopBatterySaveTimer();
     stopFrameLoop();
     try {
-        await saveBatteryIfNeeded({sessionId, romName, silent: true});
+        await saveBatteryIfNeeded({sessionId, romKey, silent: true});
     } catch (err) {
         console.warn("Battery save persistence failed", err);
     }
@@ -821,6 +976,9 @@ async function destroyCurrentSession() {
     emu = 0;
     currentRomName = "";
     currentRomTitle = "";
+    currentRomKey = "";
+    keyButtonsDown = new Set();
+    gamepadButtonsDown = new Set();
     imageData = null;
     imageDataBuffer = null;
     imageDataPtr = 0;
@@ -836,25 +994,8 @@ function onFileSelected(ev) {
 
 async function decompressIfNeeded(file) {
     if (!(file.name || "").toLowerCase().endsWith(".zip")) return file;
-    const {unzip} = await import("https://esm.sh/fflate@0.8.2");
-    const buffer = await file.arrayBuffer();
-    return new Promise((resolve, reject) => {
-        unzip(new Uint8Array(buffer), (err, files) => {
-            if (err) {
-                reject(new Error("ZIP extraction failed: " + err.message));
-                return;
-            }
-            const ROM_EXTS = [".gb", ".gbc", ".sgb"];
-            const entry = Object.entries(files).find(([name]) =>
-                ROM_EXTS.some(ext => name.toLowerCase().endsWith(ext)));
-            if (!entry) {
-                reject(new Error("No .gb or .gbc ROM found inside ZIP"));
-                return;
-            }
-            const [romName, romBytes] = entry;
-            resolve(new File([romBytes], romName, {type: "application/octet-stream"}));
-        });
-    });
+    const {unzipFirstRom} = await import("./zip.js");
+    return unzipFirstRom(file);
 }
 
 async function loadRom(file) {
@@ -877,6 +1018,8 @@ async function loadRom(file) {
         file = await decompressIfNeeded(file);
         const buffer = await file.arrayBuffer();
         const romBytes = new Uint8Array(buffer);
+        const romHash = await sha256Hex(romBytes);
+        const romKey = romStorageKey(romHash);
         const ptr = allocAndCopy(romBytes);
         if (!ptr) {
             showError("Failed to allocate ROM memory");
@@ -892,11 +1035,12 @@ async function loadRom(file) {
         }
 
         currentRomName = file.name || "ROM";
+        currentRomKey = romKey;
         currentRomTitle = readSessionString(
             e.ocelot_rom_title_ptr(emu), e.ocelot_rom_title_len(emu)) || currentRomName;
         if (db) {
             try {
-                await saveRecentRom(currentRomName, romBytes);
+                await saveRecentRom(currentRomKey, currentRomName, romBytes);
                 await populateRecentRoms();
             } catch (err) {
                 disableStorage(STORAGE_DISABLED_MESSAGE, err);
@@ -1012,7 +1156,7 @@ function updateFps(now) {
 function pollGamepads() {
     if (!emu) return;
     const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-    const e = wasm.instance.exports;
+    const nextDown = new Set();
 
     for (let gi = 0; gi < gamepads.length; gi++) {
         const gp = gamepads[gi];
@@ -1022,18 +1166,21 @@ function pollGamepads() {
         const lx = gp.axes.length >= 2 ? gp.axes[0] : 0;
         const ly = gp.axes.length >= 2 ? gp.axes[1] : 0;
 
-        e.ocelot_set_button(emu, BUTTONS.A, btn(gpMap.A) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.B, btn(gpMap.B) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Select, btn(gpMap.Select) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Start, btn(gpMap.Start) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Up, (btn(gpMap.Up) || ly < -AXIS_THRESHOLD) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Down, (btn(gpMap.Down) || ly > AXIS_THRESHOLD) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Left, (btn(gpMap.Left) || lx < -AXIS_THRESHOLD) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Right, (btn(gpMap.Right) || lx > AXIS_THRESHOLD) ? 1 : 0);
+        if (btn(gpMap.A)) nextDown.add("A");
+        if (btn(gpMap.B)) nextDown.add("B");
+        if (btn(gpMap.Select)) nextDown.add("Select");
+        if (btn(gpMap.Start)) nextDown.add("Start");
+        if (btn(gpMap.Up) || ly < -AXIS_THRESHOLD) nextDown.add("Up");
+        if (btn(gpMap.Down) || ly > AXIS_THRESHOLD) nextDown.add("Down");
+        if (btn(gpMap.Left) || lx < -AXIS_THRESHOLD) nextDown.add("Left");
+        if (btn(gpMap.Right) || lx > AXIS_THRESHOLD) nextDown.add("Right");
 
         // Only use the first connected gamepad
         break;
     }
+
+    gamepadButtonsDown = nextDown;
+    syncAllButtons();
 }
 
 // ─── Save / Load ──────────────────────────────────────────────────────────────
@@ -1061,6 +1208,10 @@ async function persistentSave() {
         showToast("Persistent storage unavailable");
         return;
     }
+    if (!currentRomKey) {
+        showToast("ROM identity unavailable");
+        return;
+    }
     const e = wasm.instance.exports;
     if (!e.ocelot_save_state(emu)) {
         showToast(getLastError());
@@ -1070,7 +1221,7 @@ async function persistentSave() {
     const len = e.ocelot_save_state_len(emu);
     const data = readMemory(ptr, len).slice();
     try {
-        await dbPut("states", `${currentRomName}:slot${currentSlot}`, data);
+        await dbPut("states", `${currentRomKey}:slot${currentSlot}`, data);
         showToast(`Saved to slot ${currentSlot}`);
     } catch (err) {
         disableStorage(STORAGE_DISABLED_MESSAGE, err);
@@ -1086,9 +1237,13 @@ async function persistentLoad() {
         showToast("Persistent storage unavailable");
         return;
     }
+    if (!currentRomKey) {
+        showToast("ROM identity unavailable");
+        return;
+    }
     let data;
     try {
-        data = await dbGet("states", `${currentRomName}:slot${currentSlot}`);
+        data = await dbGet("states", `${currentRomKey}:slot${currentSlot}`);
     } catch (err) {
         disableStorage(STORAGE_DISABLED_MESSAGE, err);
         return;
@@ -1319,6 +1474,18 @@ function buttonForCode(code) {
     return keyMap[code] || null;
 }
 
+function syncButton(button) {
+    if (!emu || BUTTONS[button] === undefined) return;
+    const down = keyButtonsDown.has(button) || gamepadButtonsDown.has(button);
+    wasm.instance.exports.ocelot_set_button(emu, BUTTONS[button], down ? 1 : 0);
+}
+
+function syncAllButtons() {
+    for (const button of REMAP_BUTTONS) {
+        syncButton(button);
+    }
+}
+
 function onKeyDown(ev) {
     if (ev.code === "F1") {
         ev.preventDefault();
@@ -1360,7 +1527,8 @@ function onKeyDown(ev) {
     if (!emu) return;
     const button = buttonForCode(ev.code);
     if (!button) return;
-    wasm.instance.exports.ocelot_set_button(emu, BUTTONS[button], 1);
+    keyButtonsDown.add(button);
+    syncButton(button);
     ev.preventDefault();
 }
 
@@ -1368,7 +1536,8 @@ function onKeyUp(ev) {
     if (!emu) return;
     const button = buttonForCode(ev.code);
     if (!button) return;
-    wasm.instance.exports.ocelot_set_button(emu, BUTTONS[button], 0);
+    keyButtonsDown.delete(button);
+    syncButton(button);
     ev.preventDefault();
 }
 
