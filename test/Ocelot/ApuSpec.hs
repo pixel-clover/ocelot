@@ -4,6 +4,7 @@ module Ocelot.ApuSpec (spec) where
 
 import Data.Bits ((.&.), (.|.))
 import Data.Maybe (catMaybes, fromMaybe)
+import qualified Data.Vector.Unboxed as V
 import Data.Word (Word16, Word8)
 import qualified Numeric
 import Ocelot.Apu
@@ -192,21 +193,37 @@ spec = do
 
     describe "advance produces samples" $ do
         it "after triggering ch2 and advancing 1 frame, samples are emitted" $ do
-            apu <- initial
-            write8 0xFF26 0x80 apu -- Power APU on (post-boot handoff)
-            -- Set up a 1 kHz square wave: freq = 2048 - 4194304/(32*1000) = 1917.
-            -- Encode: low byte = 1917 & 0xFF, high bits = (1917 >> 8) & 7.
-            write8 0xFF24 0x77 apu -- Master vol both sides 7
-            write8 0xFF25 0x22 apu -- Pan ch2 to both sides
-            write8 0xFF16 0x80 apu -- 50% duty
-            write8 0xFF17 0xF0 apu -- Vol 15, env down period 0
-            write8 0xFF18 0x7D apu -- Freq low (0x77D = 1917)
-            write8 0xFF19 0x87 apu -- Trigger + freq high
+            apu <- freshSquareWaveApu
             advance 17556 apu -- One frame
             samples <- drainSamples apu
             length samples `shouldSatisfy` (> 0)
             -- At least one of the samples should be non-zero (the channel is producing output).
             any (/= 0) samples `shouldBe` True
+
+        it "draining after multiple advances preserves sample order" $ do
+            apuFrameByFrame <- freshSquareWaveApu
+            advance 17556 apuFrameByFrame
+            firstFrame <- drainSamples apuFrameByFrame
+            advance 17556 apuFrameByFrame
+            secondFrame <- drainSamples apuFrameByFrame
+
+            apuCombined <- freshSquareWaveApu
+            advance 17556 apuCombined
+            advance 17556 apuCombined
+            combined <- drainSamples apuCombined
+
+            combined `shouldBe` (firstFrame ++ secondFrame)
+
+        it "vector drains preserve the same samples as list drains" $ do
+            apuList <- freshSquareWaveApu
+            advance 17556 apuList
+            listSamples <- drainSamples apuList
+
+            apuVector <- freshSquareWaveApu
+            advance 17556 apuVector
+            vectorSamples <- drainSamplesVector apuVector
+
+            V.toList vectorSamples `shouldBe` listSamples
 
     describe "high-pass filter" $ do
         it "DC offset decays to near-zero after running a silent (all-DAC-off) APU for many frames" $ do
@@ -257,6 +274,20 @@ spec = do
             -- After ~1 second, DC component should be well below 1% of full scale (32767).
             abs mean `shouldSatisfy` (< 328)
             n `shouldSatisfy` (> 0)
+
+freshSquareWaveApu :: IO ApuState
+freshSquareWaveApu = do
+    apu <- initial
+    write8 0xFF26 0x80 apu -- Power APU on (post-boot handoff)
+    -- Set up a 1 kHz square wave: freq = 2048 - 4194304/(32*1000) = 1917.
+    -- Encode: low byte = 1917 & 0xFF, high bits = (1917 >> 8) & 7.
+    write8 0xFF24 0x77 apu -- Master vol both sides 7
+    write8 0xFF25 0x22 apu -- Pan ch2 to both sides
+    write8 0xFF16 0x80 apu -- 50% duty
+    write8 0xFF17 0xF0 apu -- Vol 15, env down period 0
+    write8 0xFF18 0x7D apu -- Freq low (0x77D = 1917)
+    write8 0xFF19 0x87 apu -- Trigger + freq high
+    pure apu
 
 collectRwFailures :: ApuState -> IO [(Word16, Word8, Word8, Word8)]
 collectRwFailures apu = do

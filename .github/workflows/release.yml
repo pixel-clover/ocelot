@@ -68,9 +68,6 @@ jobs:
           - os: ubuntu-24.04-arm
             artifact_name: ocelot-linux-aarch64.gz
             asset_content_type: application/gzip
-          - os: macos-13
-            artifact_name: ocelot-macos-x86_64.gz
-            asset_content_type: application/gzip
           - os: macos-14
             artifact_name: ocelot-macos-aarch64.gz
             asset_content_type: application/gzip

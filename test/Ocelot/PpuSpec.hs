@@ -3,10 +3,14 @@
 module Ocelot.PpuSpec (spec) where
 
 import Data.Bits ((.&.))
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BSI
 import Data.IORef (readIORef, writeIORef)
 import qualified Data.Vector.Unboxed as V
 import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word8)
+import Foreign.ForeignPtr (withForeignPtr)
+import Foreign.Storable (peekByteOff, pokeByteOff)
 import Ocelot.Ppu
 import Test.Hspec
 
@@ -100,6 +104,58 @@ spec = do
             _ <- advance ((80 + 172) `div` 4) ps
             fb <- framebuffer ps
             fb V.! 0 `shouldBe` 0x03
+
+        it "RGB byte snapshots match immutable RGB framebuffer snapshots" $ do
+            ps <- freshOn
+            writeVram ps [(0, 0xFF), (1, 0x00)]
+            _ <- advance ((80 + 172) `div` 4) ps
+            rgb <- framebufferRgb ps
+            rgbBytes <- framebufferRgbBytes ps
+            BS.unpack rgbBytes `shouldBe` V.toList rgb
+
+        it "RGB framebuffer copies reuse caller-provided storage" $ do
+            ps <- freshOn
+            writeVram ps [(0, 0xFF), (1, 0x00)]
+            _ <- advance ((80 + 172) `div` 4) ps
+            rgb <- framebufferRgb ps
+            fp <- BSI.mallocByteString (framebufferWidth * framebufferHeight * 3)
+            let copied = BSI.fromForeignPtr fp 0 (framebufferWidth * framebufferHeight * 3)
+            withForeignPtr fp $ \ptr -> copyFramebufferRgb ptr ps
+            BS.unpack copied `shouldBe` V.toList rgb
+
+        it "RGB framebuffer copies honor row pitch" $ do
+            ps <- freshOn
+            writeVram ps [(0, 0xFF), (1, 0x00)]
+            _ <- advance ((80 + 172) `div` 4) ps
+            rgb <- framebufferRgb ps
+            let rowBytes = framebufferWidth * 3
+                pitch = rowBytes + 1
+                totalBytes = framebufferHeight * pitch
+                expected = pitchedRgb rowBytes pitch (V.toList rgb)
+            fp <- BSI.mallocByteString totalBytes
+            withForeignPtr fp $ \ptr -> do
+                mapM_ (\i -> pokeByteOff ptr i (0xAA :: Word8)) [0 .. totalBytes - 1]
+                copyFramebufferRgbWithPitch ptr pitch ps
+                copied <- mapM (\i -> peekByteOff ptr i :: IO Word8) [0 .. totalBytes - 1]
+                copied `shouldBe` expected
+
+        it "RGBA byte snapshots expand RGB pixels with opaque alpha" $ do
+            ps <- freshOn
+            writeVram ps [(0, 0xFF), (1, 0x00)]
+            _ <- advance ((80 + 172) `div` 4) ps
+            rgb <- framebufferRgb ps
+            rgbaBytes <- framebufferRgbaBytes ps
+            BS.unpack rgbaBytes `shouldBe` rgbaFromRgb (V.toList rgb)
+
+        it "RGBA framebuffer copies reuse caller-provided storage" $ do
+            ps <- freshOn
+            writeVram ps [(0, 0xFF), (1, 0x00)]
+            _ <- advance ((80 + 172) `div` 4) ps
+            rgb <- framebufferRgb ps
+            fp <- BSI.mallocByteString (framebufferWidth * framebufferHeight * 4)
+            let copied = BSI.fromForeignPtr fp 0 (framebufferWidth * framebufferHeight * 4)
+            withForeignPtr fp $ \ptr -> copyFramebufferRgba ptr ps
+            BS.unpack copied `shouldBe` rgbaFromRgb (V.toList rgb)
 
     describe "register I/O" $ do
         it "STAT read returns mode bits 0..1 from the current mode" $ do
@@ -224,3 +280,17 @@ readDot ps = readIORef (ppuDot ps)
 
 readLy :: PpuState -> IO Word8
 readLy ps = readIORef (ppuLy ps)
+
+rgbaFromRgb :: [Word8] -> [Word8]
+rgbaFromRgb [] = []
+rgbaFromRgb (r : g : b : rest) = r : g : b : 255 : rgbaFromRgb rest
+rgbaFromRgb _ = error "RGB framebuffer length must be a multiple of 3"
+
+pitchedRgb :: Int -> Int -> [Word8] -> [Word8]
+pitchedRgb rowBytes pitch = go
+  where
+    padBytes = pitch - rowBytes
+    go [] = []
+    go xs =
+        let (row, rest) = splitAt rowBytes xs
+         in row <> replicate padBytes 0xAA <> go rest

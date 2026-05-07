@@ -34,6 +34,7 @@ module Ocelot.Bus (
     advance,
     drainSerial,
     drainAudioSamples,
+    drainAudioSamplesVector,
     triggerSpeedSwitch,
     installBootRom,
 ) where
@@ -42,8 +43,9 @@ import Control.Monad (replicateM_, when)
 import Data.Bits (complement, setBit, shiftL, testBit, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
-import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int16)
+import Data.Vector.Unboxed (Vector)
 import Data.Vector.Unboxed.Mutable (IOVector)
 import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word16, Word8)
@@ -334,15 +336,37 @@ unusable region) but can still poke at the I/O register file
 addrAccessibleDuringDma :: Word16 -> Bool
 addrAccessibleDuringDma addr = addr >= 0xFF00
 
+ppuCpuCanAccessVram :: Bus -> IO Bool
+ppuCpuCanAccessVram b = do
+    lcdc <- readIORef (Ppu.ppuLcdc (busPpu b))
+    if not (testBit lcdc 7)
+        then pure True
+        else do
+            mode <- readIORef (Ppu.ppuMode (busPpu b))
+            pure (mode /= Ppu.ModeDrawing)
+
+ppuCpuCanAccessOam :: Bus -> IO Bool
+ppuCpuCanAccessOam b = do
+    lcdc <- readIORef (Ppu.ppuLcdc (busPpu b))
+    if not (testBit lcdc 7)
+        then pure True
+        else do
+            mode <- readIORef (Ppu.ppuMode (busPpu b))
+            pure (mode /= Ppu.ModeOamScan && mode /= Ppu.ModeDrawing)
+
 read8Raw :: Word16 -> Bus -> IO Word8
 read8Raw addr b
     | addr <= 0x7FFF = bootRomOrCart addr b
-    | addr <= 0x9FFF = Ppu.read8 addr (busPpu b)
+    | addr <= 0x9FFF = do
+        accessible <- ppuCpuCanAccessVram b
+        if accessible then Ppu.read8 addr (busPpu b) else pure 0xFF
     | addr <= 0xBFFF = Cartridge.read8 addr (busCart b)
     | addr <= 0xCFFF = MV.read (busWram b) (fromIntegral addr .&. 0x0FFF)
     | addr <= 0xDFFF = readUpperWram addr b
     | addr <= 0xFDFF = readEcho addr b
-    | addr <= 0xFE9F = Ppu.read8 addr (busPpu b)
+    | addr <= 0xFE9F = do
+        accessible <- ppuCpuCanAccessOam b
+        if accessible then Ppu.read8 addr (busPpu b) else pure 0xFF
     | addr <= 0xFEFF = pure 0xFF
     | addr == 0xFF00 = Joypad.readP1 (busJoypad b)
     -- IF (0xFF0F): only the low 5 bits are real interrupt flags; the
@@ -449,12 +473,16 @@ write8 addr !v b = do
 write8Raw :: Word16 -> Word8 -> Bus -> IO ()
 write8Raw addr !v b
     | addr <= 0x7FFF = Cartridge.write8 addr v (busCart b)
-    | addr <= 0x9FFF = Ppu.write8 addr v (busPpu b)
+    | addr <= 0x9FFF = do
+        accessible <- ppuCpuCanAccessVram b
+        when accessible (Ppu.write8 addr v (busPpu b))
     | addr <= 0xBFFF = Cartridge.write8 addr v (busCart b)
     | addr <= 0xCFFF = MV.write (busWram b) (fromIntegral addr .&. 0x0FFF) v
     | addr <= 0xDFFF = writeUpperWram addr v b
     | addr <= 0xFDFF = writeEcho addr v b
-    | addr <= 0xFE9F = Ppu.write8 addr v (busPpu b)
+    | addr <= 0xFE9F = do
+        accessible <- ppuCpuCanAccessOam b
+        when accessible (Ppu.write8 addr v (busPpu b))
     | addr <= 0xFEFF = pure ()
     | addr == 0xFF00 = Joypad.writeP1 v (busJoypad b)
     | addr == 0xFF02 = handleSerialControl v b
@@ -556,7 +584,7 @@ readKey1 b
         pure ((if ds then 0x80 else 0x00) .|. (prepare .&. 0x01) .|. 0x7E)
 
 writeKey1 :: Word8 -> Bus -> IO ()
-writeKey1 v b = when (busCgb b) (writeIORef (busKey1 b) (v .&. 0x01))
+writeKey1 v b = when (busCgb b && not (busCgbDmgCompat b)) (writeIORef (busKey1 b) (v .&. 0x01))
 
 {- | Install a boot ROM. Subsequent reads to the boot-ROM-mapped range
 (0x0000-0x00FF on DMG; 0x0000-0x00FF and 0x0200-0x08FF on CGB) come
@@ -651,7 +679,7 @@ latch; otherwise it's a no-op (the caller still sets cpuHalted).
 -}
 triggerSpeedSwitch :: Bus -> IO Bool
 triggerSpeedSwitch b
-    | not (busCgb b) = pure False
+    | not (busCgb b) || busCgbDmgCompat b = pure False
     | otherwise = do
         prep <- readIORef (busKey1 b)
         if testBit prep 0
@@ -863,7 +891,9 @@ the one bus master that can still see memory while it's running.)
 readDmaSource :: Word16 -> Bus -> IO Word8
 readDmaSource addr b
     | addr <= 0x7FFF = bootRomOrCart addr b
-    | addr <= 0x9FFF = Ppu.read8 addr (busPpu b)
+    | addr <= 0x9FFF = do
+        accessible <- ppuCpuCanAccessVram b
+        if accessible then Ppu.read8 addr (busPpu b) else pure 0xFF
     | addr <= 0xBFFF = Cartridge.read8 addr (busCart b)
     | addr <= 0xCFFF = MV.read (busWram b) (fromIntegral addr .&. 0x0FFF)
     | addr <= 0xDFFF = readUpperWram addr b
@@ -933,10 +963,14 @@ advance mCycles b = do
 drainAudioSamples :: Bus -> IO [Int16]
 drainAudioSamples b = Apu.drainSamples (busApu b)
 
+-- | Drain the APU's pending stereo samples into an immutable vector.
+drainAudioSamplesVector :: Bus -> IO (Vector Int16)
+drainAudioSamplesVector b = Apu.drainSamplesVector (busApu b)
+
 setIfBit :: Int -> Bus -> IO ()
 setIfBit n b = do
     iflag <- MV.read (busIo b) 0x0F
     MV.write (busIo b) 0x0F (setBit iflag n)
 
 drainSerial :: Bus -> IO [Word8]
-drainSerial b = reverse <$> readIORef (busSerialOut b)
+drainSerial b = atomicModifyIORef' (busSerialOut b) (\bytes -> ([], reverse bytes))

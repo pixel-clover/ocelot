@@ -5,6 +5,9 @@ let emu = 0;
 let running = false;
 let rafId = null;
 let canvas, ctx, imageData;
+let imageDataBuffer = null;
+let imageDataPtr = 0;
+let imageDataLen = 0;
 let BUTTONS = {};
 
 // Audio state
@@ -99,13 +102,13 @@ async function init() {
 
     const e = wasm.instance.exports;
     BUTTONS = {
-        Up:     e.ocelot_button_up(),
-        Down:   e.ocelot_button_down(),
-        Left:   e.ocelot_button_left(),
-        Right:  e.ocelot_button_right(),
-        A:      e.ocelot_button_a(),
-        B:      e.ocelot_button_b(),
-        Start:  e.ocelot_button_start(),
+        Up: e.ocelot_button_up(),
+        Down: e.ocelot_button_down(),
+        Left: e.ocelot_button_left(),
+        Right: e.ocelot_button_right(),
+        A: e.ocelot_button_a(),
+        B: e.ocelot_button_b(),
+        Start: e.ocelot_button_start(),
         Select: e.ocelot_button_select(),
     };
 
@@ -299,7 +302,9 @@ function loadSettings() {
         if (saved.integerScale !== undefined) applyIntegerScale(saved.integerScale);
         else applyIntegerScale(0);
         if (saved.scanlines !== undefined) applyScanlines(saved.scanlines);
-    } catch (_) { applyIntegerScale(0); }
+    } catch (_) {
+        applyIntegerScale(0);
+    }
     document.getElementById("audio-toggle").textContent = audioEnabled ? "ON" : "OFF";
 }
 
@@ -314,7 +319,8 @@ function saveSettings() {
             integerScale,
             scanlines: scanlinesEnabled,
         }));
-    } catch (_) {}
+    } catch (_) {
+    }
 }
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
@@ -455,7 +461,12 @@ function hideRecentRoms() {
 function disableStorage(message, err) {
     if (err) console.warn(message, err); else console.warn(message);
     stopBatterySaveTimer();
-    if (db) { try { db.close(); } catch (_) {} }
+    if (db) {
+        try {
+            db.close();
+        } catch (_) {
+        }
+    }
     db = null;
     hideRecentRoms();
     if (!storageNoticeShown) {
@@ -497,11 +508,11 @@ async function openDB() {
         req.onupgradeneeded = () => {
             const dbi = req.result;
             if (!dbi.objectStoreNames.contains("states")) dbi.createObjectStore("states");
-            if (!dbi.objectStoreNames.contains("saves"))  dbi.createObjectStore("saves");
-            if (!dbi.objectStoreNames.contains("roms"))   dbi.createObjectStore("roms");
+            if (!dbi.objectStoreNames.contains("saves")) dbi.createObjectStore("saves");
+            if (!dbi.objectStoreNames.contains("roms")) dbi.createObjectStore("roms");
         };
         req.onsuccess = () => resolve(req.result);
-        req.onerror   = () => reject(req.error);
+        req.onerror = () => reject(req.error);
         req.onblocked = () => reject(new Error("IndexedDB open was blocked"));
     });
 }
@@ -511,7 +522,7 @@ function dbPut(storeName, key, value) {
         const tx = db.transaction(storeName, "readwrite");
         tx.objectStore(storeName).put(value, key);
         tx.oncomplete = () => resolve();
-        tx.onerror    = () => reject(tx.error);
+        tx.onerror = () => reject(tx.error);
     });
 }
 
@@ -520,7 +531,7 @@ function dbGet(storeName, key) {
         const tx = db.transaction(storeName, "readonly");
         const req = tx.objectStore(storeName).get(key);
         req.onsuccess = () => resolve(req.result);
-        req.onerror   = () => reject(req.error);
+        req.onerror = () => reject(req.error);
     });
 }
 
@@ -534,7 +545,7 @@ async function getRecentRoms() {
             const tx = db.transaction("roms", "readonly");
             const req = tx.objectStore("roms").getAll();
             req.onsuccess = () => resolve(req.result);
-            req.onerror   = () => reject(req.error);
+            req.onerror = () => reject(req.error);
         });
     } catch (_) {
         return [];
@@ -544,10 +555,16 @@ async function getRecentRoms() {
 async function populateRecentRoms() {
     const select = document.getElementById("recent-roms");
     while (select.options.length > 1) select.remove(1);
-    if (!db) { select.style.display = "none"; return; }
+    if (!db) {
+        select.style.display = "none";
+        return;
+    }
     const entries = await getRecentRoms();
     entries.sort((a, b) => b.timestamp - a.timestamp);
-    if (entries.length === 0) { select.style.display = "none"; return; }
+    if (entries.length === 0) {
+        select.style.display = "none";
+        return;
+    }
     for (const entry of entries.slice(0, 10)) {
         const opt = document.createElement("option");
         opt.value = entry.name;
@@ -558,7 +575,10 @@ async function populateRecentRoms() {
 }
 
 async function loadRecentRom(name) {
-    if (!db) { showToast("Persistent storage unavailable"); return; }
+    if (!db) {
+        showToast("Persistent storage unavailable");
+        return;
+    }
     let entry;
     try {
         entry = await dbGet("roms", name);
@@ -631,7 +651,8 @@ function renderAudio() {
     if (sampleCount === 0) return;
     const ptr = e.ocelot_audio_buffer_ptr(emu);
     const samples = new Int16Array(e.memory.buffer, ptr, sampleCount);
-    audioNode.port.postMessage(samples.slice());
+    const chunk = samples.slice();
+    audioNode.port.postMessage(chunk, [chunk.buffer]);
     e.ocelot_clear_audio_buffer(emu);
     if ((++audioFrameCounter % 6) === 0) {
         audioNode.port.postMessage("query-level");
@@ -701,6 +722,10 @@ async function destroyCurrentSession() {
     emu = 0;
     currentRomName = "";
     currentRomTitle = "";
+    imageData = null;
+    imageDataBuffer = null;
+    imageDataPtr = 0;
+    imageDataLen = 0;
     syncLedState();
 }
 
@@ -712,17 +737,23 @@ function onFileSelected(ev) {
 
 async function decompressIfNeeded(file) {
     if (!(file.name || "").toLowerCase().endsWith(".zip")) return file;
-    const { unzip } = await import("https://esm.sh/fflate@0.8.2");
+    const {unzip} = await import("https://esm.sh/fflate@0.8.2");
     const buffer = await file.arrayBuffer();
     return new Promise((resolve, reject) => {
         unzip(new Uint8Array(buffer), (err, files) => {
-            if (err) { reject(new Error("ZIP extraction failed: " + err.message)); return; }
+            if (err) {
+                reject(new Error("ZIP extraction failed: " + err.message));
+                return;
+            }
             const ROM_EXTS = [".gb", ".gbc", ".sgb"];
             const entry = Object.entries(files).find(([name]) =>
                 ROM_EXTS.some(ext => name.toLowerCase().endsWith(ext)));
-            if (!entry) { reject(new Error("No .gb or .gbc ROM found inside ZIP")); return; }
+            if (!entry) {
+                reject(new Error("No .gb or .gbc ROM found inside ZIP"));
+                return;
+            }
             const [romName, romBytes] = entry;
-            resolve(new File([romBytes], romName, { type: "application/octet-stream" }));
+            resolve(new File([romBytes], romName, {type: "application/octet-stream"}));
         });
     });
 }
@@ -748,12 +779,18 @@ async function loadRom(file) {
         const buffer = await file.arrayBuffer();
         const romBytes = new Uint8Array(buffer);
         const ptr = allocAndCopy(romBytes);
-        if (!ptr) { showError("Failed to allocate ROM memory"); return; }
+        if (!ptr) {
+            showError("Failed to allocate ROM memory");
+            return;
+        }
 
         const e = wasm.instance.exports;
         emu = e.ocelot_create(ptr, romBytes.length);
         freeBytes(ptr, romBytes.length);
-        if (!emu) { showError(getLastError()); return; }
+        if (!emu) {
+            showError(getLastError());
+            return;
+        }
 
         currentRomName = file.name || "ROM";
         currentRomTitle = readSessionString(
@@ -792,7 +829,10 @@ async function loadRom(file) {
 // ─── Emulation loop ───────────────────────────────────────────────────────────
 
 function togglePause() {
-    if (!emu) { showToast("Load a ROM first"); return; }
+    if (!emu) {
+        showToast("Load a ROM first");
+        return;
+    }
     running = !running;
     document.getElementById("btn-pause").textContent = running ? "Pause" : "Resume";
     if (running) {
@@ -812,6 +852,17 @@ function frameLoop(now) {
     if (!running || !emu) return;
     rafId = requestAnimationFrame(frameLoop);
     tickEmulator(now);
+}
+
+function getFramebufferImageData(ptr, len) {
+    const buffer = wasm.instance.exports.memory.buffer;
+    if (!imageData || imageDataBuffer !== buffer || imageDataPtr !== ptr || imageDataLen !== len) {
+        imageData = new ImageData(new Uint8ClampedArray(buffer, ptr, len), 160, 144);
+        imageDataBuffer = buffer;
+        imageDataPtr = ptr;
+        imageDataLen = len;
+    }
+    return imageData;
 }
 
 function tickEmulator(now) {
@@ -839,16 +890,7 @@ function tickEmulator(now) {
     renderAudio();
     const fbPtr = e.ocelot_framebuffer_ptr(emu);
     const fbLen = e.ocelot_framebuffer_len(emu);
-    const fb = new Uint8ClampedArray(e.memory.buffer, fbPtr, fbLen);
-    if (!imageData) imageData = ctx.createImageData(160, 144);
-    const pixels = imageData.data;
-    for (let src = 0, dst = 0; src < fb.length; src += 3, dst += 4) {
-        pixels[dst]     = fb[src];
-        pixels[dst + 1] = fb[src + 1];
-        pixels[dst + 2] = fb[src + 2];
-        pixels[dst + 3] = 255;
-    }
-    ctx.putImageData(imageData, 0, 0);
+    ctx.putImageData(getFramebufferImageData(fbPtr, fbLen), 0, 0);
     lastFrameMs = performance.now() - t0;
     updateFps(now);
 }
@@ -881,14 +923,14 @@ function pollGamepads() {
         const lx = gp.axes.length >= 2 ? gp.axes[0] : 0;
         const ly = gp.axes.length >= 2 ? gp.axes[1] : 0;
 
-        e.ocelot_set_button(emu, BUTTONS.A,      btn(0) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.B,      btn(1) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.A, btn(0) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.B, btn(1) ? 1 : 0);
         e.ocelot_set_button(emu, BUTTONS.Select, btn(8) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Start,  btn(9) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Up,    (btn(12) || ly < -AXIS_THRESHOLD) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Down,  (btn(13) || ly >  AXIS_THRESHOLD) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Left,  (btn(14) || lx < -AXIS_THRESHOLD) ? 1 : 0);
-        e.ocelot_set_button(emu, BUTTONS.Right, (btn(15) || lx >  AXIS_THRESHOLD) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Start, btn(9) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Up, (btn(12) || ly < -AXIS_THRESHOLD) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Down, (btn(13) || ly > AXIS_THRESHOLD) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Left, (btn(14) || lx < -AXIS_THRESHOLD) ? 1 : 0);
+        e.ocelot_set_button(emu, BUTTONS.Right, (btn(15) || lx > AXIS_THRESHOLD) ? 1 : 0);
 
         // Only use the first connected gamepad
         break;
@@ -912,10 +954,19 @@ function quickLoad() {
 }
 
 async function persistentSave() {
-    if (!emu) { showToast("Load a ROM first"); return; }
-    if (!db)  { showToast("Persistent storage unavailable"); return; }
+    if (!emu) {
+        showToast("Load a ROM first");
+        return;
+    }
+    if (!db) {
+        showToast("Persistent storage unavailable");
+        return;
+    }
     const e = wasm.instance.exports;
-    if (!e.ocelot_save_state(emu)) { showToast(getLastError()); return; }
+    if (!e.ocelot_save_state(emu)) {
+        showToast(getLastError());
+        return;
+    }
     const ptr = e.ocelot_save_state_ptr(emu);
     const len = e.ocelot_save_state_len(emu);
     const data = readMemory(ptr, len).slice();
@@ -928,8 +979,14 @@ async function persistentSave() {
 }
 
 async function persistentLoad() {
-    if (!emu) { showToast("Load a ROM first"); return; }
-    if (!db)  { showToast("Persistent storage unavailable"); return; }
+    if (!emu) {
+        showToast("Load a ROM first");
+        return;
+    }
+    if (!db) {
+        showToast("Persistent storage unavailable");
+        return;
+    }
     let data;
     try {
         data = await dbGet("states", `${currentRomName}:slot${currentSlot}`);
@@ -937,9 +994,15 @@ async function persistentLoad() {
         disableStorage(STORAGE_DISABLED_MESSAGE, err);
         return;
     }
-    if (!data) { showToast(`No save in slot ${currentSlot}`); return; }
+    if (!data) {
+        showToast(`No save in slot ${currentSlot}`);
+        return;
+    }
     const ptr = allocAndCopy(data);
-    if (!ptr)  { showToast("Memory allocation failed"); return; }
+    if (!ptr) {
+        showToast("Memory allocation failed");
+        return;
+    }
     const ok = wasm.instance.exports.ocelot_load_state(emu, ptr, data.length);
     freeBytes(ptr, data.length);
     showToast(ok ? `Loaded slot ${currentSlot}` : getLastError());
@@ -1012,7 +1075,7 @@ function updatePerf() {
     document.getElementById("perf-audio").textContent =
         audioCtx && audioNode
             ? `${audioCtx.state}` +
-              (audioBufferCapacity > 0 ? ` ${audioBufferLevel}/${audioBufferCapacity}` : "")
+            (audioBufferCapacity > 0 ? ` ${audioBufferLevel}/${audioBufferCapacity}` : "")
             : "OFF";
     document.getElementById("perf-wasm-mem").textContent =
         wasm ? `${(wasm.instance.exports.memory.buffer.byteLength / 1048576).toFixed(1)} MB` : "--";
@@ -1091,7 +1154,7 @@ function computeBestScale() {
 function applyIntegerScale(n) {
     integerScale = n;
     const isFs = !!document.fullscreenElement;
-    const availW = isFs ? window.innerWidth  : windowAvailW();
+    const availW = isFs ? window.innerWidth : windowAvailW();
     const availH = isFs ? window.innerHeight : windowAvailH();
 
     let w, h;
@@ -1109,7 +1172,7 @@ function applyIntegerScale(n) {
     }
 
     if (canvas) {
-        canvas.style.width  = w + "px";
+        canvas.style.width = w + "px";
         canvas.style.height = h + "px";
     }
 
@@ -1117,14 +1180,14 @@ function applyIntegerScale(n) {
     // so the scanlines overlay must be shifted to match the canvas position.
     const overlay = document.getElementById("scanlines-overlay");
     if (overlay) {
-        overlay.style.width  = w + "px";
+        overlay.style.width = w + "px";
         overlay.style.height = h + "px";
         if (isFs) {
-            overlay.style.left = Math.floor((window.innerWidth  - w) / 2) + "px";
-            overlay.style.top  = Math.floor((window.innerHeight - h) / 2) + "px";
+            overlay.style.left = Math.floor((window.innerWidth - w) / 2) + "px";
+            overlay.style.top = Math.floor((window.innerHeight - h) / 2) + "px";
         } else {
             overlay.style.left = "0";
-            overlay.style.top  = "0";
+            overlay.style.top = "0";
         }
     }
 
@@ -1175,8 +1238,16 @@ function onKeyDown(ev) {
         return;
     }
     if (ev.code === "Escape") {
-        if (helpOpen)  { ev.preventDefault(); toggleHelp();  return; }
-        if (aboutOpen) { ev.preventDefault(); toggleAbout(); return; }
+        if (helpOpen) {
+            ev.preventDefault();
+            toggleHelp();
+            return;
+        }
+        if (aboutOpen) {
+            ev.preventDefault();
+            toggleAbout();
+            return;
+        }
     }
     if (!emu) return;
     const button = buttonForCode(ev.code);

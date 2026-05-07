@@ -18,9 +18,9 @@ import qualified Data.Vector.Unboxed as V
 import Data.Word (Word8)
 import Foreign.C.Types (CInt (..), CSize (..))
 import Foreign.Marshal.Alloc (free, mallocBytes)
-import Foreign.Marshal.Array (pokeArray)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, castPtr, nullPtr, plusPtr)
+import Foreign.Storable (poke)
 import qualified Ocelot as Public
 import qualified Ocelot.Joypad as Joypad
 import qualified Ocelot.Snapshot as Snapshot
@@ -45,7 +45,7 @@ data Runtime = Runtime
     }
 
 framebufferBytes :: Int
-framebufferBytes = Web.framebufferWidth * Web.framebufferHeight * 3
+framebufferBytes = Web.framebufferWidth * Web.framebufferHeight * 4
 
 audioCapacitySamples :: Int
 audioCapacitySamples = 32768 * 2
@@ -133,23 +133,30 @@ destroyHandle handle = do
     freeBufferRef (shSaveBuffer handle)
 
 copyFramebuffer :: SessionHandle -> IO ()
-copyFramebuffer handle = do
-    fb <- Web.framebufferRgb (shSession handle)
-    pokeArray (shFramebufferPtr handle) (V.toList fb)
+copyFramebuffer handle =
+    Web.copyFramebufferRgba (shFramebufferPtr handle) (shSession handle)
 
-appendAudio :: SessionHandle -> [Int16] -> IO ()
+appendAudio :: SessionHandle -> V.Vector Int16 -> IO ()
 appendAudio handle newSamples = do
     currentLen <- readIORef (shAudioLen handle)
     let room = shAudioCap handle - currentLen
-        clipped = take room newSamples
-    pokeArray (shAudioPtr handle `plusInt16Ptr` currentLen) clipped
-    writeIORef (shAudioLen handle) (currentLen + length clipped)
+        written = min room (V.length newSamples)
+    pokeAudioSamples (shAudioPtr handle `plusInt16Ptr` currentLen) newSamples written
+    writeIORef (shAudioLen handle) (currentLen + written)
 
 plusInt16Ptr :: Ptr Int16 -> Int -> Ptr Int16
 plusInt16Ptr ptr offset = ptr `plusPtrBytes` (offset * 2)
 
 plusPtrBytes :: Ptr a -> Int -> Ptr a
 plusPtrBytes ptr bytes = castPtr (castPtr ptr `plusPtr` bytes)
+
+pokeAudioSamples :: Ptr Int16 -> V.Vector Int16 -> Int -> IO ()
+pokeAudioSamples ptr0 samples count = go ptr0 0
+  where
+    go _ i | i >= count = pure ()
+    go ptr i = do
+        poke ptr (V.unsafeIndex samples i)
+        go (plusInt16Ptr ptr 1) (i + 1)
 
 normalizeButton :: CInt -> Maybe Joypad.Button
 normalizeButton code = case fromIntegral code :: Int of
@@ -230,7 +237,7 @@ ocelot_run_frame sid = do
             Left err -> setLastError (displayException err) >> pure 0
             Right () -> do
                 copyFramebuffer handle
-                newSamples <- Web.drainAudioSamples (shSession handle)
+                newSamples <- Web.drainAudioSamplesVector (shSession handle)
                 appendAudio handle newSamples
                 clearLastError
                 pure 1

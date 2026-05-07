@@ -4,8 +4,11 @@ module Ocelot.BusSpec (spec) where
 
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
+import Data.IORef (writeIORef)
 import Ocelot.Bus (Bus, advance, drainSerial, fromCartridge, installBootRom, read8, write8)
+import qualified Ocelot.Bus as Bus
 import Ocelot.Cartridge (loadRom)
+import qualified Ocelot.Ppu as Ppu
 import Ocelot.Testing (synthNoMbcRom)
 import Test.Hspec
 
@@ -46,6 +49,8 @@ spec = do
 
         it "OAM round-trips a byte at 0xFE00" $ do
             b <- emptyBus
+            let ppu = Bus.busPpu b
+            writeIORef (Ppu.ppuMode ppu) Ppu.ModeHBlank
             write8 0xFE00 0x77 b
             v <- read8 0xFE00 b
             v `shouldBe` 0x77
@@ -68,6 +73,37 @@ spec = do
             write8 0x0000 0x55 b
             v <- read8 0x0000 b
             v `shouldBe` 0x00
+
+    describe "PPU access gating" $ do
+        it "blocks CPU VRAM reads and writes during mode 3" $ do
+            b <- emptyBus
+            let ppu = Bus.busPpu b
+            writeIORef (Ppu.ppuLcdc ppu) 0x80
+            write8 0x8000 0x12 b
+            writeIORef (Ppu.ppuMode ppu) Ppu.ModeDrawing
+            blocked <- read8 0x8000 b
+            write8 0x8000 0x34 b
+            writeIORef (Ppu.ppuMode ppu) Ppu.ModeHBlank
+            visible <- read8 0x8000 b
+            blocked `shouldBe` 0xFF
+            visible `shouldBe` 0x12
+
+        it "blocks CPU OAM reads and writes during mode 2 and mode 3" $ do
+            b <- emptyBus
+            let ppu = Bus.busPpu b
+            writeIORef (Ppu.ppuLcdc ppu) 0x80
+            writeIORef (Ppu.ppuMode ppu) Ppu.ModeHBlank
+            write8 0xFE00 0x55 b
+            writeIORef (Ppu.ppuMode ppu) Ppu.ModeOamScan
+            blockedMode2 <- read8 0xFE00 b
+            write8 0xFE00 0x66 b
+            writeIORef (Ppu.ppuMode ppu) Ppu.ModeDrawing
+            blockedMode3 <- read8 0xFE00 b
+            writeIORef (Ppu.ppuMode ppu) Ppu.ModeHBlank
+            visible <- read8 0xFE00 b
+            blockedMode2 `shouldBe` 0xFF
+            blockedMode3 `shouldBe` 0xFF
+            visible `shouldBe` 0x55
 
     describe "serial-port capture" $ do
         it "writing 0x81 to SC after staging SB latches a byte to drainSerial" $ do
@@ -100,6 +136,16 @@ spec = do
             write8 0xFF02 0x01 b
             ser <- drainSerial b
             ser `shouldBe` []
+
+        it "draining serial clears buffered output" $ do
+            b <- emptyBus
+            mapM_
+                (\ch -> write8 0xFF01 ch b >> write8 0xFF02 0x81 b)
+                [0x4F, 0x4B]
+            first <- drainSerial b
+            second <- drainSerial b
+            first `shouldBe` [0x4F, 0x4B]
+            second `shouldBe` []
 
     describe "advance" $ do
         it "ticks the divider on each call" $ do
@@ -138,9 +184,9 @@ spec = do
             -- 'oam_dma_timing': a CPU read scheduled at the same M-cycle as the final byte still
             -- sees the lockout).
             advance 161 b
-            v0 <- read8 0xFE00 b
-            v1 <- read8 0xFE01 b
-            v9F <- read8 0xFE9F b
+            v0 <- Ppu.read8 0xFE00 (Bus.busPpu b)
+            v1 <- Ppu.read8 0xFE01 (Bus.busPpu b)
+            v9F <- Ppu.read8 0xFE9F (Bus.busPpu b)
             v0 `shouldBe` 0x00
             v1 `shouldBe` 0x01
             v9F `shouldBe` 0x9F
@@ -155,7 +201,7 @@ spec = do
             write8 0xFF46 0xFE b -- DMA source = 0xFE00
             advance 1 b -- Consume the 1-cycle startup delay
             advance 161 b -- Finish the copy + 1 deferred-clear cycle
-            v0 <- read8 0xFE00 b
+            v0 <- Ppu.read8 0xFE00 (Bus.busPpu b)
             v0 `shouldBe` 0x55
 
         it "DMG: source 0xFFxx mirrors WRAM via 'src & ~0x2000'" $ do
@@ -166,7 +212,7 @@ spec = do
             write8 0xFF46 0xFF b -- DMA source = 0xFF00
             advance 1 b
             advance 161 b -- 160 copies + 1 deferred-clear cycle
-            v42 <- read8 0xFE42 b
+            v42 <- Ppu.read8 0xFE42 (Bus.busPpu b)
             v42 `shouldBe` 0xCD
 
         it "blocks main-bus reads but lets I/O regs and HRAM through" $ do

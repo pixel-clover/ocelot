@@ -4,6 +4,7 @@ module Ocelot.WebSpec (spec) where
 
 import qualified Data.ByteString as BS
 import qualified Data.Vector.Unboxed as V
+import Data.Word (Word8)
 import qualified Ocelot.Joypad as Joypad
 import Ocelot.Testing (synthNoMbcRom)
 import qualified Ocelot.Web as Web
@@ -30,6 +31,22 @@ spec = do
             fb <- Web.framebufferRgb session
             V.length fb `shouldBe` Web.framebufferWidth * Web.framebufferHeight * 3
 
+        it "exposes framebuffer bytes that match the RGB framebuffer snapshot" $ do
+            let rom = synthNoMbcRom BS.empty
+            Right session <- Web.loadSession rom
+            Web.runFrame session
+            fb <- Web.framebufferRgb session
+            fbBytes <- Web.framebufferRgbBytes session
+            BS.unpack fbBytes `shouldBe` V.toList fb
+
+        it "exposes RGBA framebuffer bytes for the browser host" $ do
+            let rom = synthNoMbcRom BS.empty
+            Right session <- Web.loadSession rom
+            Web.runFrame session
+            fb <- Web.framebufferRgb session
+            fbBytes <- Web.framebufferRgbaBytes session
+            BS.unpack fbBytes `shouldBe` rgbaFromRgb (V.toList fb)
+
         it "accepts joypad input and round-trips save states" $ do
             let rom = synthNoMbcRom BS.empty
             Right session <- Web.loadSession rom
@@ -46,6 +63,19 @@ spec = do
             samples <- Web.drainAudioSamples session
             length samples `shouldSatisfy` (>= 0)
 
+        it "drains audio samples as a vector consistently with the list path" $ do
+            let rom = synthNoMbcRom BS.empty
+            Right session <- Web.loadSession rom
+            Web.runFrame session
+            samples <- Web.drainAudioSamplesVector session
+            V.length samples `shouldSatisfy` (>= 0)
+            Web.drainAudioSamples session `shouldReturn` []
+
 isLeft :: Either a b -> Bool
 isLeft (Left _) = True
 isLeft (Right _) = False
+
+rgbaFromRgb :: [Word8] -> [Word8]
+rgbaFromRgb [] = []
+rgbaFromRgb (r : g : b : rest) = r : g : b : 255 : rgbaFromRgb rest
+rgbaFromRgb _ = error "RGB framebuffer length must be a multiple of 3"

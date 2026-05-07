@@ -138,6 +138,8 @@ Cross-subsystem read/write coordination, plus M-cycle dispatch.
 - `write8 :: Word16 -> Word8 -> Bus -> IO ()`
 - `advance :: Int -> Bus -> IO ()` (M-cycles; ticks Timer, PPU, APU, OAM DMA, HDMA HBlank step, joypad IRQ edge in lockstep, halving peripheral
   cycles in CGB double-speed mode)
+- `drainAudioSamples :: Bus -> IO [Int16]` and `drainAudioSamplesVector :: Bus -> IO (Vector Int16)` (frontend-facing audio drains; prefer the
+  vector form in hot paths)
 - `triggerSpeedSwitch :: Bus -> IO Bool` (called from the CPU's `STOP` handler)
 
 Bus is the only place that knows the full address map: it dispatches `0x0000-0x7FFF` and `0xA000-0xBFFF` to the cartridge, the VRAM/OAM windows
@@ -160,8 +162,12 @@ Reading or writing CPU registers from outside `Ocelot.Cpu` is allowed only for t
   the LCDC/STAT register surface at `0xFF40-0xFF4B`, plus CGB-only `0xFF4F`, `0xFF68-0xFF6C`)
 - Time advance: `advance :: Int -> PpuState -> IO Word8` (returns a flag bitmask: bit 0 = VBlank IRQ, bit 1 = STAT IRQ, bit 2 = HBlank-entered
   for HDMA stepping)
-- Framebuffer accessors: `framebuffer :: PpuState -> IO (Vector Word8)` (DMG palette indices) and `framebufferRgb :: PpuState -> IO (Vector Word8)`
-  (RGB888 bytes; what the SDL frontend uses)
+- Framebuffer accessors:
+  - `framebuffer :: PpuState -> IO (Vector Word8)` (DMG palette indices)
+  - `framebufferRgb :: PpuState -> IO (Vector Word8)` (RGB888 bytes)
+  - `copyFramebufferRgb :: Ptr Word8 -> PpuState -> IO ()` (copy into a caller-owned RGB888 staging buffer; preferred for desktop hot paths)
+  - `framebufferRgbBytes :: PpuState -> IO ByteString`
+  - `framebufferRgbaBytes :: PpuState -> IO ByteString` (used by the web frontend bridge)
 - CGB hookup: `setCgbMode :: Bool -> PpuState -> IO ()` (called by the bus once at startup)
 - CGB render-mode hookup: `setCgbRenderMode :: CgbRenderMode -> PpuState -> IO ()`
 - STAT write-edge hookup: `takePendingStatIrq :: PpuState -> IO Bool` (called by the bus after PPU register writes that can raise STAT)
@@ -174,7 +180,8 @@ the surface listed above as the contract; do not call other PpuState fields from
 - Register I/O: `read8 :: Word16 -> ApuState -> IO Word8`, `write8 :: Word16 -> Word8 -> ApuState -> IO ()` (covers `0xFF10-0xFF26` and the wave
   RAM at `0xFF30-0xFF3F`)
 - Time advance: `advance :: Int -> ApuState -> IO ()` (queues stereo samples; the bus drains them)
-- Sample drain: `drainSamples :: ApuState -> IO [Int16]`
+- Sample drain: `drainSamples :: ApuState -> IO [Int16]` and `drainSamplesVector :: ApuState -> IO (Vector Int16)` (same chronological samples; the
+  vector form exists for frontend hot paths)
 - CGB hookup: `setCgbMode :: Bool -> ApuState -> IO ()`
 - Host sample rate: `sampleRate :: Int`
 - Snapshot hooks: `dumpState :: ApuState -> IO ByteString`, `loadState :: ByteString -> ApuState -> IO ()`

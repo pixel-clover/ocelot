@@ -16,7 +16,7 @@ The library is unaware of SDL: the only library calls used here are
 * 'machineFromCartridge', 'runFor', 'machineBus', 'busPpu', 'busJoypad'
 * 'Ppu.framebuffer'
 * 'Joypad.setButton'
-* 'Bus.drainAudioSamples'
+* 'Bus.drainAudioSamplesVector'
 
 so this frontend is interchangeable with the headless terminal mode.
 -}
@@ -29,8 +29,8 @@ module Frontend.Sdl (
 import Codec.Picture (Image, PaletteCreationMethod (..), PaletteOptions (..), PixelRGB8 (..), generateImage, palettize)
 import Codec.Picture.Gif (GifDelay, GifLooping (..), writeGifImages)
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.MVar (MVar, modifyMVar, modifyMVar_, newMVar)
-import Control.Exception (IOException, SomeException, try)
+import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar)
+import Control.Exception (IOException, SomeException, bracket, try)
 import Control.Monad (forM_, unless, when)
 import Data.Bits (testBit)
 import qualified Data.ByteString as BS
@@ -39,6 +39,7 @@ import Data.Foldable (toList)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int16)
 import Data.Maybe (isJust, listToMaybe)
+import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock.POSIX (getPOSIXTime)
@@ -48,6 +49,7 @@ import Data.Word (Word64, Word8)
 import Development.GitRev (gitBranch, gitHash)
 import Foreign.C.String (peekCString)
 import Foreign.C.Types (CInt)
+import Foreign.Ptr (castPtr)
 import GHC.Clock (getMonotonicTimeNSec)
 import qualified Ocelot.Apu as Apu
 import qualified Ocelot.Bus as Bus
@@ -82,6 +84,12 @@ windowSize s = (gbWidth * s, gbHeight * s)
 frameNs :: Word64
 frameNs = 16742706
 
+toastDurationNs :: Word64
+toastDurationNs = frameNs * 240
+
+doubleSpeedBadgeDurationNs :: Word64
+doubleSpeedBadgeDurationNs = frameNs * 180
+
 -- | Analog stick deadzone (~25 % of the 32 767 maximum).
 axisDeadzone :: Int16
 axisDeadzone = 8000
@@ -89,6 +97,25 @@ axisDeadzone = 8000
 -- | Cap the audio buffer so an emulator running ahead of the audio device doesn't accumulate unbounded samples.
 maxBufferedSamples :: Int
 maxBufferedSamples = 9600 -- ~100 ms of stereo samples at 48 kHz
+
+maxFrameTimeHistory :: Int
+maxFrameTimeHistory = 61
+
+data AudioQueueState = AudioQueueState
+    { audioQueueBuffer :: !(VSM.IOVector Int16)
+    , audioQueueStart :: !Int
+    , audioQueueLength :: !Int
+    }
+
+newAudioQueue :: IO (MVar AudioQueueState)
+newAudioQueue = do
+    buffer <- VSM.new maxBufferedSamples
+    newMVar
+        AudioQueueState
+            { audioQueueBuffer = buffer
+            , audioQueueStart = 0
+            , audioQueueLength = 0
+            }
 
 data Hotkeys = Hotkeys
     { hkQuit :: !(IORef Bool)
@@ -108,6 +135,11 @@ data Hotkeys = Hotkeys
     , hkOpenReq :: !(IORef Bool)
     -- ^ "O": quit the current session and request a new ROM to be loaded.
     }
+
+data PaceMode
+    = PaceVSync
+    | PaceSleep
+    deriving (Eq, Show)
 
 newHotkeys :: IO Hotkeys
 newHotkeys =
@@ -133,19 +165,20 @@ data ToastStyle
 data Toast = Toast
     { toastStyle :: !ToastStyle
     , toastMessage :: !String
-    , toastHideAfterFrame :: !Word64
+    , toastHideAfterNs :: !Word64
     }
 
 data UiState = UiState
     { uiHelpVisible :: !(IORef Bool)
     , uiPerfVisible :: !(IORef Bool)
     , uiFrameCounter :: !(IORef Word64)
+    -- ^ Count of presented frames. Used for the perf overlay history and GIF capture cadence.
     , uiToasts :: !(IORef [Toast])
     , uiCurrentSlot :: !(IORef Int)
-    , uiFrameTimes :: !(IORef [Word64])
+    , uiFrameTimes :: !(IORef (Seq.Seq Word64))
     -- ^ Ring of up to 61 frame-present timestamps (ns). Used to compute FPS/frame-time.
     , uiDoubleSpeedBadgeUntil :: !(IORef Word64)
-    -- ^ Frame number after which the "DOUBLE SPEED" badge is hidden. 0 = not active.
+    -- ^ Monotonic timestamp in ns after which the "DOUBLE SPEED" badge is hidden. 0 = not active.
     , uiGifFrames :: !(IORef (Maybe [V.Vector Word8]))
     -- ^ Nothing = not recording; Just frames = recording (newest frame first).
     }
@@ -158,31 +191,34 @@ newUiState =
         <*> newIORef 0
         <*> newIORef []
         <*> newIORef 1
-        <*> newIORef []
+        <*> newIORef Seq.empty
         <*> newIORef 0
         <*> newIORef Nothing
 
-tickUi :: UiState -> IO Word64
-tickUi ui = do
+recordPresentedFrame :: UiState -> IO Word64
+recordPresentedFrame ui = do
     frame0 <- readIORef (uiFrameCounter ui)
     let frame = frame0 + 1
     writeIORef (uiFrameCounter ui) frame
-    modifyIORef' (uiToasts ui) (filter (\toast -> toastHideAfterFrame toast > frame))
     pure frame
+
+pruneUiDeadlines :: Word64 -> UiState -> IO ()
+pruneUiDeadlines nowNs ui =
+    modifyIORef' (uiToasts ui) (filter (\toast -> toastHideAfterNs toast > nowNs))
 
 pushToast :: UiState -> ToastStyle -> String -> IO ()
 pushToast ui style message = do
-    frame <- readIORef (uiFrameCounter ui)
+    nowNs <- getMonotonicTimeNSec
     let toast =
             Toast
                 { toastStyle = style
                 , toastMessage = message
-                , toastHideAfterFrame = frame + 240
+                , toastHideAfterNs = nowNs + toastDurationNs
                 }
     modifyIORef'
         (uiToasts ui)
         ( \toasts ->
-            let active = filter (\entry -> toastHideAfterFrame entry > frame) toasts
+            let active = filter (\entry -> toastHideAfterNs entry > nowNs) toasts
              in if length active < 3
                     then active ++ [toast]
                     else take 2 active ++ [toast]
@@ -190,6 +226,17 @@ pushToast ui style message = do
 
 currentToast :: UiState -> IO (Maybe Toast)
 currentToast ui = listToMaybe <$> readIORef (uiToasts ui)
+
+nextUiDeadline :: Word64 -> UiState -> IO (Maybe Word64)
+nextUiDeadline nowNs ui = do
+    toasts <- readIORef (uiToasts ui)
+    badgeUntil <- readIORef (uiDoubleSpeedBadgeUntil ui)
+    let toastDeadlines = [toastHideAfterNs toast | toast <- toasts, toastHideAfterNs toast > nowNs]
+        badgeDeadlines = [badgeUntil | badgeUntil > nowNs]
+    pure $
+        case toastDeadlines ++ badgeDeadlines of
+            [] -> Nothing
+            deadlines -> Just (minimum deadlines)
 
 fallbackTitle :: FilePath -> String
 fallbackTitle path =
@@ -231,11 +278,7 @@ play romPath cart bootRom title scale = do
                     SDL.V2 (fromIntegral winW) (fromIntegral winH)
                 , SDL.windowResizable = True
                 }
-    renderer <-
-        SDL.createRenderer
-            window
-            (-1)
-            SDL.defaultRenderer{SDL.rendererType = SDL.AcceleratedRenderer}
+    (renderer, paceMode) <- createRendererWithPacing window
     SDL.rendererDrawBlendMode renderer $= SDL.BlendAlphaBlend
     texture <-
         SDL.createTexture
@@ -243,9 +286,9 @@ play romPath cart bootRom title scale = do
             SDL.RGB24
             SDL.TextureAccessStreaming
             (SDL.V2 (fromIntegral gbWidth) (fromIntegral gbHeight))
-
-    audioBuf <- newMVar []
+    audioBuf <- newAudioQueue
     audioDev <- openAudio audioBuf
+    audioPlaying <- newIORef True
 
     machine0 <- machineFromCartridgeWithBoot bootRom cart
     machineRef <- newIORef machine0
@@ -254,7 +297,7 @@ play romPath cart bootRom title scale = do
 
     SDL.setAudioDevicePlaybackState audioDev SDL.Play
 
-    loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf window
+    loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode audioDev audioPlaying audioBuf window
 
     SDL.setAudioDevicePlaybackState audioDev SDL.Pause
     SDL.closeAudioDevice audioDev
@@ -264,7 +307,7 @@ play romPath cart bootRom title scale = do
     SDL.quit
     readIORef (hkOpenReq hk)
 
-openAudio :: MVar [Int16] -> IO SDL.AudioDevice
+openAudio :: MVar AudioQueueState -> IO SDL.AudioDevice
 openAudio buf = do
     let spec =
             SDL.OpenDeviceSpec
@@ -284,7 +327,7 @@ Drains up to @VSM.length out@ samples from the shared buffer, padding with silen
 -}
 audioCallback ::
     forall sampleType.
-    MVar [Int16] ->
+    MVar AudioQueueState ->
     SDL.AudioFormat sampleType ->
     VSM.IOVector sampleType ->
     IO ()
@@ -294,18 +337,34 @@ audioCallback buf fmt out = case fmt of
     SDL.Signed16BitBEAudio -> writeInt16 buf out
     _ -> pure ()
 
-writeInt16 :: MVar [Int16] -> VSM.IOVector Int16 -> IO ()
+writeInt16 :: MVar AudioQueueState -> VSM.IOVector Int16 -> IO ()
 writeInt16 buf out = do
     let !needed = VSM.length out
-    samples <-
-        modifyMVar
-            buf
-            ( \xs -> do
-                let (taken, rest) = splitAt needed xs
-                    padded = taken ++ replicate (needed - length taken) 0
-                pure (rest, padded)
-            )
-    mapM_ (uncurry (VSM.write out)) (zip [0 ..] samples)
+    modifyMVar_
+        buf
+        ( \queue -> do
+            let !available = min needed (audioQueueLength queue)
+                !buffer = audioQueueBuffer queue
+                !start = audioQueueStart queue
+                !cap = VSM.length buffer
+                !firstChunk = min available (cap - start)
+                !secondChunk = available - firstChunk
+            when (firstChunk > 0) $
+                VSM.copy
+                    (VSM.slice 0 firstChunk out)
+                    (VSM.slice start firstChunk buffer)
+            when (secondChunk > 0) $
+                VSM.copy
+                    (VSM.slice firstChunk secondChunk out)
+                    (VSM.slice 0 secondChunk buffer)
+            when (available < needed) $
+                fillAudioSilence out available needed
+            pure
+                queue
+                    { audioQueueStart = (start + available) `mod` cap
+                    , audioQueueLength = audioQueueLength queue - available
+                    }
+        )
 
 loop ::
     FilePath ->
@@ -317,15 +376,22 @@ loop ::
     Maybe BS.ByteString ->
     SDL.Renderer ->
     SDL.Texture ->
-    MVar [Int16] ->
+    PaceMode ->
+    SDL.AudioDevice ->
+    IORef Bool ->
+    MVar AudioQueueState ->
     SDL.Window ->
     IO ()
-loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf window = do
+loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode audioDev audioPlaying audioBuf window = do
     quit <- readIORef (hkQuit hk)
     unless quit $ do
-        frame <- tickUi ui
         machine <- readIORef machineRef
-        events <- SDL.pollEvents
+        paused0 <- readIORef (hkPaused hk)
+        helpVisible0 <- readIORef (uiHelpVisible ui)
+        now0 <- getMonotonicTimeNSec
+        pruneUiDeadlines now0 ui
+        deadline <- nextUiDeadline now0 ui
+        events <- gatherEvents (paused0 || helpVisible0) now0 deadline
         mapM_ (handleEvent hk ui (Bus.busJoypad (machineBus machine))) events
 
         -- One-shot hotkeys: handle save/load/screenshot/reset requests.
@@ -348,7 +414,9 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf wi
         doubleSpeedNow <- readIORef (Bus.busDoubleSpeed (machineBus machine'))
         dsBadge <- readIORef (uiDoubleSpeedBadgeUntil ui)
         if doubleSpeedNow
-            then when (dsBadge == 0) $ writeIORef (uiDoubleSpeedBadgeUntil ui) (frame + 180)
+            then when (dsBadge == 0) $ do
+                nowBadge <- getMonotonicTimeNSec
+                writeIORef (uiDoubleSpeedBadgeUntil ui) (nowBadge + doubleSpeedBadgeDurationNs)
             else when (dsBadge /= 0) $ writeIORef (uiDoubleSpeedBadgeUntil ui) 0
         paused <- readIORef (hkPaused hk)
         helpVisible <- readIORef (uiHelpVisible ui)
@@ -357,6 +425,9 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf wi
         when stepOnce (writeIORef (hkFrameStepReq hk) False)
         let frames = if fast then 4 else 1 :: Int
             shouldRun = (not paused && not helpVisible) || (stepOnce && paused && not helpVisible)
+            audioShouldPlay = not paused && not helpVisible
+
+        syncAudioPlayback audioDev audioPlaying audioBuf audioShouldPlay
 
         frameStartNs <- getMonotonicTimeNSec
         when shouldRun $ do
@@ -368,18 +439,11 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf wi
                 )
                 [1 .. frames]
 
-            samples <- Bus.drainAudioSamples (machineBus machine')
-            unless (null samples) $
-                modifyMVar_
-                    audioBuf
-                    ( \existing -> do
-                        let !combined = existing ++ samples
-                            !trimmed =
-                                if length combined > maxBufferedSamples
-                                    then drop (length combined - maxBufferedSamples) combined
-                                    else combined
-                        pure trimmed
-                    )
+            samples <- Bus.drainAudioSamplesVector (machineBus machine')
+            unless (V.null samples) $ appendAudioSamples audioBuf samples
+
+        nowUi <- getMonotonicTimeNSec
+        pruneUiDeadlines nowUi ui
 
         -- Query live window size so resize and fullscreen are handled correctly.
         SDL.V2 wW wH <- SDL.get (SDL.windowSize window)
@@ -395,32 +459,118 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf wi
                     (SDL.P (SDL.V2 (fromIntegral dstX) (fromIntegral dstY)))
                     (SDL.V2 (fromIntegral dstW) (fromIntegral dstH))
 
-        fbRgb <- Ppu.framebufferRgb (Bus.busPpu (machineBus machine'))
-        updateTextureRgb texture fbRgb
+        uploadTextureRgb texture (Bus.busPpu (machineBus machine'))
         SDL.rendererDrawColor renderer $= SDL.V4 0 0 0 255
         SDL.clear renderer
         SDL.copy renderer texture Nothing (Just dst)
-        renderUi renderer ui titleStr machine' paused fast winW winH
+        renderUi renderer ui titleStr machine' paused fast paceMode nowUi winW winH
         SDL.present renderer
+        frame <- recordPresentedFrame ui
 
         -- Capture every other frame to halve GIF file size (~30 fps effective).
         gifRec <- readIORef (uiGifFrames ui)
         case gifRec of
-            Just fs | even frame -> writeIORef (uiGifFrames ui) (Just (fbRgb : fs))
+            Just fs | even frame -> do
+                fbRgbFrame <- Ppu.framebufferRgb (Bus.busPpu (machineBus machine'))
+                writeIORef (uiGifFrames ui) (Just (fbRgbFrame : fs))
             _ -> pure ()
 
-        unless fast (paceFrame frameStartNs)
+        unless fast (paceFrame paceMode frameStartNs)
 
-        -- Record after pacing so consecutive timestamps span the full frame
-        -- (computation + sleep), giving an accurate FPS/frame-time reading.
-        frameEndNs <- getMonotonicTimeNSec
-        modifyIORef' (uiFrameTimes ui) $ \ts ->
-            let ts' = ts ++ [frameEndNs]
-             in if length ts' > 61 then drop 1 ts' else ts'
-        loop romPath titleStr hk ui machineRef cart bootRom renderer texture audioBuf window
+        when shouldRun $ do
+            -- Record after pacing so consecutive timestamps span the full frame
+            -- (computation + sleep), giving an accurate FPS/frame-time reading.
+            frameEndNs <- getMonotonicTimeNSec
+            modifyIORef' (uiFrameTimes ui) $ \ts ->
+                let ts' = ts Seq.|> frameEndNs
+                 in if Seq.length ts' > maxFrameTimeHistory then Seq.drop 1 ts' else ts'
+        loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode audioDev audioPlaying audioBuf window
 
-paceFrame :: Word64 -> IO ()
-paceFrame frameStartNs = do
+gatherEvents :: Bool -> Word64 -> Maybe Word64 -> IO [SDL.Event]
+gatherEvents waitMode nowNs mDeadline
+    | not waitMode = SDL.pollEvents
+    | otherwise = do
+        first <- case mDeadline of
+            Just deadline ->
+                SDL.waitEventTimeout (fromIntegral (max 0 ((deadline - nowNs + 999999) `div` 1000000)))
+            Nothing -> Just <$> SDL.waitEvent
+        rest <- SDL.pollEvents
+        pure (maybe rest (: rest) first)
+
+fillAudioSilence :: VSM.IOVector Int16 -> Int -> Int -> IO ()
+fillAudioSilence out start end = go start
+  where
+    go !i
+        | i >= end = pure ()
+        | otherwise = do
+            VSM.write out i 0
+            go (i + 1)
+
+appendAudioSamples :: MVar AudioQueueState -> V.Vector Int16 -> IO ()
+appendAudioSamples audioBuf samples =
+    modifyMVar_
+        audioBuf
+        ( \queue -> do
+            let !buffer = audioQueueBuffer queue
+                !cap = VSM.length buffer
+                !sampleCount = V.length samples
+            if sampleCount >= cap
+                then do
+                    copyVectorIntoRing samples (sampleCount - cap) buffer 0 cap
+                    pure
+                        queue
+                            { audioQueueStart = 0
+                            , audioQueueLength = cap
+                            }
+                else do
+                    let !overflow = max 0 (audioQueueLength queue + sampleCount - cap)
+                        !start = (audioQueueStart queue + overflow) `mod` cap
+                        !kept = audioQueueLength queue - overflow
+                        !writePos = (start + kept) `mod` cap
+                        !firstChunk = min sampleCount (cap - writePos)
+                        !secondChunk = sampleCount - firstChunk
+                    when (firstChunk > 0) $
+                        copyVectorIntoRing samples 0 buffer writePos firstChunk
+                    when (secondChunk > 0) $
+                        copyVectorIntoRing samples firstChunk buffer 0 secondChunk
+                    pure
+                        queue
+                            { audioQueueStart = start
+                            , audioQueueLength = kept + sampleCount
+                            }
+        )
+
+copyVectorIntoRing :: V.Vector Int16 -> Int -> VSM.IOVector Int16 -> Int -> Int -> IO ()
+copyVectorIntoRing samples srcOffset buffer dstOffset count = go 0
+  where
+    go !i
+        | i >= count = pure ()
+        | otherwise = do
+            VSM.write buffer (dstOffset + i) (V.unsafeIndex samples (srcOffset + i))
+            go (i + 1)
+
+syncAudioPlayback :: SDL.AudioDevice -> IORef Bool -> MVar AudioQueueState -> Bool -> IO ()
+syncAudioPlayback audioDev audioPlaying audioBuf shouldPlay = do
+    playing <- readIORef audioPlaying
+    when (playing /= shouldPlay) $ do
+        if shouldPlay
+            then SDL.setAudioDevicePlaybackState audioDev SDL.Play
+            else do
+                modifyMVar_
+                    audioBuf
+                    ( \queue ->
+                        pure
+                            queue
+                                { audioQueueStart = 0
+                                , audioQueueLength = 0
+                                }
+                    )
+                SDL.setAudioDevicePlaybackState audioDev SDL.Pause
+        writeIORef audioPlaying shouldPlay
+
+paceFrame :: PaceMode -> Word64 -> IO ()
+paceFrame PaceVSync _ = pure ()
+paceFrame PaceSleep frameStartNs = do
     now <- getMonotonicTimeNSec
     let elapsedNs = now - frameStartNs
     when (elapsedNs < frameNs) $
@@ -428,6 +578,23 @@ paceFrame frameStartNs = do
             ( fromIntegral $
                 (frameNs - elapsedNs + 999) `div` 1000
             )
+
+createRendererWithPacing :: SDL.Window -> IO (SDL.Renderer, PaceMode)
+createRendererWithPacing window = do
+    let vsyncConfig =
+            SDL.defaultRenderer
+                { SDL.rendererType = SDL.AcceleratedVSyncRenderer
+                }
+        fallbackConfig =
+            SDL.defaultRenderer
+                { SDL.rendererType = SDL.AcceleratedRenderer
+                }
+    vsyncAttempt <- try (SDL.createRenderer window (-1) vsyncConfig) :: IO (Either SDL.SDLException SDL.Renderer)
+    case vsyncAttempt of
+        Right renderer -> pure (renderer, PaceVSync)
+        Left _ -> do
+            renderer <- SDL.createRenderer window (-1) fallbackConfig
+            pure (renderer, PaceSleep)
 
 panelPrimary, panelSecondary, panelOverlay, accentOrange, accentBlue :: SDL.V4 Word8
 -- DMG-inspired backgrounds: near-black forest green, like the DMG screen surround.
@@ -463,13 +630,12 @@ data UiSection = UiSection
     , sectionRows :: ![String]
     }
 
-renderUi :: SDL.Renderer -> UiState -> String -> Machine -> Bool -> Bool -> Int -> Int -> IO ()
-renderUi renderer ui title machine paused fast winW winH = do
+renderUi :: SDL.Renderer -> UiState -> String -> Machine -> Bool -> Bool -> PaceMode -> Word64 -> Int -> Int -> IO ()
+renderUi renderer ui title machine paused fast paceMode nowNs winW winH = do
     helpVisible <- readIORef (uiHelpVisible ui)
     perfVisible <- readIORef (uiPerfVisible ui)
     slot <- readIORef (uiCurrentSlot ui)
     frameTimes <- readIORef (uiFrameTimes ui)
-    frame <- readIORef (uiFrameCounter ui)
     dsBadgeUntil <- readIORef (uiDoubleSpeedBadgeUntil ui)
     toast <- currentToast ui
     let bus = machineBus machine
@@ -503,11 +669,11 @@ renderUi renderer ui title machine paused fast winW winH = do
         renderBadge renderer 20 20 68 34 panelSecondary (SDL.V4 0xDD 0x33 0x33 0xFF) "REC"
 
     let dsBadgeY = if isJust gifRecording then 62 else 20
-    when (frame <= dsBadgeUntil && not overlayVisible) $
+    when (dsBadgeUntil > nowNs && not overlayVisible) $
         renderBadge renderer 20 dsBadgeY 168 34 panelSecondary accentBlue "DOUBLE SPEED"
 
     when (perfVisible && not overlayVisible) $
-        renderPerfOverlay renderer winW frameTimes
+        renderPerfOverlay renderer winW paceMode frameTimes
 
     forM_ toast (renderToast renderer winW winH overlayVisible)
 
@@ -609,21 +775,30 @@ showFixed1 x =
         d = floor (x * 10) `mod` 10 :: Int
      in show i <> "." <> show d
 
-renderPerfOverlay :: SDL.Renderer -> Int -> [Word64] -> IO ()
-renderPerfOverlay renderer winW frameTimes = do
-    let fps = case frameTimes of
-            (_ : _ : _) ->
-                let spanNs = fromIntegral (last frameTimes - head frameTimes) :: Double
-                    n = fromIntegral (length frameTimes - 1) :: Double
+renderPerfOverlay :: SDL.Renderer -> Int -> PaceMode -> Seq.Seq Word64 -> IO ()
+renderPerfOverlay renderer winW paceMode frameTimes = do
+    let sampleCount = Seq.length frameTimes
+        fps
+            | sampleCount >= 2 =
+                let firstNs = Seq.index frameTimes 0
+                    lastNs = Seq.index frameTimes (sampleCount - 1)
+                    spanNs = fromIntegral (lastNs - firstNs) :: Double
+                    n = fromIntegral (sampleCount - 1) :: Double
                  in n / (spanNs / 1e9)
-            _ -> 0
+            | otherwise = 0
         fpsStr = "FPS  " <> showFixed1 fps
-        w = textWidth 2 fpsStr + 28
-        h = 34
+        paceStr = "PACE  " <> paceModeLabel paceMode
+        w = max (textWidth 2 fpsStr) (textWidth 2 paceStr) + 28
+        h = 54
         x = winW - w - 20
         y = 64
     drawPanel renderer panelSecondary accentBlue x y w h
     drawTextShadowed renderer 2 textPrimary (x + 14) (y + 9) fpsStr
+    drawTextShadowed renderer 2 textMuted (x + 14) (y + 29) paceStr
+
+paceModeLabel :: PaceMode -> String
+paceModeLabel PaceVSync = "VSYNC"
+paceModeLabel PaceSleep = "SLEEP FALLBACK"
 
 sectionH :: UiSection -> Int
 sectionH s = length (sectionRows s) * 20 + 46
@@ -873,7 +1048,7 @@ handlePending romPath hk ui machineRef cart bootRom = do
     shotReq <- readIORef (hkShotReq hk)
     when shotReq $ do
         writeIORef (hkShotReq hk) False
-        fb <- Ppu.framebufferRgb (Bus.busPpu (machineBus machine))
+        fb <- Ppu.framebufferRgbBytes (Bus.busPpu (machineBus machine))
         ts <- floor <$> getPOSIXTime :: IO Int
         let path = romDir romPath </> ("screenshot-" <> show ts <> ".ppm")
         r <- try (createDirectoryIfMissing True (romDir romPath) >> writePpm path fb) :: IO (Either IOException ())
@@ -942,15 +1117,14 @@ toGifImage fb = generateImage pixel gbWidth gbHeight
         let i = (y * gbWidth + x) * 3
          in PixelRGB8 (fb V.! i) (fb V.! (i + 1)) (fb V.! (i + 2))
 
-writePpm :: FilePath -> V.Vector Word8 -> IO ()
+writePpm :: FilePath -> BS.ByteString -> IO ()
 writePpm path fb = do
     let header =
             BS.pack
                 ( map (fromIntegral . fromEnum) $
                     "P6\n" <> show gbWidth <> " " <> show gbHeight <> "\n255\n"
                 )
-        body = BS.pack (V.toList fb)
-    BS.writeFile path (header <> body)
+    BS.writeFile path (header <> fb)
 
 handleEvent :: Hotkeys -> UiState -> JoypadState -> SDL.Event -> IO ()
 handleEvent hk ui jp ev = case SDL.eventPayload ev of
@@ -1064,14 +1238,13 @@ mapPad b = case b of
     SDLGC.ControllerButtonDpadRight -> Just ButtonRight
     _ -> Nothing
 
-{- | Streaming-update path: 'fb' is already in RGB888 with one byte per channel, so the SDL upload
-is a single 'BS.pack' away.
--}
-updateTextureRgb :: SDL.Texture -> V.Vector Word8 -> IO ()
-updateTextureRgb tex fb = do
-    let bs = BS.pack (V.toList fb)
-    _ <- SDL.updateTexture tex Nothing bs (fromIntegral (gbWidth * 3))
-    pure ()
+-- | Upload the current RGB888 framebuffer directly into a locked streaming texture.
+uploadTextureRgb :: SDL.Texture -> Ppu.PpuState -> IO ()
+uploadTextureRgb tex ppu =
+    bracket
+        (SDL.lockTexture tex Nothing)
+        (const (SDL.unlockTexture tex))
+        (\(ptr, pitch) -> Ppu.copyFramebufferRgbWithPitch (castPtr ptr) (fromIntegral pitch) ppu)
 
 {- | Open a native OS file picker for ROM files.  Returns 'Nothing' if no
 suitable tool is available or the user cancels.
@@ -1144,22 +1317,18 @@ startupScreen scale = do
                 { SDL.windowInitialSize = SDL.V2 (fromIntegral winW0) (fromIntegral winH0)
                 , SDL.windowResizable = True
                 }
-    renderer <-
-        SDL.createRenderer
-            window
-            (-1)
-            SDL.defaultRenderer{SDL.rendererType = SDL.AcceleratedRenderer}
+    (renderer, paceMode) <- createRendererWithPacing window
     SDL.rendererDrawBlendMode renderer $= SDL.BlendAlphaBlend
     selRef <- newIORef (0 :: Int)
     waitRef <- newIORef False
-    result <- startupLoop renderer window selRef waitRef
+    result <- startupLoop renderer paceMode window selRef waitRef
     SDL.destroyRenderer renderer
     SDL.destroyWindow window
     SDL.quit
     pure result
 
-startupLoop :: SDL.Renderer -> SDL.Window -> IORef Int -> IORef Bool -> IO (Maybe FilePath)
-startupLoop renderer window selRef waitRef = do
+startupLoop :: SDL.Renderer -> PaceMode -> SDL.Window -> IORef Int -> IORef Bool -> IO (Maybe FilePath)
+startupLoop renderer paceMode window selRef waitRef = do
     events <- SDL.pollEvents
     mDecision <- processStartupEvents selRef waitRef events
     case mDecision of
@@ -1174,8 +1343,8 @@ startupLoop renderer window selRef waitRef = do
             waiting <- readIORef waitRef
             renderStartupUi renderer winW winH sel waiting
             SDL.present renderer
-            threadDelay 16000
-            startupLoop renderer window selRef waitRef
+            when (paceMode == PaceSleep) (threadDelay 16000)
+            startupLoop renderer paceMode window selRef waitRef
 
 processStartupEvents :: IORef Int -> IORef Bool -> [SDL.Event] -> IO (Maybe (Maybe FilePath))
 processStartupEvents selRef waitRef = go
@@ -1287,7 +1456,8 @@ audioTest = do
             concatMap
                 (\i -> let s = sineAt i in [s, s])
                 [0 .. totalSamples - 1]
-    audioBuf <- newMVar samples
+    audioBuf <- newAudioQueue
+    appendAudioSamples audioBuf (V.fromList samples)
     let spec =
             SDL.OpenDeviceSpec
                 { SDL.openDeviceFreq = SDL.Desire (fromIntegral Apu.sampleRate)

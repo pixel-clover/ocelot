@@ -96,6 +96,7 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] High-pass filter on the DAC output (RC capacitor model: leaky integrator removes DC offset, ~6 Hz cutoff at 48 kHz)
 - [x] Sample resampler from 4 MHz tick rate to 48 kHz host audio rate
 - [x] Bulk-step APU at event boundaries (per-T-cycle iteration replaced with chunked stepper)
+- [x] Reusable APU sample queue with vector drains for frontend hot paths
 - [ ] CGB stereo wave RAM read-during-play behavior
 - [ ] Validation: blargg `dmg_sound` test ROMs
 - [ ] Validation: blargg `cgb_sound` test ROMs
@@ -106,14 +107,17 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Joypad interrupt on falling edge of any selected-row button bit
 - [x] Keyboard input mapping in the SDL frontend (Z/X/Enter/Right-Shift + arrows + Escape)
 - [x] Gamepad input mapping in the frontend
-- [x] Frontend window with LCD framebuffer rendering (SDL2 RGB upload; terminal --headless mode also kept)
+- [x] Frontend window with LCD framebuffer rendering (SDL2 RGB upload via a reusable staging buffer; terminal --headless mode also kept)
 - [x] Integer scaling for SDL frontend (`--scale N`, 1–5; default 4) and web frontend (Auto/1×/2×/3×/4× in settings panel)
-- [x] Audio output via SDL audio device with callback-drained shared buffer
+- [x] Audio output via SDL audio device with a callback-drained ring buffer
+- [x] Desktop vsync-first renderer creation with sleep-based pacing fallback
+- [x] Performance overlay with FPS and renderer pacing mode
 - [x] In-memory snapshot save and load (`Ocelot.Snapshot.save`/`load`) with versioned binary format
 - [x] Persistent save states: F5 saves, F7 loads; 5 slots (1-5) cycled with F6; files written to `<romdir>/<romstem>/slot<n>.state`
 - [x] Screenshot capture: F12 writes a P6 PPM to `<romdir>/<romstem>/screenshot-<timestamp>.ppm`
 - [x] GIF recording: Shift+F12 toggles capture; frames are palette-quantized and written to `<romdir>/<romstem>/recording-<timestamp>.gif`
 - [x] Pause toggle (Space) and fast-forward (Tab held, 4x)
+- [x] Paused and help-visible SDL loop waits on events or UI deadlines instead of forcing 60 Hz redraws
 - [x] Frame step and reset hotkeys
 - [x] Startup screen: native OS file picker on `> OPEN ROM` (zenity/kdialog on Linux, osascript on macOS, PowerShell on Windows) with drag-and-drop fallback; keyboard-navigable menu with `> OPEN ROM` and `QUIT`
 - [x] Open ROM hotkey (O) while playing: saves battery, exits the current session, and returns to the startup screen
@@ -195,7 +199,8 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [ ] Gameboy Camera cartridge support
 - [ ] Rewind functionality (per-frame state ring buffer)
 - [ ] Configurable color correction (CGB LCD color profile, no-correction)
-- [x] WebAssembly build with Canvas rendering and Web Audio playback (GHC WASM cross-compilation; served via nginx with gzip_static)
+- [x] WebAssembly build with Canvas rendering and Web Audio playback (GHC WASM cross-compilation; browser host now uses RGBA framebuffer exports,
+  direct `ImageData` blits, and transferable audio chunks)
 - [ ] Libretro core packaging
 - [ ] Cheat code support (Game Genie, GameShark)
 - [ ] Lua or Haskell-script hookable trace API for tool-assisted runs
