@@ -15,7 +15,7 @@
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-007ec6?style=flat&labelColor=282c34&logo=docker)](https://github.com/orgs/pixel-clover/packages/container/package/ocelot-web)
 [![Release](https://img.shields.io/github/release/pixel-clover/ocelot.svg?label=release&style=flat&labelColor=282c34&logo=github)](https://github.com/pixel-clover/ocelot/releases/latest)
 
-A Nintendo Gameboy and Gameboy Color emulator in Haskell λ
+A Nintendo Game Boy and Game Boy Color emulator in Haskell λ
 
 </div>
 
@@ -44,7 +44,7 @@ Footage of Ocelot running a few games:
 
 ### Key Features
 
-- Accurate Gameboy and Gameboy Color emulation
+- Accurate Game Boy and Game Boy Color emulation
 - Very portable; run on Windows, Linux, and macOS, and also in the browser via WebAssembly
 - Very configurable, including gameplay input, frontend hotkeys, and rendering settings
 - Has a permissive license that allows commercial use
@@ -121,7 +121,7 @@ Run `ocelot --help` to see the list of available command-line options.
 Example output:
 
 ```
-Ocelot 0.1.0.0 (develop@7bb29) - Gameboy (DMG) and Gameboy Color (CGB) emulator in Haskell
+Ocelot 0.1.0.0 (develop@7bb29) - Game Boy (DMG) and Game Boy Color (CGB) emulator in Haskell
 
 Usage: ocelot [-V|--version] COMMAND
 
@@ -158,7 +158,7 @@ Ocelot is licensed under the MIT License (see [LICENSE](LICENSE)).
 
 ### Acknowledgements
 
-* The logo is made of [image 1](https://www.svgrepo.com/svg/28849/old-gameboy-console) and [image 2](https://www.svgrepo.com/svg/373660/haskell).
+* The logo is made of [image 1](https://www.svgrepo.com/svg/28849/old-game boy-console) and [image 2](https://www.svgrepo.com/svg/373660/haskell).
 * This project uses the following resources (for different things like testing, frontend, etc.):
     * [gb-test-roms](https://github.com/retrio/gb-test-roms)
     * [mooneye-test-suite](https://github.com/Gekkio/mooneye-test-suite)
@@ -172,4 +172,4 @@ Ocelot's implementation logic was checked with the following reference material 
 
 * [Pan Docs](https://gbdev.io/pandocs/)
 * [SameBoy](https://github.com/LIJI32/SameBoy)
-* [Gameboy: Complete Technical Reference](https://gekkio.fi/files/gb-docs/gbctr.pdf)
+* [Game Boy: Complete Technical Reference](https://gekkio.fi/files/gb-docs/gbctr.pdf)

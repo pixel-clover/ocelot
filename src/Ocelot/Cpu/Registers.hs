@@ -2,7 +2,7 @@
 
 {- | The SM83 CPU register file.
 
-The Gameboy CPU exposes eight 8-bit registers (A, F, B, C, D, E, H, L)
+The Game Boy CPU exposes eight 8-bit registers (A, F, B, C, D, E, H, L)
 that can be addressed as four 16-bit pairs (AF, BC, DE, HL), plus a
 16-bit stack pointer and program counter. The low nibble of F is hard-wired
 to zero on real hardware, so writes through 'setAF' mask it off.
@@ -115,7 +115,7 @@ dmg0PostBoot =
         , regPC = 0x0100
         }
 
-{- | Register state immediately after the MGB (Gameboy Pocket) boot
+{- | Register state immediately after the MGB (Game Boy Pocket) boot
 ROM hands off. Identical to 'dmgPostBoot' except @A = 0xFF@ instead
 of @A = 0x01@. Drives mooneye @acceptance/boot_regs-mgb@.
 -}
@@ -134,7 +134,7 @@ mgbPostBoot =
         , regPC = 0x0100
         }
 
-{- | Register state immediately after the SGB (Super Gameboy) boot
+{- | Register state immediately after the SGB (Super Game Boy) boot
 ROM hands off. Drives mooneye @acceptance/boot_regs-sgb@.
 -}
 sgbPostBoot :: Registers

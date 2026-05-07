@@ -172,7 +172,7 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [ ] Debugger: instruction-level breakpoints with run-to-breakpoint
 - [ ] Debugger: disassembler view around PC
 
-### Gameboy Color Support
+### Game Boy Color Support
 
 - [x] CGB system detection from cartridge header CGB flag (`busCgb`)
 - [x] Dual-mode (DMG/CGB) machine selection from header (`Ppu.setCgbMode`, `busCgb`)
@@ -190,9 +190,9 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 ### Future Goals
 
 - [ ] Link cable peer mode over a local socket (two-emulator multiplayer)
-- [ ] Super Gameboy palette and border emulation
-- [ ] Gameboy Printer peripheral (image capture sink)
-- [ ] Gameboy Camera cartridge support
+- [ ] Super Game Boy palette and border emulation
+- [ ] Game Boy Printer peripheral (image capture sink)
+- [ ] Game Boy Camera cartridge support
 - [ ] Rewind functionality (per-frame state ring buffer)
 - [ ] Configurable color correction (CGB LCD color profile, no-correction)
 - [x] WebAssembly build with Canvas rendering and Web Audio playback (GHC WASM cross-compilation; browser host now uses RGBA framebuffer exports,
@@ -203,8 +203,8 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 
 ### Input Peripherals
 
-- [ ] Standard Gameboy controller (built-in)
-- [ ] Gameboy Printer
-- [ ] Gameboy Camera
+- [ ] Standard Game Boy controller (built-in)
+- [ ] Game Boy Printer
+- [ ] Game Boy Camera
 - [ ] Four Player Adapter (DMG-07)
 - [ ] Mobile Adapter GB (network stub)

@@ -1,6 +1,6 @@
 {-# LANGUAGE BangPatterns #-}
 
-{- | Gameboy joypad register at @0xFF00@.
+{- | Game Boy joypad register at @0xFF00@.
 
 The register works as a 4x2 matrix: writes select either the action-button
 row (bit 5 low) or the direction-button row (bit 4 low), and reads expose the

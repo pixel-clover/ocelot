@@ -88,13 +88,26 @@ jobs:
           enable-stack: true
           stack-version: 'latest'
 
+      # GHC 9.6 on Windows uses Clang+LLD with --rtlib=compiler-rt.
+      # MSYS2's libSDL2main.a is compiled with GCC -fstack-protector and
+      # references __stack_chk_fail/__stack_chk_guard from libssp. LLD
+      # won't resolve these automatically; we must pass -lssp explicitly.
+      # Adding it to sdl2's ghc-options here (before the cache step so the
+      # patched stack.yaml is part of the cache key) makes Stack forward
+      # -optl-lssp/-optl-lssp_nonshared to the hsc2hs Enum_hsc_make link.
+      - name: Patch stack.yaml for Windows SSP
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          printf '\nghc-options:\n  sdl2: -optl-lssp -optl-lssp_nonshared\n' >> stack.yaml
+
       - name: Cache Stack
         uses: actions/cache@v4
         with:
           path: |
             ~/.stack
             .stack-work
-          key: ${{ runner.os }}-${{ runner.arch }}-stack-release-${{ hashFiles('stack.yaml.lock', 'package.yaml') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-stack-release-${{ hashFiles('stack.yaml', 'stack.yaml.lock', 'package.yaml') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-stack-release-
             ${{ runner.os }}-${{ runner.arch }}-stack-

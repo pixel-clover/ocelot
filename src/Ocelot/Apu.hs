@@ -1,6 +1,6 @@
 {-# LANGUAGE BangPatterns #-}
 
-{- | Gameboy Audio Processing Unit (DMG only).
+{- | Game Boy Audio Processing Unit (DMG only).
 
 The APU has four channels:
 
@@ -56,7 +56,7 @@ import qualified Ocelot.Snapshot.Binary as Snap
 sampleRate :: Int
 sampleRate = 48000
 
--- | Gameboy CPU T-cycle rate.
+-- | Game Boy CPU T-cycle rate.
 gbTCycleRate :: Int
 gbTCycleRate = 4194304
 
