@@ -578,6 +578,7 @@
         #settings-panel h3 {
             color: var(--text-heading);
             font-size: 0.78rem;
+            letter-spacing: 0.12em;
             margin-bottom: 10px;
             font-weight: 500;
         }
@@ -597,7 +598,7 @@
         .settings-label {
             font-size: 0.72rem;
             color: var(--text-muted);
-            min-width: 48px;
+            min-width: 64px;
         }
 
         .settings-control {
@@ -611,6 +612,7 @@
             margin-top: 4px;
         }
 
+        .settings-section h4,
         .remap-section h4 {
             color: var(--text-heading);
             font-size: 0.72rem;
@@ -998,18 +1000,12 @@
         <div class="settings-row">
             <span class="settings-label">Scale</span>
             <div class="settings-control">
-                <button class="scale-btn" data-scale="0" title="Largest integer scale that fits the window"
-                        type="button">Auto
-                </button>
                 <button class="scale-btn" data-scale="1" title="1× (160×144)" type="button">1×</button>
                 <button class="scale-btn" data-scale="2" title="2× (320×288)" type="button">2×</button>
                 <button class="scale-btn" data-scale="3" title="3× (480×432)" type="button">3×</button>
                 <button class="scale-btn" data-scale="4" title="4× (640×576)" type="button">4×</button>
                 <button class="scale-btn" data-scale="-1"
                         title="Fit: fill available space while preserving the 160×144 aspect ratio" type="button">Fit
-                </button>
-                <button class="scale-btn" data-scale="-2"
-                        title="Stretch: fill available space completely, ignoring aspect ratio" type="button">Stretch
                 </button>
             </div>
         </div>

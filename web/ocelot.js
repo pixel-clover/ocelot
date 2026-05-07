@@ -20,8 +20,8 @@ let audioBufferLevel = 0;
 let audioBufferCapacity = 0;
 let audioFrameCounter = 0;
 
-// Video scale (0 = auto, 1–4 = explicit integer multiple)
-let integerScale = 0;
+// Video scale (1–4 = explicit integer multiple, -1 = fit)
+let integerScale = 4;
 let scanlinesEnabled = false;
 
 // Storage
@@ -81,7 +81,7 @@ async function init() {
     canvas = document.getElementById("screen");
     ctx = canvas.getContext("2d");
     ctx.imageSmoothingEnabled = false;
-    applyIntegerScale(0);
+    applyIntegerScale(4);
 
     const wasi = await createWasiBridge();
 
@@ -300,10 +300,10 @@ function loadSettings() {
         if (saved.keyMap) keyMap = {...DEFAULT_KEY_MAP, ...saved.keyMap};
         if (saved.theme) applyTheme(saved.theme);
         if (saved.integerScale !== undefined) applyIntegerScale(saved.integerScale);
-        else applyIntegerScale(0);
+        else applyIntegerScale(4);
         if (saved.scanlines !== undefined) applyScanlines(saved.scanlines);
     } catch (_) {
-        applyIntegerScale(0);
+        applyIntegerScale(4);
     }
     document.getElementById("audio-toggle").textContent = audioEnabled ? "ON" : "OFF";
 }
