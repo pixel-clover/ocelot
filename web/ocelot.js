@@ -726,7 +726,10 @@ function pauseForOverlay() {
     overlayDepth++;
     if (running) {
         running = false;
-        if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+        if (rafId) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
+        }
         if (audioCtx) audioCtx.suspend();
     }
 }
