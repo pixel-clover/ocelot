@@ -7,7 +7,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Vector.Unboxed as V
 import Data.Word (Word8)
-import Ocelot.Cartridge (Cartridge, loadRom, read8, write8)
+import Ocelot.Cartridge (Cartridge, loadRom, read8, resetMbc, write8)
 import Ocelot.Cartridge.Header (expectedHeaderChecksum)
 import Test.Hspec
 
@@ -107,6 +107,20 @@ spec = do
             write8 0x0000 0x00 c
             v <- read8 0xA000 c
             v `shouldBe` 0xFF
+
+        it "resetMbc resets banking registers while preserving RAM bytes" $ do
+            c <- buildCart 4 1
+            write8 0x0000 0x0A c
+            write8 0x2000 0x02 c
+            write8 0xA000 0x42 c
+            resetMbc c
+            rom <- read8 0x4000 c
+            rom `shouldBe` 0x01
+            locked <- read8 0xA000 c
+            locked `shouldBe` 0xFF
+            write8 0x0000 0x0A c
+            ram <- read8 0xA000 c
+            ram `shouldBe` 0x42
 
     describe "RAM-banking mode" $ do
         it "in RAM mode, writes to 0x4000 select the RAM bank" $ do

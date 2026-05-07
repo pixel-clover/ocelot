@@ -29,12 +29,23 @@ module Ocelot.Bus (
     HostHardware (..),
     BootMode (..),
     cpuMCyclesPerLcdFrame,
+    isCgb,
+    isDoubleSpeed,
+    takeFrameReady,
     read8,
     write8,
     advance,
+    setButton,
+    framebuffer,
+    framebufferRgb,
+    framebufferRgbBytes,
+    framebufferRgbaBytes,
+    copyFramebufferRgbWithPitch,
+    copyFramebufferRgba,
     drainSerial,
     drainAudioSamples,
     drainAudioSamplesVector,
+    drainAudioSamplesInto,
     triggerSpeedSwitch,
     installBootRom,
 ) where
@@ -49,12 +60,13 @@ import Data.Vector.Unboxed (Vector)
 import Data.Vector.Unboxed.Mutable (IOVector)
 import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word16, Word8)
+import Foreign.Ptr (Ptr)
 import Ocelot.Apu (ApuState)
 import qualified Ocelot.Apu as Apu
 import Ocelot.Cartridge (Cartridge)
 import qualified Ocelot.Cartridge as Cartridge
 import qualified Ocelot.Cartridge.Header as Header
-import Ocelot.Joypad (JoypadState)
+import Ocelot.Joypad (Button, JoypadState)
 import qualified Ocelot.Joypad as Joypad
 import Ocelot.Ppu (PpuState)
 import qualified Ocelot.Ppu as Ppu
@@ -75,6 +87,7 @@ data Bus = Bus
     , busApu :: !ApuState
     , busJoypad :: !JoypadState
     , busSerialOut :: !(IORef [Word8])
+    , busFrameReady :: !(IORef Bool)
     , busCgb :: !Bool
     -- ^ True when the host hardware is CGB. Gates CGB-only registers
     -- (VBK, BCPS, etc.). Note: this is currently host-driven, NOT
@@ -189,6 +202,19 @@ cpuMCyclesPerLcdFrame b = do
     ds <- readIORef (busDoubleSpeed b)
     pure (if ds then 17556 * 2 else 17556)
 
+isCgb :: Bus -> Bool
+isCgb = busCgb
+
+isDoubleSpeed :: Bus -> IO Bool
+isDoubleSpeed = readIORef . busDoubleSpeed
+
+takeFrameReady :: Bus -> IO Bool
+takeFrameReady b =
+    atomicModifyIORef' (busFrameReady b) clearFrameReady
+
+clearFrameReady :: Bool -> (Bool, Bool)
+clearFrameReady ready = (False, ready)
+
 {- | Construct a bus with an explicit host-hardware choice. Lets you run
 a DMG cart on a CGB host (matching real-hardware backwards
 compatibility, with the auto-palette pre-loaded) or vice versa. The
@@ -206,6 +232,7 @@ fromCartridgeOnHost host bootMode c = do
     apu <- Apu.initial
     joypad <- Joypad.initial
     serial <- newIORef []
+    frameReady <- newIORef False
     wramBank <- newIORef 0x01
     key1 <- newIORef 0x00
     hdmaSrc <- newIORef 0
@@ -296,6 +323,7 @@ fromCartridgeOnHost host bootMode c = do
             , busApu = apu
             , busJoypad = joypad
             , busSerialOut = serial
+            , busFrameReady = frameReady
             , busCgb = cgb
             , busCgbDmgCompat = cgb && not cgbCart
             , busWramBank = wramBank
@@ -954,13 +982,36 @@ advance mCycles b = do
     -- first M-cycle, matching the documented 1-cycle startup delay.
     writeIORef (busOamDmaStarting b) False
     when overflow (setIfBit 2 b) -- Timer
-    when (testBit ppuIrqs 0) (setIfBit 0 b) -- VBlank
+    when (testBit ppuIrqs 0) $ do
+        writeIORef (busFrameReady b) True
+        setIfBit 0 b -- VBlank
     when (testBit ppuIrqs 1) (setIfBit 1 b) -- LCD STAT
     -- HBlank-entered signal (bit 2): step one HDMA chunk, not an interrupt.
     when (testBit ppuIrqs 2) (stepHdmaHBlank b)
     -- Joypad IRQ pending edge (set by Joypad.setButton).
     jpEdge <- Joypad.takeIrqPending (busJoypad b)
     when jpEdge (setIfBit 4 b)
+
+setButton :: Button -> Bool -> Bus -> IO ()
+setButton button pressed b = Joypad.setButton button pressed (busJoypad b)
+
+framebuffer :: Bus -> IO (Vector Word8)
+framebuffer b = Ppu.framebuffer (busPpu b)
+
+framebufferRgb :: Bus -> IO (Vector Word8)
+framebufferRgb b = Ppu.framebufferRgb (busPpu b)
+
+framebufferRgbBytes :: Bus -> IO ByteString
+framebufferRgbBytes b = Ppu.framebufferRgbBytes (busPpu b)
+
+framebufferRgbaBytes :: Bus -> IO ByteString
+framebufferRgbaBytes b = Ppu.framebufferRgbaBytes (busPpu b)
+
+copyFramebufferRgbWithPitch :: Ptr Word8 -> Int -> Bus -> IO ()
+copyFramebufferRgbWithPitch ptr pitch b = Ppu.copyFramebufferRgbWithPitch ptr pitch (busPpu b)
+
+copyFramebufferRgba :: Ptr Word8 -> Bus -> IO ()
+copyFramebufferRgba ptr b = Ppu.copyFramebufferRgba ptr (busPpu b)
 
 -- | Drain the APU's pending stereo samples (interleaved L,R) for the frontend.
 drainAudioSamples :: Bus -> IO [Int16]
@@ -969,6 +1020,9 @@ drainAudioSamples b = Apu.drainSamples (busApu b)
 -- | Drain the APU's pending stereo samples into an immutable vector.
 drainAudioSamplesVector :: Bus -> IO (Vector Int16)
 drainAudioSamplesVector b = Apu.drainSamplesVector (busApu b)
+
+drainAudioSamplesInto :: Ptr Int16 -> Int -> Bus -> IO Int
+drainAudioSamplesInto ptr capacity b = Apu.drainSamplesInto ptr capacity (busApu b)
 
 setIfBit :: Int -> Bus -> IO ()
 {-# INLINE setIfBit #-}

@@ -34,6 +34,7 @@ module Ocelot.Apu (
     advance,
     drainSamples,
     drainSamplesVector,
+    drainSamplesInto,
     sampleRate,
     dumpState,
     loadState,
@@ -50,6 +51,8 @@ import Data.Vector.Unboxed (Vector)
 import qualified Data.Vector.Unboxed as V
 import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word16, Word8)
+import Foreign.Ptr (Ptr)
+import Foreign.Storable (pokeElemOff)
 import qualified Ocelot.Snapshot.Binary as Snap
 
 -- | Sample rate at which the APU emits stereo samples to the queue.
@@ -304,6 +307,14 @@ drainSamples apu = V.toList <$> drainSamplesVector apu
 drainSamplesVector :: ApuState -> IO (Vector Int16)
 drainSamplesVector apu = drainSampleQueueVector (apuSamples apu)
 
+{- | Copy pending interleaved stereo samples into a caller-owned buffer,
+up to the supplied sample capacity. The queue is drained even when more
+samples were pending than fit, matching the vector drain followed by a
+bounded frontend copy.
+-}
+drainSamplesInto :: Ptr Int16 -> Int -> ApuState -> IO Int
+drainSamplesInto ptr capacity apu = drainSampleQueueInto ptr capacity (apuSamples apu)
+
 {- | Encode the APU's full internal state to a flat byte string. The
 sample queue is intentionally not snapshotted (it's drained per frame
 and would only carry stale audio).
@@ -344,6 +355,16 @@ drainSampleQueueVector queue = do
     clearSampleQueue queue
     pure samples
 
+drainSampleQueueInto :: Ptr Int16 -> Int -> SampleQueue -> IO Int
+drainSampleQueueInto ptr capacity queue = do
+    buffer <- readIORef (sampleQueueBuffer queue)
+    start <- readIORef (sampleQueueStart queue)
+    len <- readIORef (sampleQueueLength queue)
+    let copied = max 0 (min capacity len)
+    copySampleQueueIntoPtr buffer start copied ptr
+    clearSampleQueue queue
+    pure copied
+
 appendStereoSample :: SampleQueue -> Int16 -> Int16 -> IO ()
 appendStereoSample queue left right = do
     ensureSampleQueueCapacity queue 2
@@ -381,6 +402,17 @@ copySampleQueue source start len dest = go 0
         | otherwise = do
             sample <- MV.read source ((start + i) `mod` cap)
             MV.write dest i sample
+            go (i + 1)
+
+copySampleQueueIntoPtr :: MV.IOVector Int16 -> Int -> Int -> Ptr Int16 -> IO ()
+copySampleQueueIntoPtr source start len dest = go 0
+  where
+    cap = MV.length source
+    go !i
+        | i >= len = pure ()
+        | otherwise = do
+            sample <- MV.read source ((start + i) `mod` cap)
+            pokeElemOff dest i sample
             go (i + 1)
 
 encodeApu :: ApuInternal -> BB.Builder

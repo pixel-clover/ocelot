@@ -45,7 +45,7 @@ Footage of Ocelot running a few games:
 ### Key Features
 
 - Accurate Game Boy and Game Boy Color emulation
-- Very portable; run on Windows, Linux, and macOS, and also in the browser via WebAssembly
+- Very portable; run on Linux and macOS, and also in the browser via WebAssembly (Windows support is currently source-build only)
 - Very configurable, including gameplay input, frontend hotkeys, and rendering settings
 - Has a permissive license that allows commercial use
 
@@ -64,12 +64,12 @@ See [ROADMAP.md](ROADMAP.md) for the list of implemented and planned features.
 
 ##### A. Desktop
 
-You can download the latest pre-built binaries from the project's [release page](https://github.com/pixel-clover/ocelot/releases).
+You can download the latest pre-built desktop binaries (Linux and macOS) from the project's [release page](https://github.com/pixel-clover/ocelot/releases).
 
 ##### B. Web
 
-You can download and use the latest pre-built Docker image for the web version of Ocelot from the
-[GCR](https://github.com/orgs/pixel-clover/packages/container/package/ocelot-web):
+You can download and use the latest pre-built Docker image for the web version of Ocelot from
+[GHCR](https://github.com/orgs/pixel-clover/packages/container/package/ocelot-web):
 
 ```bash
 docker run -d -p 8085:80 --rm ghcr.io/pixel-clover/ocelot-web:latest
@@ -104,10 +104,10 @@ If the build is successful, you can find the built binary at `$(stack path --loc
 
 #### Run the Emulator
 
-Run the `ocelot` binary to start the emulator GUI:
+Run the `play` command to start the emulator GUI:
 
 ```bash
-ocelot
+ocelot play [/path/to/rom.gbc]
 ```
 
 Help menu while the emulator is running:
@@ -121,7 +121,7 @@ Run `ocelot --help` to see the list of available command-line options.
 Example output:
 
 ```
-Ocelot 0.1.0.0 (develop@7bb29) - Game Boy (DMG) and Game Boy Color (CGB) emulator in Haskell
+Ocelot 0.1.0.0 (develop@0a0be9e) - Game Boy (DMG) and Game Boy Color (CGB) emulator in Haskell
 
 Usage: ocelot [-V|--version] COMMAND
 
