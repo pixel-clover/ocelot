@@ -4,7 +4,7 @@
 
 # Stack
 .stack-work/
-stack.yaml.lock
+#stack.yaml.lock
 
 # Cabal
 dist/
@@ -135,6 +135,7 @@ docs/api/
 .agents/
 roms/
 *.prof
+docs/haskell/
 
 # Fetched third-party test ROMs (downloaded by `make test-roms`).
 # Hand-authored regression ROMs under test/testroms/ are still tracked.
