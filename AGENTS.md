@@ -54,7 +54,8 @@ Do not invent modules that do not yet exist when answering questions, but do pla
 
 - `app/Main.hs`: executable entry point. Argument parsing, ROM loading from disk, headless terminal mode, and the SDL frontend dispatch live here.
 - `app/Frontend/Sdl.hs`: SDL2-backed frontend with video, audio, and hotkeys (pause, fast-forward, save states with 5 slots, load state, screenshot,
-  GIF recording, ROM switching). Includes a startup screen with a native file picker and drag-and-drop fallback for ROM loading when no ROM is provided at launch.
+  GIF recording, ROM switching). Includes a startup screen with a native file picker and drag-and-drop fallback for ROM loading when no ROM is
+  provided at launch.
 - `app-web/Main.hs`: WASM executable entry point. Exposes the emulator to JavaScript via exported WASM functions; compiled with the GHC WASM
   toolchain (`wasm32-wasi-cabal`, `-f -desktop -f wasm-reactor`).
 - `src/`: library code. Public API root is `Ocelot` (re-exports the curated public surface).
@@ -163,11 +164,11 @@ Reading or writing CPU registers from outside `Ocelot.Cpu` is allowed only for t
 - Time advance: `advance :: Int -> PpuState -> IO Word8` (returns a flag bitmask: bit 0 = VBlank IRQ, bit 1 = STAT IRQ, bit 2 = HBlank-entered
   for HDMA stepping)
 - Framebuffer accessors:
-  - `framebuffer :: PpuState -> IO (Vector Word8)` (DMG palette indices)
-  - `framebufferRgb :: PpuState -> IO (Vector Word8)` (RGB888 bytes)
-  - `copyFramebufferRgb :: Ptr Word8 -> PpuState -> IO ()` (copy into a caller-owned RGB888 staging buffer; preferred for desktop hot paths)
-  - `framebufferRgbBytes :: PpuState -> IO ByteString`
-  - `framebufferRgbaBytes :: PpuState -> IO ByteString` (used by the web frontend bridge)
+    - `framebuffer :: PpuState -> IO (Vector Word8)` (DMG palette indices)
+    - `framebufferRgb :: PpuState -> IO (Vector Word8)` (RGB888 bytes)
+    - `copyFramebufferRgb :: Ptr Word8 -> PpuState -> IO ()` (copy into a caller-owned RGB888 staging buffer; preferred for desktop hot paths)
+    - `framebufferRgbBytes :: PpuState -> IO ByteString`
+    - `framebufferRgbaBytes :: PpuState -> IO ByteString` (used by the web frontend bridge)
 - CGB hookup: `setCgbMode :: Bool -> PpuState -> IO ()` (called by the bus once at startup)
 - CGB render-mode hookup: `setCgbRenderMode :: CgbRenderMode -> PpuState -> IO ()`
 - STAT write-edge hookup: `takePendingStatIrq :: PpuState -> IO Bool` (called by the bus after PPU register writes that can raise STAT)

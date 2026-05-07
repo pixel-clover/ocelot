@@ -48,7 +48,8 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [ ] HuC3, MMM01, and TAMA5
 - [x] Battery-backed save persistence: `.sav` load and store on emulator entry/exit, RAM plus VBA-M-compatible 48-byte RTC suffix when the cart has a
   timer
-- [x] General-purpose HDMA blocking timing: peripherals advance by `length / 2` M-cycles in single-speed (`length` in double-speed) during the copy, matching the 8 µs / 16 bytes Pan Docs spec; covered by the "advances peripherals during the copy block" regression in `Ocelot.CgbSpec`
+- [x] General-purpose HDMA blocking timing: peripherals advance by `length / 2` M-cycles in single-speed (`length` in double-speed) during the copy,
+  matching the 8 µs / 16 bytes Pan Docs spec; covered by the "advances peripherals during the copy block" regression in `Ocelot.CgbSpec`
 
 ### Timer and Serial
 
@@ -75,7 +76,8 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] CGB sprite priority resolution (master priority bit, BG-to-OAM, OAM-order)
 - [x] RGB framebuffer alongside the palette-index framebuffer (DMG via fixed shade palette, CGB via BG/OBJ palette RAM with RGB555 decoding)
 - [ ] LCD on/off transitions and STAT/LY behavior on reset (LCD-off freeze is implemented; full reset semantics not audited)
-- [x] Validation: dmg-acid2 golden frame hash (FNV-1a baseline locked; cross-check vs reference image at https://github.com/mattcurrie/dmg-acid2 to claim conformance)
+- [x] Validation: dmg-acid2 golden frame hash (FNV-1a baseline locked; cross-check vs reference image at https://github.com/mattcurrie/dmg-acid2 to
+  claim conformance)
 - [x] Validation: cgb-acid2 golden frame hash (same caveat; baseline locked from current PPU output)
 - [ ] Validation: mooneye PPU acceptance suite
 
@@ -115,7 +117,8 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Pause toggle (Space) and fast-forward (Tab held, 4x)
 - [x] Paused and help-visible SDL loop waits on events or UI deadlines instead of forcing 60 Hz redraws
 - [x] Frame step and reset hotkeys
-- [x] Startup screen: native OS file picker on `> OPEN ROM` (zenity/kdialog on Linux, osascript on macOS, PowerShell on Windows) with drag-and-drop fallback; keyboard-navigable menu with `> OPEN ROM` and `QUIT`
+- [x] Startup screen: native OS file picker on `> OPEN ROM` (zenity/kdialog on Linux, osascript on macOS, PowerShell on Windows) with drag-and-drop
+  fallback; keyboard-navigable menu with `> OPEN ROM` and `QUIT`
 - [x] Open ROM hotkey (O) while playing: saves battery, exits the current session, and returns to the startup screen
 - [ ] PNG screenshot output (currently PPM)
 
