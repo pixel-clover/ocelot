@@ -39,6 +39,7 @@ module Ocelot.Ppu (
     copyFramebufferRgba,
     framebufferRgbBytes,
     framebufferRgbaBytes,
+    framebufferRgbaPtr,
     framebufferWidth,
     framebufferHeight,
     setCgbMode,
@@ -54,11 +55,14 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString.Internal as BSI
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int8)
+import qualified Data.Vector.Storable.Mutable as VSM
 import Data.Vector.Unboxed (Vector)
 import qualified Data.Vector.Unboxed as V
 import Data.Vector.Unboxed.Mutable (IOVector)
 import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word16, Word8)
+import Foreign.ForeignPtr.Unsafe (unsafeForeignPtrToPtr)
+import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr)
 import Foreign.Storable (pokeByteOff)
 
@@ -131,10 +135,11 @@ data PpuState = PpuState
     -- frontend uses; populated by the same render pass that fills
     -- 'ppuFb'. DMG mode goes through the shade palette; CGB mode uses
     -- BG palette RAM for the BG layer and OBP0\/OBP1 for sprites.
-    , ppuFbRgba :: !(IOVector Word8)
-    -- ^ RGBA8888 color framebuffer (160 * 144 * 4 bytes). Kept so the
-    -- web frontend can copy a presentation-ready buffer without
-    -- rebuilding alpha-expanded pixels every frame.
+    , ppuFbRgba :: !(VSM.IOVector Word8)
+    -- ^ RGBA8888 color framebuffer (160 * 144 * 4 bytes). Backed by a
+    -- storable (C-heap) vector so that 'framebufferRgbaPtr' can return a
+    -- stable 'Ptr' directly into this buffer — eliminating the copy that
+    -- the web WASM frontend would otherwise need every frame.
     , ppuFbTarget :: !(IORef FbTarget)
     -- ^ Which color framebuffer(s) to populate. Set via 'setFbTarget'.
     , ppuCgbMode :: !(IORef Bool)
@@ -208,11 +213,11 @@ initialPpu = do
     oam <- MV.replicate 0xA0 0
     fb <- MV.replicate (framebufferWidth * framebufferHeight) 0
     fbRgb <- MV.replicate (framebufferWidth * framebufferHeight * 3) 0
-    fbRgba <- MV.replicate (framebufferWidth * framebufferHeight * 4) 0
+    fbRgba <- VSM.replicate (framebufferWidth * framebufferHeight * 4) 0
     let initAlpha !i
             | i >= framebufferWidth * framebufferHeight = pure ()
             | otherwise = do
-                MV.write fbRgba (i * 4 + 3) 255
+                VSM.write fbRgba (i * 4 + 3) 255
                 initAlpha (i + 1)
     initAlpha 0
     fbTarget <- newIORef FbBoth
@@ -309,17 +314,21 @@ copyFramebufferRgbWithPitch ptr pitch ps
         pokeByteOff ptr (dstOff + col) px
         copyRow srcOff dstOff (col + 1)
 
--- | Copy the RGB framebuffer into a caller-provided buffer in RGBA8888 order.
+-- | Copy the RGBA framebuffer into a caller-provided buffer in RGBA8888 order.
 copyFramebufferRgba :: Ptr Word8 -> PpuState -> IO ()
-copyFramebufferRgba ptr ps = go 0
+copyFramebufferRgba dst ps =
+    VSM.unsafeWith (ppuFbRgba ps) $ \src -> copyBytes dst src rgbaBytes
   where
     rgbaBytes = framebufferWidth * framebufferHeight * 4
-    go !i
-        | i >= rgbaBytes = pure ()
-        | otherwise = do
-            px <- MV.unsafeRead (ppuFbRgba ps) i
-            pokeByteOff ptr i px
-            go (i + 1)
+
+{- | Return a stable 'Ptr' directly into the RGBA framebuffer. The pointer
+is valid for the lifetime of the 'PpuState' because 'ppuFbRgba' is backed by
+a C-heap storable vector that never moves. Use only where the 'PpuState'
+outlives the pointer (e.g. a WASM session that holds the machine alive).
+-}
+framebufferRgbaPtr :: PpuState -> Ptr Word8
+framebufferRgbaPtr ps =
+    unsafeForeignPtrToPtr . fst $ VSM.unsafeToForeignPtr0 (ppuFbRgba ps)
 
 -- | Copy the RGB framebuffer into a packed strict 'ByteString' in RGB888 order.
 framebufferRgbBytes :: PpuState -> IO ByteString
@@ -761,18 +770,18 @@ renderPixelsForLine ps ctx mSpriteCtx = do
         MV.write (ppuFbRgb ps) (rgbOff + 1) g
         MV.write (ppuFbRgb ps) (rgbOff + 2) b
     writeRgbPixel FbRgba _ rgbaOff (r, g, b) = do
-        MV.write (ppuFbRgba ps) rgbaOff r
-        MV.write (ppuFbRgba ps) (rgbaOff + 1) g
-        MV.write (ppuFbRgba ps) (rgbaOff + 2) b
-        MV.write (ppuFbRgba ps) (rgbaOff + 3) 255
+        VSM.write (ppuFbRgba ps) rgbaOff r
+        VSM.write (ppuFbRgba ps) (rgbaOff + 1) g
+        VSM.write (ppuFbRgba ps) (rgbaOff + 2) b
+        VSM.write (ppuFbRgba ps) (rgbaOff + 3) 255
     writeRgbPixel FbBoth rgbOff rgbaOff (r, g, b) = do
         MV.write (ppuFbRgb ps) rgbOff r
         MV.write (ppuFbRgb ps) (rgbOff + 1) g
         MV.write (ppuFbRgb ps) (rgbOff + 2) b
-        MV.write (ppuFbRgba ps) rgbaOff r
-        MV.write (ppuFbRgba ps) (rgbaOff + 1) g
-        MV.write (ppuFbRgba ps) (rgbaOff + 2) b
-        MV.write (ppuFbRgba ps) (rgbaOff + 3) 255
+        VSM.write (ppuFbRgba ps) rgbaOff r
+        VSM.write (ppuFbRgba ps) (rgbaOff + 1) g
+        VSM.write (ppuFbRgba ps) (rgbaOff + 2) b
+        VSM.write (ppuFbRgba ps) (rgbaOff + 3) 255
 
 bgPixelAt :: PpuState -> LineRenderContext -> Int -> IO (Word8, Word8)
 bgPixelAt ps ctx x

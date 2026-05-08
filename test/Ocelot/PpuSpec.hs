@@ -6,6 +6,7 @@ import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
 import Data.IORef (readIORef, writeIORef)
+import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Unboxed as V
 import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word8)
@@ -198,12 +199,12 @@ spec = do
             setFbTarget FbRgb ps
             _ <- advance ((80 + 172) `div` 4) ps
             rgb <- framebufferRgb ps
-            -- Freeze the RGBA mutable vector directly; alpha bytes are pre-initialised
-            -- to 255 by initialPpu, so we only check the colour channels (every
-            -- non-alpha byte, i.e. positions where i `mod` 4 /= 3).
-            rgba <- V.freeze (ppuFbRgba ps)
+            -- ppuFbRgba is a storable vector; freeze into an immutable VS.Vector.
+            -- Alpha bytes are pre-initialised to 255 by initialPpu, so we only
+            -- check the colour channels (positions where i `mod` 4 /= 3).
+            rgba <- VS.freeze (ppuFbRgba ps)
             V.any (/= 0) rgb `shouldBe` True
-            V.all (== 0) (V.ifilter (\i _ -> i `mod` 4 /= 3) rgba) `shouldBe` True
+            VS.all (== 0) (VS.ifilter (\i _ -> i `mod` 4 /= 3) rgba) `shouldBe` True
 
         it "FbRgba mode writes the RGBA buffer but leaves the RGB buffer untouched" $ do
             ps <- freshOn

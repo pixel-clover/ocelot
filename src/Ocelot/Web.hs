@@ -13,6 +13,7 @@ module Ocelot.Web (
     framebufferRgb,
     framebufferRgbBytes,
     framebufferRgbaBytes,
+    framebufferRgbaPtr,
     copyFramebufferRgba,
     drainAudioSamples,
     drainAudioSamplesVector,
@@ -94,6 +95,14 @@ framebufferRgbaBytes session =
 copyFramebufferRgba :: Ptr Word8 -> WebSession -> IO ()
 copyFramebufferRgba ptr session =
     Bus.copyFramebufferRgba ptr (machineBus (wsMachine session))
+
+{- | Stable pointer directly into the RGBA framebuffer. Valid for the
+lifetime of the 'WebSession'. Allows the WASM host to read the framebuffer
+without an intermediate copy.
+-}
+framebufferRgbaPtr :: WebSession -> Ptr Word8
+framebufferRgbaPtr session =
+    Bus.framebufferRgbaPtr (machineBus (wsMachine session))
 
 drainAudioSamples :: WebSession -> IO [Int16]
 drainAudioSamples session =
