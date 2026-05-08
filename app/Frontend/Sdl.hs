@@ -60,6 +60,7 @@ import qualified SDL.Input.GameController as SDLGC
 import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileExist, findExecutable, getXdgDirectory)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeBaseName, takeDirectory, (</>))
+import System.Mem (performMajorGC)
 #ifdef mingw32_HOST_OS
 import System.Process (readProcess)
 #elif defined(darwin_HOST_OS)
@@ -175,6 +176,8 @@ data UiState = UiState
     -- ^ Monotonic timestamp in ns after which the "DOUBLE SPEED" badge is hidden. 0 = not active.
     , uiGifFrames :: !(IORef (Maybe [V.Vector Word8]))
     -- ^ Nothing = not recording; Just frames = recording (newest frame first).
+    , uiGifFrameCount :: !(IORef Int)
+    -- ^ Number of frames currently in uiGifFrames. Kept in sync to avoid O(n) length checks.
     }
 
 newUiState :: IO UiState
@@ -188,6 +191,7 @@ newUiState =
         <*> newIORef Seq.empty
         <*> newIORef 0
         <*> newIORef Nothing
+        <*> newIORef 0
 
 recordPresentedFrame :: UiState -> IO Word64
 recordPresentedFrame ui = do
@@ -462,19 +466,21 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode au
         SDL.present renderer
         frame <- recordPresentedFrame ui
 
-        -- Capture every other frame to halve GIF file size (~30 fps effective).
-        -- Hard cap at 1800 frames (60 s); auto-stop when reached.
+        -- Capture every 3rd frame (~20 fps effective); hard cap at 1200 frames (60 s).
         gifRec <- readIORef (uiGifFrames ui)
         case gifRec of
             Just fs
-                | even frame ->
-                    if length fs >= 1800
+                | frame `mod` 3 == 0 -> do
+                    n <- readIORef (uiGifFrameCount ui)
+                    if n >= 1200
                         then do
                             writeIORef (uiGifFrames ui) Nothing
+                            writeIORef (uiGifFrameCount ui) 0
                             saveGifRecording romPath ui fs
                         else do
                             fbRgbFrame <- Bus.framebufferRgb (machineBus machine')
                             writeIORef (uiGifFrames ui) (Just (fbRgbFrame : fs))
+                            writeIORef (uiGifFrameCount ui) (n + 1)
             _ -> pure ()
 
         unless fast (paceFrame paceMode frameStartNs)
@@ -1020,7 +1026,7 @@ saveGifRecording romPath ui capturedFrames = do
                         , paletteColorCount = 64
                         }
                 images =
-                    [ (pal, 3 :: GifDelay, idx)
+                    [ (pal, 5 :: GifDelay, idx)
                     | f <- reverse capturedFrames
                     , let (idx, pal) = palettize opts (toGifImage f)
                     ]
@@ -1037,6 +1043,7 @@ saveGifRecording romPath ui capturedFrames = do
                         Left e -> do
                             putStrLn ("gif:      write failed: " <> show e)
                             pushToast ui ToastFailure "GIF write failed"
+    performMajorGC
 
 handlePending ::
     FilePath ->
@@ -1101,10 +1108,12 @@ handlePending romPath hk ui machineRef cart bootRom = do
         case mFrames of
             Nothing -> do
                 writeIORef (uiGifFrames ui) (Just [])
+                writeIORef (uiGifFrameCount ui) 0
                 putStrLn "gif:      recording started"
                 pushToast ui ToastInfo "Recording GIF..."
             Just capturedFrames -> do
                 writeIORef (uiGifFrames ui) Nothing
+                writeIORef (uiGifFrameCount ui) 0
                 saveGifRecording romPath ui capturedFrames
     resetReq <- readIORef (hkResetReq hk)
     when resetReq $ do
@@ -1383,7 +1392,7 @@ processStartupEvents :: IORef Int -> IORef Bool -> [FilePath] -> [SDL.Event] -> 
 processStartupEvents selRef waitRef recents = go
   where
     recentCount = length recents
-    menuLen = recentCount + 2  -- recents + OPEN ROM + QUIT
+    menuLen = recentCount + 2 -- recents + OPEN ROM + QUIT
     isEnter sc = sc == SDL.ScancodeReturn || sc == SDL.ScancodeKPEnter
     go [] = pure Nothing
     go (ev : rest) = case SDL.eventPayload ev of
@@ -1404,13 +1413,14 @@ processStartupEvents selRef waitRef recents = go
                                     s <- readIORef selRef
                                     if s < recentCount
                                         then pure (Just (Just (recents !! s)))
-                                        else if s == recentCount
-                                            then do
-                                                mPath <- showOpenFileDialog
-                                                case mPath of
-                                                    Just path -> pure (Just (Just path))
-                                                    Nothing -> do writeIORef waitRef True; go rest
-                                            else pure (Just Nothing)
+                                        else
+                                            if s == recentCount
+                                                then do
+                                                    mPath <- showOpenFileDialog
+                                                    case mPath of
+                                                        Just path -> pure (Just (Just path))
+                                                        Nothing -> do writeIORef waitRef True; go rest
+                                                else pure (Just Nothing)
                         else case sc of
                             SDL.ScancodeEscape -> do
                                 waiting <- readIORef waitRef
@@ -1442,8 +1452,8 @@ renderStartupUi renderer winW winH sel waiting recents = do
         panelW = min (winW - 40) (max (hintW + 28) 280)
         maxNameChars = (panelW - 28) `div` glyphAdvance 2 - 4
         recentCount = length recents
-        sepGap = if null recents then 0 else 13  -- 4px above + 1px line + 8px below
-        recentItems = map (\p -> fitText maxNameChars (takeBaseName p)) recents
+        sepGap = if null recents then 0 else 13 -- 4px above + 1px line + 8px below
+        recentItems = map (fitText maxNameChars . takeBaseName) recents
         allItems = recentItems ++ (["OPEN ROM", "QUIT"] :: [String])
         totalRows = length allItems
         panelH = 20 + logoGlyphH + 16 + 2 + 12 + (7 * 2) + 20 + totalRows * rowH + sepGap + 20
@@ -1462,7 +1472,7 @@ renderStartupUi renderer winW winH sel waiting recents = do
     drawTextShadowed renderer 2 hintColor hintX hintY hintText
     let menuStartY = hintY + 7 * 2 + 20
     -- Separator between recents and fixed items
-    when (not (null recents)) $
+    unless (null recents) $
         fillRect renderer panelSecondary (panelX + 14) (menuStartY + recentCount * rowH + 4) (panelW - 28) 1
     -- Menu rows
     forM_ (zip [0 ..] allItems) $ \(i, item) -> do

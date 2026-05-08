@@ -222,7 +222,7 @@ VBA-M-compatible 48-byte suffix appended to the RAM bytes in `extractSave`/`load
 ### `Ocelot.Snapshot`
 
 - `save :: Machine -> IO ByteString` and `load :: ByteString -> Machine -> IO (Either SnapshotError ())`
-- Versioned binary format (`OCS1` magic + LE u32 version, currently 8). When the format changes incompatibly, bump the version; old blobs are
+- Versioned binary format (`OCS1` magic + LE u32 version). When the format changes incompatibly, bump the version; old blobs are
   rejected with `UnsupportedVersion`.
 - Reaches across subsystems via the per-module `dumpState`/`loadState` hooks listed above and via direct PpuState/Bus field access where the
   state is in IORefs and IOVectors that the per-module hooks would just wrap.
