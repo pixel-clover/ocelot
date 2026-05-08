@@ -80,7 +80,7 @@ jobs:
       - name: Setup Haskell
         uses: haskell-actions/setup@v2
         with:
-          ghc-version: '9.6'
+          ghc-version: '9.6.7'
           enable-stack: true
           stack-version: 'latest'
 
