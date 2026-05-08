@@ -103,6 +103,16 @@ make release
 
 If the build is successful, you can find the built binary at `$(stack path --local-install-root)/bin/ocelot`.
 
+###### Using Nix
+
+If you use Nix, the repository provides a development shell:
+
+```bash
+nix develop
+stack build
+stack run -- play [/path/to/rom.gbc]
+```
+
 #### Run the Emulator
 
 Run the `play` command to start the emulator GUI:
