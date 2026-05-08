@@ -68,7 +68,7 @@ docs: ## Generate Haddock documentation for the project
 
 install-deps: ## Install system dependencies (for Debian-based systems)
 	@echo "Installing system dependencies..."
-	sudo apt install haskell-stack libsdl2-dev pkg-config nix
+	sudo apt install haskell-stack libsdl2-dev pkg-config nix binaryen
 	$(STACK) setup
 	$(STACK) install hlint fourmolu
 
@@ -185,4 +185,10 @@ web-build: ## Build the browser host and wasm module (needs wasm32-wasi-cabal)
 	@$(WASM_CABAL) build exe:ocelot-web $(WASM_FLAGS)
 	@cp -R web/. $(WEB_OUT)/
 	@cp "$$($(WASM_CABAL) list-bin exe:ocelot-web $(WASM_FLAGS))" "$(WEB_OUT)/ocelot.wasm"
+	@if command -v wasm-opt >/dev/null 2>&1; then \
+		echo "Optimizing ocelot.wasm with wasm-opt -O3..."; \
+		wasm-opt -O3 "$(WEB_OUT)/ocelot.wasm" -o "$(WEB_OUT)/ocelot.wasm"; \
+	else \
+		echo "Skipping wasm-opt; install Binaryen for an optimized web artifact."; \
+	fi
 	@echo "Web build ready in $(WEB_OUT). Serve that directory over HTTP."

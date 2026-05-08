@@ -88,14 +88,14 @@ data CgbRenderMode
     deriving (Eq, Show, Enum, Bounded)
 
 {- | Which color framebuffer(s) the PPU populates during rendering.
-Set once at startup via 'setFbTarget' to skip writing the buffer
-that the current frontend does not read, reducing per-scanline
-memory traffic.
+Set once at startup via 'setFbTarget' to skip writing buffers that the
+current frontend does not read, reducing per-scanline memory traffic.
 -}
 data FbTarget
     = -- | Write only 'ppuFbRgb' (RGB888). Used by the SDL desktop frontend.
       FbRgb
     | -- | Write only 'ppuFbRgba' (RGBA8888). Used by the web WASM frontend.
+      -- Skips 'ppuFb' and 'ppuFbRgb' because the browser reads only RGBA.
       FbRgba
     | -- | Write both buffers. Default; used by tests and the terminal renderer.
       FbBoth
@@ -141,7 +141,7 @@ data PpuState = PpuState
     -- stable 'Ptr' directly into this buffer — eliminating the copy that
     -- the web WASM frontend would otherwise need every frame.
     , ppuFbTarget :: !(IORef FbTarget)
-    -- ^ Which color framebuffer(s) to populate. Set via 'setFbTarget'.
+    -- ^ Which frontend framebuffer(s) to populate. Set via 'setFbTarget'.
     , ppuCgbMode :: !(IORef Bool)
     -- ^ Whether the bus is running a CGB cart. Set once at startup
     -- via 'setCgbMode'; rendering reads this to pick the BG path.
@@ -760,7 +760,8 @@ renderPixelsForLine ps ctx mSpriteCtx = do
                 Just spriteCtx ->
                     resolveSpritePixel ps ctx spriteCtx x bgIdx bgAttr bgShade
                 Nothing -> pure (bgShade, Nothing)
-            MV.write (ppuFb ps) (fbBase + x) finalShade
+            unless (target == FbRgba) $
+                MV.write (ppuFb ps) (fbBase + x) finalShade
             rgb <- pixelRgb ps (lineRenderMode ctx) bgIdx bgAttr finalShade mHit
             writeRgbPixel target (rgbBase + x * 3) (rgbaBase + x * 4) rgb
             go target (x + 1)

@@ -8,8 +8,16 @@ const FRAME_BYTES = 160 * 144 * 4;
 let lastFrameTime = 0;
 let tickTimer = null;
 const bufferPool = [];
+const audioBufferPool = [];
 let audioFrameCounter = 0;
 const textDecoder = new TextDecoder();
+let lastTiming = {
+    runMs: 0,
+    frameCopyMs: 0,
+    audioCopyMs: 0,
+    totalMs: 0,
+    audioSamples: 0,
+};
 
 // ─── WASI bridge ──────────────────────────────────────────────────────────────
 
@@ -169,29 +177,56 @@ function getPoolBuffer() {
     return bufferPool.pop() || new ArrayBuffer(FRAME_BYTES);
 }
 
+function getAudioPoolBuffer(byteLength) {
+    for (let i = audioBufferPool.length - 1; i >= 0; i--) {
+        const buf = audioBufferPool[i];
+        if (buf.byteLength >= byteLength) {
+            audioBufferPool.splice(i, 1);
+            return buf;
+        }
+    }
+    return new ArrayBuffer(byteLength);
+}
+
 function runFrame() {
     const e = wasm.instance.exports;
+    const frameStart = performance.now();
     if (!e.ocelot_run_frame(emu)) {
         postMessage({type: "frameError", message: getLastError()});
         running = false;
         return;
     }
+    const afterRun = performance.now();
 
     const buf = getPoolBuffer();
     const fbPtr = e.ocelot_framebuffer_ptr(emu);
     const fbLen = e.ocelot_framebuffer_len(emu);
     new Uint8Array(buf).set(new Uint8Array(e.memory.buffer, fbPtr, fbLen));
+    const afterFrameCopy = performance.now();
     postMessage({type: "frame", buffer: buf}, [buf]);
 
     const sampleCount = e.ocelot_audio_buffer_len(emu);
+    let audioCopyMs = 0;
     if (sampleCount > 0) {
         const ptr = e.ocelot_audio_buffer_ptr(emu);
-        const audioBuf = new ArrayBuffer(sampleCount * 2);
-        new Int16Array(audioBuf).set(new Int16Array(e.memory.buffer, ptr, sampleCount));
+        const audioBytes = sampleCount * 2;
+        const audioBuf = getAudioPoolBuffer(audioBytes);
+        new Int16Array(audioBuf, 0, sampleCount).set(new Int16Array(e.memory.buffer, ptr, sampleCount));
         e.ocelot_clear_audio_buffer(emu);
+        const afterAudioCopy = performance.now();
+        audioCopyMs = afterAudioCopy - afterFrameCopy;
         const queryLevel = (++audioFrameCounter % 6) === 0;
-        postMessage({type: "audio", buffer: audioBuf, queryLevel}, [audioBuf]);
+        postMessage({type: "audio", buffer: audioBuf, samples: sampleCount, queryLevel}, [audioBuf]);
     }
+
+    const frameEnd = performance.now();
+    lastTiming = {
+        runMs: afterRun - frameStart,
+        frameCopyMs: afterFrameCopy - afterRun,
+        audioCopyMs,
+        totalMs: frameEnd - frameStart,
+        audioSamples: sampleCount,
+    };
 }
 
 function workerTick() {
@@ -328,8 +363,17 @@ self.onmessage = function (ev) {
                 if (msg.buffer && msg.buffer.byteLength === FRAME_BYTES) bufferPool.push(msg.buffer);
                 break;
 
+            case "returnAudioBuffer":
+                if (msg.buffer && audioBufferPool.length < 8) audioBufferPool.push(msg.buffer);
+                break;
+
             case "queryStats":
-                postMessage({type: "stats", id, wasmMemBytes: wasm ? wasm.instance.exports.memory.buffer.byteLength : 0});
+                postMessage({
+                    type: "stats",
+                    id,
+                    wasmMemBytes: wasm ? wasm.instance.exports.memory.buffer.byteLength : 0,
+                    timing: lastTiming,
+                });
                 break;
 
             default:

@@ -76,6 +76,8 @@ let fpsFrames = 0;
 let fpsWindowStart = 0;
 let lastFrameMs = 0;
 let lastRafTime = 0;
+let lastWorkerTiming = null;
+let lastCanvasMs = 0;
 
 const BATTERY_SAVE_INTERVAL_MS = 15000;
 const STORAGE_DISABLED_MESSAGE = "Browser storage unavailable. Save states, battery saves, and recent ROMs are disabled.";
@@ -285,8 +287,10 @@ function onWorkerMessage(ev) {
 
         case "audio": {
             if (audioNode) {
-                audioNode.port.postMessage(new Int16Array(msg.buffer), [msg.buffer]);
+                audioNode.port.postMessage(new Int16Array(msg.buffer, 0, msg.samples), [msg.buffer]);
                 if (msg.queryLevel) audioNode.port.postMessage("query-level");
+            } else {
+                worker.postMessage({type: "returnAudioBuffer", buffer: msg.buffer}, [msg.buffer]);
             }
             break;
         }
@@ -298,6 +302,7 @@ function onWorkerMessage(ev) {
 
         case "stats":
             cachedWasmMemBytes = msg.wasmMemBytes;
+            lastWorkerTiming = msg.timing || lastWorkerTiming;
             resolveCmd(msg.id, msg);
             break;
 
@@ -769,6 +774,8 @@ async function initAudio() {
             if (event.data && event.data.type === "level") {
                 audioBufferLevel = event.data.count;
                 audioBufferCapacity = event.data.capacity;
+            } else if (event.data && event.data.type === "return-buffer") {
+                worker.postMessage({type: "returnAudioBuffer", buffer: event.data.buffer}, [event.data.buffer]);
             }
         };
         gainNode = audioCtx.createGain();
@@ -975,7 +982,9 @@ function frameLoop(now) {
     rafId = requestAnimationFrame(frameLoop);
     pollGamepads();
     if (latestFrameReady) {
+        const t0 = performance.now();
         ctx.putImageData(frameImageData, 0, 0);
+        lastCanvasMs = performance.now() - t0;
         latestFrameReady = false;
         updateFps(now);
     }
@@ -988,7 +997,7 @@ function updateFps(now) {
         const fps = (fpsFrames * 1000) / elapsed;
         document.getElementById("fps-display").textContent = `${fps.toFixed(1)} FPS`;
         document.getElementById("perf-fps").textContent = `${fps.toFixed(1)} FPS`;
-        document.getElementById("perf-frame-ms").textContent = `${lastFrameMs.toFixed(2)} ms`;
+        updatePerfTiming();
         fpsFrames = 0;
         fpsWindowStart = now;
     }
@@ -1133,8 +1142,8 @@ function updatePerf() {
     document.getElementById("perf-mode").textContent = currentRomName ? (cachedIsCgb ? "CGB" : "DMG") : "N/A";
     if (!running) {
         document.getElementById("perf-fps").textContent = "-- FPS";
-        document.getElementById("perf-frame-ms").textContent = "-- ms";
     }
+    updatePerfTiming();
     document.getElementById("perf-audio").textContent =
         audioCtx && audioNode
             ? `${audioCtx.state}` + (audioBufferCapacity > 0 ? ` ${audioBufferLevel}/${audioBufferCapacity}` : "")
@@ -1145,8 +1154,10 @@ function updatePerf() {
     if (perfVisible && currentRomName) {
         workerCmd({type: "queryStats"}).then((msg) => {
             cachedWasmMemBytes = msg.wasmMemBytes;
+            lastWorkerTiming = msg.timing || lastWorkerTiming;
             document.getElementById("perf-wasm-mem").textContent =
                 `${(cachedWasmMemBytes / 1048576).toFixed(1)} MB`;
+            updatePerfTiming();
         }).catch(() => {});
     }
 
@@ -1158,6 +1169,27 @@ function updatePerf() {
     }
     document.getElementById("perf-gamepads").textContent =
         gpDescriptions.length ? gpDescriptions.join("; ") : "none";
+}
+
+function formatMs(value) {
+    return Number.isFinite(value) ? `${value.toFixed(2)} ms` : "--";
+}
+
+function updatePerfTiming() {
+    document.getElementById("perf-frame-ms").textContent = formatMs(lastFrameMs);
+    document.getElementById("perf-canvas-ms").textContent = formatMs(lastCanvasMs);
+    if (!lastWorkerTiming) {
+        document.getElementById("perf-worker-total-ms").textContent = "--";
+        document.getElementById("perf-wasm-run-ms").textContent = "--";
+        document.getElementById("perf-worker-copy-ms").textContent = "--";
+        document.getElementById("perf-audio-copy-ms").textContent = "--";
+        return;
+    }
+    document.getElementById("perf-worker-total-ms").textContent = formatMs(lastWorkerTiming.totalMs);
+    document.getElementById("perf-wasm-run-ms").textContent = formatMs(lastWorkerTiming.runMs);
+    document.getElementById("perf-worker-copy-ms").textContent = formatMs(lastWorkerTiming.frameCopyMs);
+    document.getElementById("perf-audio-copy-ms").textContent =
+        `${formatMs(lastWorkerTiming.audioCopyMs)} / ${lastWorkerTiming.audioSamples || 0}`;
 }
 
 // ─── GB hardware state ────────────────────────────────────────────────────────
