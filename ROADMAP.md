@@ -124,7 +124,7 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 
 ### Save State Format
 
-- [x] Versioned binary format (`OCS1` magic + LE u32 version, currently version 8)
+- [x] Versioned binary format (`OCS1` magic + LE u32 version)
 - [x] CPU registers, IME, EI delay, halted, cycle counter
 - [x] Bus WRAM, HRAM, IO, IE, WBK, KEY1
 - [x] Bus HDMA src/dst/len/active and double-speed bits (v3 additions)

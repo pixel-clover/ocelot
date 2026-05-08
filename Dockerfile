@@ -13,7 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install GHC wasm toolchain (auto-detects host architecture).
-RUN curl -sSf https://gitlab.haskell.org/haskell-wasm/ghc-wasm-meta/-/raw/master/bootstrap.sh \
+# Pin WASM_META_REV to a specific commit SHA for reproducible builds.
+ARG WASM_META_REV=master
+RUN curl -sSf "https://gitlab.haskell.org/haskell-wasm/ghc-wasm-meta/-/raw/${WASM_META_REV}/bootstrap.sh" \
     | FLAVOUR=9.6 sh
 
 # Copy the cabal file and sources so cabal can configure the package during

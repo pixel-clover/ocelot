@@ -6,6 +6,7 @@ import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
 import Data.IORef (readIORef, writeIORef)
+import qualified Data.Vector.Storable as VS
 import qualified Data.Vector.Unboxed as V
 import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word8)
@@ -190,6 +191,30 @@ spec = do
             _ <- advance ((80 + 172) `div` 4) ps
             fb <- framebuffer ps
             fb V.! 0 `shouldBe` 0x01
+
+    describe "FbTarget rendering modes" $ do
+        it "FbRgb mode writes the RGB buffer but leaves the RGBA buffer untouched" $ do
+            ps <- freshOn
+            writeVram ps [(0, 0xFF), (1, 0x00)]
+            setFbTarget FbRgb ps
+            _ <- advance ((80 + 172) `div` 4) ps
+            rgb <- framebufferRgb ps
+            -- ppuFbRgba is a storable vector; freeze into an immutable VS.Vector.
+            -- Alpha bytes are pre-initialised to 255 by initialPpu, so we only
+            -- check the colour channels (positions where i `mod` 4 /= 3).
+            rgba <- VS.freeze (ppuFbRgba ps)
+            V.any (/= 0) rgb `shouldBe` True
+            VS.all (== 0) (VS.ifilter (\i _ -> i `mod` 4 /= 3) rgba) `shouldBe` True
+
+        it "FbRgba mode writes the RGBA buffer but leaves the RGB buffer untouched" $ do
+            ps <- freshOn
+            writeVram ps [(0, 0xFF), (1, 0x00)]
+            setFbTarget FbRgba ps
+            _ <- advance ((80 + 172) `div` 4) ps
+            rgb <- framebufferRgb ps
+            rgba <- framebufferRgbaBytes ps
+            V.all (== 0) rgb `shouldBe` True
+            not (BS.all (== 0) rgba) `shouldBe` True
 
     describe "sprite rendering" $ do
         it "an 8x8 sprite at x=8,y=0 renders through OBP0 over a transparent BG" $ do

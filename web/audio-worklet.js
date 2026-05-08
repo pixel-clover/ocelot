@@ -24,6 +24,7 @@ class OcelotAudioProcessor extends AudioWorkletProcessor {
                 this.writePos = (this.writePos + 1) % this.bufferSize;
                 this.count++;
             }
+            this.port.postMessage({type: "return-buffer", buffer: samples.buffer}, [samples.buffer]);
         };
     }
 

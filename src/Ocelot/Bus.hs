@@ -40,6 +40,7 @@ module Ocelot.Bus (
     framebufferRgb,
     framebufferRgbBytes,
     framebufferRgbaBytes,
+    framebufferRgbaPtr,
     copyFramebufferRgbWithPitch,
     copyFramebufferRgba,
     drainSerial,
@@ -1012,6 +1013,9 @@ copyFramebufferRgbWithPitch ptr pitch b = Ppu.copyFramebufferRgbWithPitch ptr pi
 
 copyFramebufferRgba :: Ptr Word8 -> Bus -> IO ()
 copyFramebufferRgba ptr b = Ppu.copyFramebufferRgba ptr (busPpu b)
+
+framebufferRgbaPtr :: Bus -> Ptr Word8
+framebufferRgbaPtr b = Ppu.framebufferRgbaPtr (busPpu b)
 
 -- | Drain the APU's pending stereo samples (interleaved L,R) for the frontend.
 drainAudioSamples :: Bus -> IO [Int16]

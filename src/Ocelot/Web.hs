@@ -13,6 +13,7 @@ module Ocelot.Web (
     framebufferRgb,
     framebufferRgbBytes,
     framebufferRgbaBytes,
+    framebufferRgbaPtr,
     copyFramebufferRgba,
     drainAudioSamples,
     drainAudioSamplesVector,
@@ -21,6 +22,7 @@ module Ocelot.Web (
     loadState,
     extractSaveData,
     loadSaveData,
+    setFbTargetRgba,
     sessionTitle,
     sessionHasBattery,
     sessionIsCgb,
@@ -94,6 +96,14 @@ copyFramebufferRgba :: Ptr Word8 -> WebSession -> IO ()
 copyFramebufferRgba ptr session =
     Bus.copyFramebufferRgba ptr (machineBus (wsMachine session))
 
+{- | Stable pointer directly into the RGBA framebuffer. Valid for the
+lifetime of the 'WebSession'. Allows the WASM host to read the framebuffer
+without an intermediate copy.
+-}
+framebufferRgbaPtr :: WebSession -> Ptr Word8
+framebufferRgbaPtr session =
+    Bus.framebufferRgbaPtr (machineBus (wsMachine session))
+
 drainAudioSamples :: WebSession -> IO [Int16]
 drainAudioSamples session =
     Bus.drainAudioSamples (machineBus (wsMachine session))
@@ -126,6 +136,14 @@ sessionHasBattery = wsHasBattery
 
 sessionIsCgb :: WebSession -> Bool
 sessionIsCgb session = Bus.isCgb (machineBus (wsMachine session))
+
+{- | Switch the PPU to write only the RGBA framebuffer. Call this once after
+'loadSession' in a host that reads the RGBA buffer exclusively (e.g. the
+WASM frontend), to skip the unused RGB writes each scanline.
+-}
+setFbTargetRgba :: WebSession -> IO ()
+setFbTargetRgba session =
+    Ppu.setFbTarget Ppu.FbRgba (Bus.busPpu (machineBus (wsMachine session)))
 
 framebufferWidth, framebufferHeight :: Int
 framebufferWidth = Ppu.framebufferWidth

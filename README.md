@@ -103,6 +103,16 @@ make release
 
 If the build is successful, you can find the built binary at `$(stack path --local-install-root)/bin/ocelot`.
 
+###### Using Nix
+
+If you use Nix, the repository provides a development shell:
+
+```bash
+nix develop
+stack build
+stack run -- play [/path/to/rom.gbc]
+```
+
 #### Run the Emulator
 
 Run the `play` command to start the emulator GUI:
@@ -142,9 +152,10 @@ Available commands:
                            needed; verifies the SDL audio path.
   info                     Print the ROM's cartridge header and exit.
 
-SDL key bindings (play): Z=A, X=B, Enter=Start, RShift=Select, Arrows=D-pad,
-Space=pause, F1=help overlay, .=frame step, Tab=fast-fwd (held), R=reset,
-F5=save state, F6=cycle slot (1-5), F7=load state, F12=screenshot, Escape=quit.
+SDL key bindings (play): S=A, A=B, Enter=Start, RShift=Select, Arrows=D-pad,
+Space=pause/resume, F1=help overlay, .=frame step, Tab=fast-fwd (held), F5=save
+state, F6=cycle slot (1-5), F7=load state, F11=fullscreen, F12=screenshot,
+Shift+F12=record GIF, P=perf overlay, O=open ROM, R=reset, Escape=quit.
 ```
 
 ---

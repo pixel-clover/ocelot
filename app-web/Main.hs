@@ -125,14 +125,10 @@ insertSession handle = do
 destroyHandle :: SessionHandle -> IO ()
 destroyHandle handle = do
     when (shTitlePtr handle /= nullPtr) (free (shTitlePtr handle))
-    when (shFramebufferPtr handle /= nullPtr) (free (shFramebufferPtr handle))
+    -- shFramebufferPtr points into the PPU's storable vector (C-heap); do NOT free it.
     when (shAudioPtr handle /= nullPtr) (free (shAudioPtr handle))
     freeBufferRef (shStateBuffer handle)
     freeBufferRef (shSaveBuffer handle)
-
-copyFramebuffer :: SessionHandle -> IO ()
-copyFramebuffer handle =
-    Web.copyFramebufferRgba (shFramebufferPtr handle) (shSession handle)
 
 drainAudioIntoHandle :: SessionHandle -> IO ()
 drainAudioIntoHandle handle = do
@@ -163,7 +159,9 @@ makeHandle :: Web.WebSession -> IO SessionHandle
 makeHandle session = do
     let titleBytes = TE.encodeUtf8 (Web.sessionTitle session)
     (titlePtr, titleLen) <- allocBufferFromByteString titleBytes
-    framebufferPtr <- mallocBytes framebufferBytes
+    -- Borrow the PPU's own C-heap RGBA buffer directly; no separate allocation
+    -- or per-frame copy needed.
+    let framebufferPtr = Web.framebufferRgbaPtr session
     audioPtr <- mallocBytes (audioCapacitySamples * 2)
     audioLen <- newIORef 0
     stateBuffer <- newIORef (nullPtr, 0)
@@ -205,7 +203,9 @@ ocelot_create ptr len = do
         loaded <- Web.loadSession romBytes
         case loaded of
             Left err -> setLastError (show err) >> pure 0
-            Right session -> insertSession =<< makeHandle session
+            Right session -> do
+                Web.setFbTargetRgba session
+                insertSession =<< makeHandle session
 
 ocelot_destroy :: CInt -> IO ()
 ocelot_destroy sid = do
@@ -225,7 +225,6 @@ ocelot_run_frame sid = do
         case runResult of
             Left err -> setLastError (displayException err) >> pure 0
             Right () -> do
-                copyFramebuffer handle
                 drainAudioIntoHandle handle
                 clearLastError
                 pure 1

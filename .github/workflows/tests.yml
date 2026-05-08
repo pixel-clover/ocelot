@@ -8,8 +8,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - 'v*'
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -22,10 +20,6 @@ on:
 
 permissions:
   contents: read
-
-#concurrency:
-#  group: ${{ github.workflow }}-${{ github.ref }}
-#  cancel-in-progress: true
 
 jobs:
   test:
@@ -41,7 +35,7 @@ jobs:
       - name: Setup Haskell
         uses: haskell-actions/setup@v2
         with:
-          ghc-version: '9.6'
+          ghc-version: '9.6.7'
           enable-stack: true
           stack-version: 'latest'
 
@@ -51,7 +45,7 @@ jobs:
           path: |
             ~/.stack
             .stack-work
-          key: ${{ runner.os }}-stack-${{ hashFiles('stack.yaml.lock', 'package.yaml') }}
+          key: ${{ runner.os }}-stack-${{ hashFiles('stack.yaml', 'stack.yaml.lock', 'package.yaml') }}
           restore-keys: |
             ${{ runner.os }}-stack-
 
@@ -61,7 +55,7 @@ jobs:
           sudo apt-get install -y pkg-config libsdl2-dev
 
       - name: Install tools
-        run: stack install hlint fourmolu hpc-codecov
+        run: stack install hpc-codecov
 
       - name: Build project
         run: make build

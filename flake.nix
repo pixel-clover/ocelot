@@ -18,8 +18,8 @@
     {
       devShells = forAllSystems (pkgs:
         let
-          ghc = pkgs.haskell.compiler.ghc96;
-          hsPkgs = pkgs.haskell.packages.ghc96;
+          ghc = pkgs.haskell.compiler.ghc967;
+          hsPkgs = pkgs.haskell.packages.ghc967;
         in
         {
           default = pkgs.mkShell {
@@ -35,6 +35,7 @@
               pkgs.hpack
               pkgs.zlib
               pkgs.pkg-config
+              pkgs.binaryen
               # SDL2 for the frontend (which is linked at runtime via sdl2 Haskell package).
               pkgs.SDL2
             ];

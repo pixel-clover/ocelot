@@ -167,10 +167,18 @@ Reading or writing CPU registers from outside `Ocelot.Cpu` is allowed only for t
     - `framebuffer :: PpuState -> IO (Vector Word8)` (DMG palette indices)
     - `framebufferRgb :: PpuState -> IO (Vector Word8)` (RGB888 bytes)
     - `copyFramebufferRgb :: Ptr Word8 -> PpuState -> IO ()` (copy into a caller-owned RGB888 staging buffer; preferred for desktop hot paths)
+    - `copyFramebufferRgbWithPitch :: Ptr Word8 -> Int -> PpuState -> IO ()` (row-pitched variant for SDL texture uploads)
     - `framebufferRgbBytes :: PpuState -> IO ByteString`
-    - `framebufferRgbaBytes :: PpuState -> IO ByteString` (used by the web frontend bridge)
+    - `copyFramebufferRgba :: Ptr Word8 -> PpuState -> IO ()` (single `memcpy` from the storable RGBA buffer; used by tests and non-WASM callers)
+    - `framebufferRgbaBytes :: PpuState -> IO ByteString`
+    - `framebufferRgbaPtr :: PpuState -> Ptr Word8` (stable pointer directly into the RGBA buffer's C-heap backing store; valid for the lifetime of
+      the `PpuState`; the WASM host uses this to give JS a zero-copy view — no per-frame copy needed)
 - CGB hookup: `setCgbMode :: Bool -> PpuState -> IO ()` (called by the bus once at startup)
 - CGB render-mode hookup: `setCgbRenderMode :: CgbRenderMode -> PpuState -> IO ()`
+- Framebuffer-target hookup: `setFbTarget :: FbTarget -> PpuState -> IO ()` (call once after `initialPpu`, before the first frame; `FbRgb` skips RGBA
+  writes on the desktop, `FbRgba` skips RGB writes on the web, `FbBoth` is the default and is used by tests)
+- `ppuFbRgba` is backed by `Data.Vector.Storable.Mutable.IOVector` (C-heap, pinned) rather than the GHC-heap unboxed `IOVector` used by all other
+  framebuffers. This is what makes `framebufferRgbaPtr` safe to call without a copy: the memory never moves. Do not change this to an unboxed vector.
 - STAT write-edge hookup: `takePendingStatIrq :: PpuState -> IO Bool` (called by the bus after PPU register writes that can raise STAT)
 
 `PpuState` exports its field record so `Bus` can route memory accesses and so `Snapshot` can serialize the IORefs and IOVectors directly. Treat
@@ -222,7 +230,7 @@ VBA-M-compatible 48-byte suffix appended to the RAM bytes in `extractSave`/`load
 ### `Ocelot.Snapshot`
 
 - `save :: Machine -> IO ByteString` and `load :: ByteString -> Machine -> IO (Either SnapshotError ())`
-- Versioned binary format (`OCS1` magic + LE u32 version, currently 8). When the format changes incompatibly, bump the version; old blobs are
+- Versioned binary format (`OCS1` magic + LE u32 version). When the format changes incompatibly, bump the version; old blobs are
   rejected with `UnsupportedVersion`.
 - Reaches across subsystems via the per-module `dumpState`/`loadState` hooks listed above and via direct PpuState/Bus field access where the
   state is in IORefs and IOVectors that the per-module hooks would just wrap.
