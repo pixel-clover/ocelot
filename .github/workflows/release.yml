@@ -26,28 +26,26 @@ jobs:
     permissions:
       contents: write
     outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      tag: ${{ steps.set-tag.outputs.tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set release tag
+        id: set-tag
         shell: bash
         run: |
           if [ "${{ github.ref_type }}" = "tag" ]; then
-            echo "RELEASE_TAG=${{ github.ref_name }}" >> "$GITHUB_ENV"
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           else
-            echo "RELEASE_TAG=manual-${{ github.run_id }}" >> "$GITHUB_ENV"
+            echo "tag=manual-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          release_name: Release ${{ env.RELEASE_TAG }}
+          tag_name: ${{ steps.set-tag.outputs.tag }}
+          name: Release ${{ steps.set-tag.outputs.tag }}
           draft: ${{ github.ref_type != 'tag' }}
           prerelease: true
 
@@ -65,16 +63,12 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact_name: ocelot-linux-x86_64.gz
-            asset_content_type: application/gzip
           - os: ubuntu-24.04-arm
             artifact_name: ocelot-linux-aarch64.gz
-            asset_content_type: application/gzip
           - os: macos-14
             artifact_name: ocelot-macos-aarch64.gz
-            asset_content_type: application/gzip
           - os: windows-latest
             artifact_name: ocelot-windows-x86_64.zip
-            asset_content_type: application/zip
             allow_failure: true
 
     steps:
@@ -167,14 +161,10 @@ jobs:
           Compress-Archive -Path "$releaseDir\*" -DestinationPath "${{ matrix.artifact_name }}"
 
       - name: Upload release asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v2
         with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./${{ matrix.artifact_name }}
-          asset_name: ${{ matrix.artifact_name }}
-          asset_content_type: ${{ matrix.asset_content_type }}
+          tag_name: ${{ needs.create-release.outputs.tag }}
+          files: ./${{ matrix.artifact_name }}
 
   build-image:
     name: Build Docker image

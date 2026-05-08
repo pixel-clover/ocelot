@@ -46,7 +46,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ghc-wasm
-          key: ${{ runner.os }}-ghc-wasm-9.6
+          key: ${{ runner.os }}-ghc-wasm-9.6-${{ hashFiles('.github/workflows/web.yml') }}
 
       - name: Install GHC wasm toolchain
         if: steps.cache-wasm.outputs.cache-hit != 'true'
