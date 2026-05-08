@@ -26,7 +26,7 @@ import Codec.Picture.Gif (GifDelay, GifLooping (..), writeGifImages)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar)
 import Control.Exception (IOException, SomeException, bracket, try)
-import Control.Monad (forM_, unless, when)
+import Control.Monad (filterM, forM_, unless, when)
 import Data.Bits (testBit)
 import qualified Data.ByteString as BS
 import Data.Char (isSpace, toUpper)
@@ -57,7 +57,7 @@ import qualified Ocelot.Snapshot as Snap
 import SDL (($=))
 import qualified SDL
 import qualified SDL.Input.GameController as SDLGC
-import System.Directory (createDirectoryIfMissing, findExecutable)
+import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileExist, findExecutable, getXdgDirectory)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeBaseName, takeDirectory, (</>))
 #ifdef mingw32_HOST_OS
@@ -247,6 +247,7 @@ slotPath romPath slot = romDir romPath </> ("slot" <> show slot <> ".state")
 
 play :: FilePath -> Cartridge -> Maybe BS.ByteString -> Text -> Int -> IO Bool
 play romPath cart bootRom title scale = do
+    addRecentRom romPath
     let titleStr
             | T.null title = fallbackTitle romPath
             | otherwise = T.unpack title
@@ -1306,6 +1307,33 @@ showOpenFileDialog = do
                     Nothing -> pure ""
 #endif
 
+recentsFilePath :: IO FilePath
+recentsFilePath = do
+    dir <- getXdgDirectory XdgData "ocelot"
+    createDirectoryIfMissing True dir
+    pure (dir </> "recents.txt")
+
+-- | Load up to 5 recent ROM paths, filtered to those that still exist on disk.
+loadRecentRoms :: IO [FilePath]
+loadRecentRoms = do
+    path <- recentsFilePath
+    r <- try (readFile path) :: IO (Either IOException String)
+    case r of
+        Left _ -> pure []
+        Right s ->
+            filterM doesFileExist (take 5 (filter (not . null) (lines s)))
+
+-- | Prepend @p@ to the recents list, deduplicate, and persist (max 5 entries).
+addRecentRom :: FilePath -> IO ()
+addRecentRom p = do
+    existing <- loadRecentRoms
+    let updated = take 5 (p : filter (/= p) existing)
+    path <- recentsFilePath
+    r <- try (writeFile path (unlines updated)) :: IO (Either IOException ())
+    case r of
+        Left _ -> pure ()
+        Right _ -> pure ()
+
 {- | Show a startup menu before any ROM is loaded. Returns the path of the ROM the user dropped, or
 'Nothing' if the user chose to quit. Opens its own SDL window (title-bar only, no game texture).
 -}
@@ -1313,6 +1341,7 @@ startupScreen :: Int -> IO (Maybe FilePath)
 startupScreen scale = do
     let (winW0, winH0) = windowSize scale
     SDL.initialize [SDL.InitVideo, SDL.InitEvents]
+    recents <- loadRecentRoms
     let buildTag = T.pack $(gitBranch) <> "@" <> T.pack (take 7 $(gitHash))
     window <-
         SDL.createWindow
@@ -1325,16 +1354,16 @@ startupScreen scale = do
     SDL.rendererDrawBlendMode renderer $= SDL.BlendAlphaBlend
     selRef <- newIORef (0 :: Int)
     waitRef <- newIORef False
-    result <- startupLoop renderer paceMode window selRef waitRef
+    result <- startupLoop renderer paceMode window selRef waitRef recents
     SDL.destroyRenderer renderer
     SDL.destroyWindow window
     SDL.quit
     pure result
 
-startupLoop :: SDL.Renderer -> PaceMode -> SDL.Window -> IORef Int -> IORef Bool -> IO (Maybe FilePath)
-startupLoop renderer paceMode window selRef waitRef = do
+startupLoop :: SDL.Renderer -> PaceMode -> SDL.Window -> IORef Int -> IORef Bool -> [FilePath] -> IO (Maybe FilePath)
+startupLoop renderer paceMode window selRef waitRef recents = do
     events <- SDL.pollEvents
-    mDecision <- processStartupEvents selRef waitRef events
+    mDecision <- processStartupEvents selRef waitRef recents events
     case mDecision of
         Just decision -> pure decision
         Nothing -> do
@@ -1345,15 +1374,17 @@ startupLoop renderer paceMode window selRef waitRef = do
             SDL.clear renderer
             sel <- readIORef selRef
             waiting <- readIORef waitRef
-            renderStartupUi renderer winW winH sel waiting
+            renderStartupUi renderer winW winH sel waiting recents
             SDL.present renderer
             when (paceMode == PaceSleep) (threadDelay 16000)
-            startupLoop renderer paceMode window selRef waitRef
+            startupLoop renderer paceMode window selRef waitRef recents
 
-processStartupEvents :: IORef Int -> IORef Bool -> [SDL.Event] -> IO (Maybe (Maybe FilePath))
-processStartupEvents selRef waitRef = go
+processStartupEvents :: IORef Int -> IORef Bool -> [FilePath] -> [SDL.Event] -> IO (Maybe (Maybe FilePath))
+processStartupEvents selRef waitRef recents = go
   where
-    menuLen = 2 :: Int
+    recentCount = length recents
+    menuLen = recentCount + 2  -- recents + OPEN ROM + QUIT
+    isEnter sc = sc == SDL.ScancodeReturn || sc == SDL.ScancodeKPEnter
     go [] = pure Nothing
     go (ev : rest) = case SDL.eventPayload ev of
         SDL.QuitEvent -> pure (Just Nothing)
@@ -1363,75 +1394,85 @@ processStartupEvents selRef waitRef = go
         SDL.KeyboardEvent kev
             | SDL.keyboardEventKeyMotion kev == SDL.Pressed
             , not (SDL.keyboardEventRepeat kev) ->
-                case SDL.keysymScancode (SDL.keyboardEventKeysym kev) of
-                    SDL.ScancodeEscape -> do
-                        waiting <- readIORef waitRef
-                        if waiting
-                            then do writeIORef waitRef False; go rest
-                            else pure (Just Nothing)
-                    SDL.ScancodeUp -> do
-                        waiting <- readIORef waitRef
-                        unless waiting $ modifyIORef' selRef (\s -> (s - 1 + menuLen) `mod` menuLen)
-                        go rest
-                    SDL.ScancodeDown -> do
-                        waiting <- readIORef waitRef
-                        unless waiting $ modifyIORef' selRef (\s -> (s + 1) `mod` menuLen)
-                        go rest
-                    SDL.ScancodeReturn -> do
-                        waiting <- readIORef waitRef
-                        if waiting
-                            then go rest
-                            else do
-                                s <- readIORef selRef
-                                case s of
-                                    0 -> do
-                                        mPath <- showOpenFileDialog
-                                        case mPath of
-                                            Just path -> pure (Just (Just path))
-                                            Nothing -> do writeIORef waitRef True; go rest
-                                    1 -> pure (Just Nothing)
-                                    _ -> go rest
-                    _ -> go rest
+                let sc = SDL.keysymScancode (SDL.keyboardEventKeysym kev)
+                 in if isEnter sc
+                        then do
+                            waiting <- readIORef waitRef
+                            if waiting
+                                then go rest
+                                else do
+                                    s <- readIORef selRef
+                                    if s < recentCount
+                                        then pure (Just (Just (recents !! s)))
+                                        else if s == recentCount
+                                            then do
+                                                mPath <- showOpenFileDialog
+                                                case mPath of
+                                                    Just path -> pure (Just (Just path))
+                                                    Nothing -> do writeIORef waitRef True; go rest
+                                            else pure (Just Nothing)
+                        else case sc of
+                            SDL.ScancodeEscape -> do
+                                waiting <- readIORef waitRef
+                                if waiting
+                                    then do writeIORef waitRef False; go rest
+                                    else pure (Just Nothing)
+                            SDL.ScancodeUp -> do
+                                waiting <- readIORef waitRef
+                                unless waiting $ modifyIORef' selRef (\s -> (s - 1 + menuLen) `mod` menuLen)
+                                go rest
+                            SDL.ScancodeDown -> do
+                                waiting <- readIORef waitRef
+                                unless waiting $ modifyIORef' selRef (\s -> (s + 1) `mod` menuLen)
+                                go rest
+                            _ -> go rest
         _ -> go rest
 
-renderStartupUi :: SDL.Renderer -> Int -> Int -> Int -> Bool -> IO ()
-renderStartupUi renderer winW winH sel waiting = do
+renderStartupUi :: SDL.Renderer -> Int -> Int -> Int -> Bool -> [FilePath] -> IO ()
+renderStartupUi renderer winW winH sel waiting recents = do
     let logoScale = 3
         logoText = "OCELOT"
         logoW = textWidth logoScale logoText
         logoGlyphH = 7 * logoScale
-        menuItems = ["OPEN ROM", "QUIT"] :: [String]
         rowH = 7 * 2 + 12
-        menuH = length menuItems * rowH
         hintText
             | waiting = "DROP A ROM FILE ON THIS WINDOW"
             | otherwise = "DROP A ROM FILE TO START"
         hintW = textWidth 2 hintText
         panelW = min (winW - 40) (max (hintW + 28) 280)
-        panelH = 20 + logoGlyphH + 16 + 2 + 12 + (7 * 2) + 20 + menuH + 20
+        maxNameChars = (panelW - 28) `div` glyphAdvance 2 - 4
+        recentCount = length recents
+        sepGap = if null recents then 0 else 13  -- 4px above + 1px line + 8px below
+        recentItems = map (\p -> fitText maxNameChars (takeBaseName p)) recents
+        allItems = recentItems ++ (["OPEN ROM", "QUIT"] :: [String])
+        totalRows = length allItems
+        panelH = 20 + logoGlyphH + 16 + 2 + 12 + (7 * 2) + 20 + totalRows * rowH + sepGap + 20
         panelX = (winW - panelW) `div` 2
         panelY = (winH - panelH) `div` 2
         borderAccent = if waiting then accentBlue else accentOrange
     drawPanel renderer panelPrimary borderAccent panelX panelY panelW panelH
-    -- Logo
     let logoX = panelX + (panelW - logoW) `div` 2
         logoY = panelY + 20
     drawTextShadowed renderer logoScale accentOrange logoX logoY logoText
-    -- Divider
     let divY = logoY + logoGlyphH + 8
     fillRect renderer accentOrange (panelX + 14) divY (panelW - 28) 2
-    -- Hint
     let hintX = panelX + (panelW - hintW) `div` 2
         hintY = divY + 12
         hintColor = if waiting then accentBlue else textSecondary
     drawTextShadowed renderer 2 hintColor hintX hintY hintText
-    -- Menu
     let menuStartY = hintY + 7 * 2 + 20
-    forM_ (zip [0 ..] menuItems) $ \(i, item) -> do
-        let itemY = menuStartY + i * rowH
+    -- Separator between recents and fixed items
+    when (not (null recents)) $
+        fillRect renderer panelSecondary (panelX + 14) (menuStartY + recentCount * rowH + 4) (panelW - 28) 1
+    -- Menu rows
+    forM_ (zip [0 ..] allItems) $ \(i, item) -> do
+        let isRecent = i < recentCount
+            extraOffset = if isRecent then 0 else sepGap
+            itemY = menuStartY + i * rowH + extraOffset
             isSelected = i == sel && not waiting
             (cursor, textColor)
                 | isSelected = ("> ", accentOrange)
+                | isRecent = ("  ", if waiting then textMuted else textSecondary)
                 | otherwise = ("  ", if waiting then textMuted else textPrimary)
             itemText = cursor <> item
             itemW = textWidth 2 itemText
