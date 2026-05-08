@@ -214,7 +214,7 @@ spec = do
             rgb <- framebufferRgb ps
             rgba <- framebufferRgbaBytes ps
             V.all (== 0) rgb `shouldBe` True
-            (not (BS.all (== 0) rgba)) `shouldBe` True
+            not (BS.all (== 0) rgba) `shouldBe` True
 
     describe "sprite rendering" $ do
         it "an 8x8 sprite at x=8,y=0 renders through OBP0 over a transparent BG" $ do
