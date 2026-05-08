@@ -116,12 +116,18 @@ function workerCmd(msg, transfer = []) {
 
 function resolveCmd(id, value) {
     const pending = pendingCmds.get(id);
-    if (pending) { pendingCmds.delete(id); pending.resolve(value); }
+    if (pending) {
+        pendingCmds.delete(id);
+        pending.resolve(value);
+    }
 }
 
 function rejectCmd(id, message) {
     const pending = pendingCmds.get(id);
-    if (pending) { pendingCmds.delete(id); pending.reject(new Error(message)); }
+    if (pending) {
+        pendingCmds.delete(id);
+        pending.reject(new Error(message));
+    }
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
@@ -475,7 +481,10 @@ function startListening(rbtn, btn) {
         ev.preventDefault();
         ev.stopPropagation();
         cleanup();
-        if (ev.code === "Escape") { rbtn.textContent = keyDisplayName(keyForButton(btn)); return; }
+        if (ev.code === "Escape") {
+            rbtn.textContent = keyDisplayName(keyForButton(btn));
+            return;
+        }
         const newCode = ev.code;
         const existingBtn = keyMap[newCode];
         const oldCode = keyForButton(btn);
@@ -604,7 +613,10 @@ function pauseForOverlay() {
     overlayDepth++;
     if (running) {
         running = false;
-        if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+        if (rafId) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
+        }
         worker.postMessage({type: "pause"});
         if (audioCtx) audioCtx.suspend();
     }
@@ -634,19 +646,33 @@ function hideRecentRoms() {
 function disableStorage(message, err) {
     if (err) console.warn(message, err); else console.warn(message);
     stopBatterySaveTimer();
-    if (db) { try { db.close(); } catch (_) {} }
+    if (db) {
+        try {
+            db.close();
+        } catch (_) {
+        }
+    }
     db = null;
     hideRecentRoms();
-    if (!storageNoticeShown) { showToast(message); storageNoticeShown = true; }
+    if (!storageNoticeShown) {
+        showToast(message);
+        storageNoticeShown = true;
+    }
 }
 
 function stopFrameLoop() {
     running = false;
-    if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+    if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+    }
 }
 
 function stopBatterySaveTimer() {
-    if (batterySaveTimer !== null) { clearInterval(batterySaveTimer); batterySaveTimer = null; }
+    if (batterySaveTimer !== null) {
+        clearInterval(batterySaveTimer);
+        batterySaveTimer = null;
+    }
 }
 
 function startBatterySaveTimer() {
@@ -700,7 +726,9 @@ async function sha256Hex(bytes) {
     return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("");
 }
 
-function romStorageKey(hash) { return `sha256:${hash}`; }
+function romStorageKey(hash) {
+    return `sha256:${hash}`;
+}
 
 async function saveRecentRom(key, name, bytes) {
     await dbPut("roms", key, {key, name, bytes, timestamp: Date.now()});
@@ -714,13 +742,18 @@ async function getRecentRoms() {
             req.onsuccess = () => resolve(req.result);
             req.onerror = () => reject(req.error);
         });
-    } catch (_) { return []; }
+    } catch (_) {
+        return [];
+    }
 }
 
 async function populateRecentRoms() {
     const select = document.getElementById("recent-roms");
     while (select.options.length > 1) select.remove(1);
-    if (!db) { select.style.display = "none"; return; }
+    if (!db) {
+        select.style.display = "none";
+        return;
+    }
     const allEntries = await getRecentRoms();
     allEntries.sort((a, b) => b.timestamp - a.timestamp);
     const seen = new Set();
@@ -729,7 +762,10 @@ async function populateRecentRoms() {
         seen.add(e.name);
         return true;
     });
-    if (entries.length === 0) { select.style.display = "none"; return; }
+    if (entries.length === 0) {
+        select.style.display = "none";
+        return;
+    }
     for (const entry of entries.slice(0, 10)) {
         const opt = document.createElement("option");
         opt.value = entry.key || entry.name;
@@ -740,7 +776,10 @@ async function populateRecentRoms() {
 }
 
 async function loadRecentRom(key) {
-    if (!db) { showToast("Persistent storage unavailable"); return; }
+    if (!db) {
+        showToast("Persistent storage unavailable");
+        return;
+    }
     let entry;
     try {
         entry = await dbGet("roms", key);
@@ -919,7 +958,11 @@ async function loadRom(file) {
         if (batteryBuffer) romTransfer.push(batteryBuffer);
         let romInfo;
         try {
-            romInfo = await workerCmd({type: "loadRom", romBuffer: buffer, batteryBuffer: batteryBuffer || null}, romTransfer);
+            romInfo = await workerCmd({
+                type: "loadRom",
+                romBuffer: buffer,
+                batteryBuffer: batteryBuffer || null
+            }, romTransfer);
         } catch (err) {
             showError(err.message || "Failed to load ROM");
             return;
@@ -959,7 +1002,10 @@ async function loadRom(file) {
 // ─── Render loop ──────────────────────────────────────────────────────────────
 
 function togglePause() {
-    if (!currentRomName) { showToast("Load a ROM first"); return; }
+    if (!currentRomName) {
+        showToast("Load a ROM first");
+        return;
+    }
     running = !running;
     document.getElementById("btn-pause").textContent = running ? "Pause" : "Resume";
     if (running) {
@@ -1032,17 +1078,32 @@ function pollGamepads() {
 // ─── Save / Load ──────────────────────────────────────────────────────────────
 
 function quickSave() {
-    persistentSave().catch((err) => { console.error(err); showToast("Save failed"); });
+    persistentSave().catch((err) => {
+        console.error(err);
+        showToast("Save failed");
+    });
 }
 
 function quickLoad() {
-    persistentLoad().catch((err) => { console.error(err); showToast("Load failed"); });
+    persistentLoad().catch((err) => {
+        console.error(err);
+        showToast("Load failed");
+    });
 }
 
 async function persistentSave() {
-    if (!currentRomName) { showToast("Load a ROM first"); return; }
-    if (!db) { showToast("Persistent storage unavailable"); return; }
-    if (!currentRomKey) { showToast("ROM identity unavailable"); return; }
+    if (!currentRomName) {
+        showToast("Load a ROM first");
+        return;
+    }
+    if (!db) {
+        showToast("Persistent storage unavailable");
+        return;
+    }
+    if (!currentRomKey) {
+        showToast("ROM identity unavailable");
+        return;
+    }
     let stateBuffer;
     try {
         stateBuffer = await workerCmd({type: "saveState"});
@@ -1059,9 +1120,18 @@ async function persistentSave() {
 }
 
 async function persistentLoad() {
-    if (!currentRomName) { showToast("Load a ROM first"); return; }
-    if (!db) { showToast("Persistent storage unavailable"); return; }
-    if (!currentRomKey) { showToast("ROM identity unavailable"); return; }
+    if (!currentRomName) {
+        showToast("Load a ROM first");
+        return;
+    }
+    if (!db) {
+        showToast("Persistent storage unavailable");
+        return;
+    }
+    if (!currentRomKey) {
+        showToast("ROM identity unavailable");
+        return;
+    }
     let data;
     try {
         data = await dbGet("states", `${currentRomKey}:slot${currentSlot}`);
@@ -1069,7 +1139,10 @@ async function persistentLoad() {
         disableStorage(STORAGE_DISABLED_MESSAGE, err);
         return;
     }
-    if (!data) { showToast(`No save in slot ${currentSlot}`); return; }
+    if (!data) {
+        showToast(`No save in slot ${currentSlot}`);
+        return;
+    }
     const buf = data instanceof Uint8Array
         ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
         : data;
@@ -1158,7 +1231,8 @@ function updatePerf() {
             document.getElementById("perf-wasm-mem").textContent =
                 `${(cachedWasmMemBytes / 1048576).toFixed(1)} MB`;
             updatePerfTiming();
-        }).catch(() => {});
+        }).catch(() => {
+        });
     }
 
     const gpDescriptions = [];
@@ -1256,14 +1330,17 @@ function applyIntegerScale(n) {
     if (n === -1 || isFs) {
         if (isFs) {
             const s = Math.max(1, Math.floor(Math.min(availW / 160, availH / 144)));
-            w = 160 * s; h = 144 * s;
+            w = 160 * s;
+            h = 144 * s;
         } else {
             const s = Math.min(availW / 160, availH / 144);
-            w = Math.floor(160 * s); h = Math.floor(144 * s);
+            w = Math.floor(160 * s);
+            h = Math.floor(144 * s);
         }
     } else {
         const s = n > 0 ? n : computeBestScale();
-        w = 160 * s; h = 144 * s;
+        w = 160 * s;
+        h = 144 * s;
     }
     if (canvas) {
         canvas.style.width = w + "px";
@@ -1289,13 +1366,18 @@ function applyIntegerScale(n) {
 
 function toggleFullscreen() {
     const container = document.getElementById("screen-container");
-    if (document.fullscreenElement) { document.exitFullscreen(); return; }
+    if (document.fullscreenElement) {
+        document.exitFullscreen();
+        return;
+    }
     container.requestFullscreen().catch(() => showToast("Fullscreen not available"));
 }
 
 // ─── Input ────────────────────────────────────────────────────────────────────
 
-function buttonForCode(code) { return keyMap[code] || null; }
+function buttonForCode(code) {
+    return keyMap[code] || null;
+}
 
 function syncButton(button) {
     if (!currentRomName || BUTTONS[button] === undefined) return;
@@ -1308,14 +1390,42 @@ function syncAllButtons() {
 }
 
 function onKeyDown(ev) {
-    if (ev.code === "F1") { ev.preventDefault(); toggleHelp(); return; }
-    if (ev.code === "F11") { ev.preventDefault(); toggleFullscreen(); return; }
-    if (ev.code === "Space") { ev.preventDefault(); togglePause(); return; }
-    if (ev.code === "F5") { ev.preventDefault(); quickSave(); return; }
-    if (ev.code === "F8") { ev.preventDefault(); quickLoad(); return; }
+    if (ev.code === "F1") {
+        ev.preventDefault();
+        toggleHelp();
+        return;
+    }
+    if (ev.code === "F11") {
+        ev.preventDefault();
+        toggleFullscreen();
+        return;
+    }
+    if (ev.code === "Space") {
+        ev.preventDefault();
+        togglePause();
+        return;
+    }
+    if (ev.code === "F5") {
+        ev.preventDefault();
+        quickSave();
+        return;
+    }
+    if (ev.code === "F8") {
+        ev.preventDefault();
+        quickLoad();
+        return;
+    }
     if (ev.code === "Escape") {
-        if (helpOpen) { ev.preventDefault(); toggleHelp(); return; }
-        if (aboutOpen) { ev.preventDefault(); toggleAbout(); return; }
+        if (helpOpen) {
+            ev.preventDefault();
+            toggleHelp();
+            return;
+        }
+        if (aboutOpen) {
+            ev.preventDefault();
+            toggleAbout();
+            return;
+        }
     }
     if (!currentRomName) return;
     const button = buttonForCode(ev.code);
@@ -1336,7 +1446,9 @@ function onKeyUp(ev) {
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
 
-function setStatus(msg) { document.getElementById("status").textContent = msg; }
+function setStatus(msg) {
+    document.getElementById("status").textContent = msg;
+}
 
 function showToast(msg) {
     const el = document.getElementById("toast");
@@ -1351,6 +1463,8 @@ function showError(msg) {
     document.getElementById("error-banner").classList.add("visible");
 }
 
-function hideError() { document.getElementById("error-banner").classList.remove("visible"); }
+function hideError() {
+    document.getElementById("error-banner").classList.remove("visible");
+}
 
 init();

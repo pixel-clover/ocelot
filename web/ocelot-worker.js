@@ -30,11 +30,25 @@ async function createWasiBridge() {
     const filetypeCharacterDevice = 2;
     const td = new TextDecoder();
 
-    function view() { return new DataView(memory.buffer); }
-    function bytes(ptr, len) { return new Uint8Array(memory.buffer, ptr, len); }
-    function writeU32(ptr, value) { view().setUint32(ptr, value >>> 0, true); }
-    function writeU64(ptr, value) { view().setBigUint64(ptr, BigInt(value), true); }
-    function readU32(ptr) { return view().getUint32(ptr, true); }
+    function view() {
+        return new DataView(memory.buffer);
+    }
+
+    function bytes(ptr, len) {
+        return new Uint8Array(memory.buffer, ptr, len);
+    }
+
+    function writeU32(ptr, value) {
+        view().setUint32(ptr, value >>> 0, true);
+    }
+
+    function writeU64(ptr, value) {
+        view().setBigUint64(ptr, BigInt(value), true);
+    }
+
+    function readU32(ptr) {
+        return view().getUint32(ptr, true);
+    }
 
     function fdWrite(fd, iovs, iovsLen, nwritten) {
         if (fd !== 1 && fd !== 2) return errnoBadf;
@@ -56,10 +70,22 @@ async function createWasiBridge() {
     }
 
     const wasiImport = {
-        args_sizes_get(argc, argvBufSize) { writeU32(argc, 0); writeU32(argvBufSize, 0); return errnoSuccess; },
-        args_get() { return errnoSuccess; },
-        environ_sizes_get(count, bufSize) { writeU32(count, 0); writeU32(bufSize, 0); return errnoSuccess; },
-        environ_get() { return errnoSuccess; },
+        args_sizes_get(argc, argvBufSize) {
+            writeU32(argc, 0);
+            writeU32(argvBufSize, 0);
+            return errnoSuccess;
+        },
+        args_get() {
+            return errnoSuccess;
+        },
+        environ_sizes_get(count, bufSize) {
+            writeU32(count, 0);
+            writeU32(bufSize, 0);
+            return errnoSuccess;
+        },
+        environ_get() {
+            return errnoSuccess;
+        },
         clock_time_get(_clockId, _precision, timePtr) {
             writeU64(timePtr, BigInt(Math.floor(performance.timeOrigin * 1000000)) + BigInt(Math.floor(performance.now() * 1000000)));
             return errnoSuccess;
@@ -72,49 +98,125 @@ async function createWasiBridge() {
             return errnoSuccess;
         },
         fd_write: fdWrite,
-        fd_close(fd) { return fd <= 2 ? errnoSuccess : errnoBadf; },
+        fd_close(fd) {
+            return fd <= 2 ? errnoSuccess : errnoBadf;
+        },
         fd_fdstat_get(fd, statPtr) {
             if (fd > 2) return errnoBadf;
             bytes(statPtr, 24).fill(0);
             bytes(statPtr, 1)[0] = filetypeCharacterDevice;
             return errnoSuccess;
         },
-        fd_fdstat_set_flags(fd) { return fd <= 2 ? errnoSuccess : errnoBadf; },
-        fd_fdstat_set_rights(fd) { return fd <= 2 ? errnoSuccess : errnoBadf; },
-        fd_advise() { return errnoBadf; },
-        fd_allocate() { return errnoBadf; },
-        fd_pread() { return errnoBadf; },
-        fd_pwrite() { return errnoBadf; },
-        fd_readdir() { return errnoBadf; },
-        fd_renumber() { return errnoBadf; },
-        fd_filestat_set_size() { return errnoBadf; },
-        fd_filestat_set_times() { return errnoBadf; },
-        fd_seek() { return errnoBadf; },
-        fd_prestat_get() { return errnoBadf; },
-        fd_prestat_dir_name() { return errnoBadf; },
-        fd_read() { return errnoBadf; },
-        fd_tell() { return errnoBadf; },
-        fd_sync() { return errnoBadf; },
-        fd_datasync() { return errnoBadf; },
-        fd_filestat_get() { return errnoBadf; },
-        path_open() { return errnoNoent; },
-        path_filestat_get() { return errnoNoent; },
-        path_filestat_set_times() { return errnoNoent; },
-        path_create_directory() { return errnoNoent; },
-        path_link() { return errnoNoent; },
-        path_remove_directory() { return errnoNoent; },
-        path_rename() { return errnoNoent; },
-        path_readlink() { return errnoNoent; },
-        path_symlink() { return errnoNoent; },
-        path_unlink_file() { return errnoNoent; },
-        clock_res_get(_clockId, resolutionPtr) { writeU64(resolutionPtr, 1); return errnoSuccess; },
-        poll_oneoff(_inPtr, _outPtr, _nsubscriptions, neventsPtr) { writeU32(neventsPtr, 0); return errnoSuccess; },
-        sched_yield() { return errnoSuccess; },
-        sock_accept() { return errnoNosys; },
-        sock_recv() { return errnoNosys; },
-        sock_send() { return errnoNosys; },
-        sock_shutdown() { return errnoNosys; },
-        proc_exit(code) { throw new Error(`WASI proc_exit(${code})`); },
+        fd_fdstat_set_flags(fd) {
+            return fd <= 2 ? errnoSuccess : errnoBadf;
+        },
+        fd_fdstat_set_rights(fd) {
+            return fd <= 2 ? errnoSuccess : errnoBadf;
+        },
+        fd_advise() {
+            return errnoBadf;
+        },
+        fd_allocate() {
+            return errnoBadf;
+        },
+        fd_pread() {
+            return errnoBadf;
+        },
+        fd_pwrite() {
+            return errnoBadf;
+        },
+        fd_readdir() {
+            return errnoBadf;
+        },
+        fd_renumber() {
+            return errnoBadf;
+        },
+        fd_filestat_set_size() {
+            return errnoBadf;
+        },
+        fd_filestat_set_times() {
+            return errnoBadf;
+        },
+        fd_seek() {
+            return errnoBadf;
+        },
+        fd_prestat_get() {
+            return errnoBadf;
+        },
+        fd_prestat_dir_name() {
+            return errnoBadf;
+        },
+        fd_read() {
+            return errnoBadf;
+        },
+        fd_tell() {
+            return errnoBadf;
+        },
+        fd_sync() {
+            return errnoBadf;
+        },
+        fd_datasync() {
+            return errnoBadf;
+        },
+        fd_filestat_get() {
+            return errnoBadf;
+        },
+        path_open() {
+            return errnoNoent;
+        },
+        path_filestat_get() {
+            return errnoNoent;
+        },
+        path_filestat_set_times() {
+            return errnoNoent;
+        },
+        path_create_directory() {
+            return errnoNoent;
+        },
+        path_link() {
+            return errnoNoent;
+        },
+        path_remove_directory() {
+            return errnoNoent;
+        },
+        path_rename() {
+            return errnoNoent;
+        },
+        path_readlink() {
+            return errnoNoent;
+        },
+        path_symlink() {
+            return errnoNoent;
+        },
+        path_unlink_file() {
+            return errnoNoent;
+        },
+        clock_res_get(_clockId, resolutionPtr) {
+            writeU64(resolutionPtr, 1);
+            return errnoSuccess;
+        },
+        poll_oneoff(_inPtr, _outPtr, _nsubscriptions, neventsPtr) {
+            writeU32(neventsPtr, 0);
+            return errnoSuccess;
+        },
+        sched_yield() {
+            return errnoSuccess;
+        },
+        sock_accept() {
+            return errnoNosys;
+        },
+        sock_recv() {
+            return errnoNosys;
+        },
+        sock_send() {
+            return errnoNosys;
+        },
+        sock_shutdown() {
+            return errnoNosys;
+        },
+        proc_exit(code) {
+            throw new Error(`WASI proc_exit(${code})`);
+        },
     };
 
     return {
@@ -257,20 +359,32 @@ self.onmessage = function (ev) {
         switch (type) {
             case "loadRom": {
                 running = false;
-                if (emu) { wasm.instance.exports.ocelot_destroy(emu); emu = 0; }
+                if (emu) {
+                    wasm.instance.exports.ocelot_destroy(emu);
+                    emu = 0;
+                }
 
                 const romBytes = new Uint8Array(msg.romBuffer);
                 const ptr = wasmAlloc(romBytes);
-                if (!ptr) { postMessage({type: "romError", id, message: "Failed to allocate ROM memory"}); return; }
+                if (!ptr) {
+                    postMessage({type: "romError", id, message: "Failed to allocate ROM memory"});
+                    return;
+                }
                 const e = wasm.instance.exports;
                 emu = e.ocelot_create(ptr, romBytes.length);
                 wasmFree(ptr, romBytes.length);
-                if (!emu) { postMessage({type: "romError", id, message: getLastError()}); return; }
+                if (!emu) {
+                    postMessage({type: "romError", id, message: getLastError()});
+                    return;
+                }
 
                 if (msg.batteryBuffer) {
                     const saveBytes = new Uint8Array(msg.batteryBuffer);
                     const savePtr = wasmAlloc(saveBytes);
-                    if (savePtr) { e.ocelot_load_save(emu, savePtr, saveBytes.length); wasmFree(savePtr, saveBytes.length); }
+                    if (savePtr) {
+                        e.ocelot_load_save(emu, savePtr, saveBytes.length);
+                        wasmFree(savePtr, saveBytes.length);
+                    }
                 }
 
                 const title = readString(e.ocelot_rom_title_ptr(emu), e.ocelot_rom_title_len(emu));
@@ -280,7 +394,10 @@ self.onmessage = function (ev) {
 
                 running = true;
                 lastFrameTime = performance.now();
-                if (tickTimer !== null) { clearTimeout(tickTimer); tickTimer = null; }
+                if (tickTimer !== null) {
+                    clearTimeout(tickTimer);
+                    tickTimer = null;
+                }
                 tickTimer = setTimeout(workerTick, 0);
 
                 postMessage({type: "romLoaded", id, title, isCgb, hasBattery, wasmMemBytes});
@@ -289,8 +406,14 @@ self.onmessage = function (ev) {
 
             case "destroyRom": {
                 running = false;
-                if (tickTimer !== null) { clearTimeout(tickTimer); tickTimer = null; }
-                if (emu) { wasm.instance.exports.ocelot_destroy(emu); emu = 0; }
+                if (tickTimer !== null) {
+                    clearTimeout(tickTimer);
+                    tickTimer = null;
+                }
+                if (emu) {
+                    wasm.instance.exports.ocelot_destroy(emu);
+                    emu = 0;
+                }
                 postMessage({type: "destroyRomOk", id});
                 break;
             }
@@ -312,9 +435,15 @@ self.onmessage = function (ev) {
                 break;
 
             case "saveState": {
-                if (!emu) { postMessage({type: "saveStateError", id, message: "No ROM loaded"}); return; }
+                if (!emu) {
+                    postMessage({type: "saveStateError", id, message: "No ROM loaded"});
+                    return;
+                }
                 const e = wasm.instance.exports;
-                if (!e.ocelot_save_state(emu)) { postMessage({type: "saveStateError", id, message: getLastError()}); return; }
+                if (!e.ocelot_save_state(emu)) {
+                    postMessage({type: "saveStateError", id, message: getLastError()});
+                    return;
+                }
                 const ptr = e.ocelot_save_state_ptr(emu);
                 const len = e.ocelot_save_state_len(emu);
                 const buf = new ArrayBuffer(len);
@@ -324,10 +453,16 @@ self.onmessage = function (ev) {
             }
 
             case "loadState": {
-                if (!emu) { postMessage({type: "loadStateError", id, message: "No ROM loaded"}); return; }
+                if (!emu) {
+                    postMessage({type: "loadStateError", id, message: "No ROM loaded"});
+                    return;
+                }
                 const stateBytes = new Uint8Array(msg.buffer);
                 const ptr = wasmAlloc(stateBytes);
-                if (!ptr) { postMessage({type: "loadStateError", id, message: "Allocation failed"}); return; }
+                if (!ptr) {
+                    postMessage({type: "loadStateError", id, message: "Allocation failed"});
+                    return;
+                }
                 const ok = wasm.instance.exports.ocelot_load_state(emu, ptr, stateBytes.length);
                 wasmFree(ptr, stateBytes.length);
                 postMessage(ok ? {type: "loadStateOk", id} : {type: "loadStateError", id, message: getLastError()});
@@ -335,10 +470,19 @@ self.onmessage = function (ev) {
             }
 
             case "extractSave": {
-                if (!emu) { postMessage({type: "saveData", id, buffer: null, hasBattery: false}); return; }
+                if (!emu) {
+                    postMessage({type: "saveData", id, buffer: null, hasBattery: false});
+                    return;
+                }
                 const e = wasm.instance.exports;
-                if (!e.ocelot_cartridge_has_battery(emu)) { postMessage({type: "saveData", id, buffer: null, hasBattery: false}); return; }
-                if (!e.ocelot_extract_save(emu)) { postMessage({type: "saveError", id, message: getLastError()}); return; }
+                if (!e.ocelot_cartridge_has_battery(emu)) {
+                    postMessage({type: "saveData", id, buffer: null, hasBattery: false});
+                    return;
+                }
+                if (!e.ocelot_extract_save(emu)) {
+                    postMessage({type: "saveError", id, message: getLastError()});
+                    return;
+                }
                 const ptr = e.ocelot_save_buffer_ptr(emu);
                 const len = e.ocelot_save_buffer_len(emu);
                 const buf = new ArrayBuffer(len);
@@ -348,10 +492,16 @@ self.onmessage = function (ev) {
             }
 
             case "loadSave": {
-                if (!emu) { postMessage({type: "loadSaveOk", id}); return; }
+                if (!emu) {
+                    postMessage({type: "loadSaveOk", id});
+                    return;
+                }
                 const saveBytes = new Uint8Array(msg.buffer);
                 const ptr = wasmAlloc(saveBytes);
-                if (!ptr) { postMessage({type: "loadSaveError", id, message: "Allocation failed"}); return; }
+                if (!ptr) {
+                    postMessage({type: "loadSaveError", id, message: "Allocation failed"});
+                    return;
+                }
                 const ok = wasm.instance.exports.ocelot_load_save(emu, ptr, saveBytes.length);
                 wasmFree(ptr, saveBytes.length);
                 postMessage(ok ? {type: "loadSaveOk", id} : {type: "loadSaveError", id, message: getLastError()});
@@ -380,7 +530,11 @@ self.onmessage = function (ev) {
         }
     } catch (err) {
         console.error("[worker] Error handling message", type, err);
-        if (id !== undefined) postMessage({type: "error", id, message: err instanceof Error ? err.message : String(err)});
+        if (id !== undefined) postMessage({
+            type: "error",
+            id,
+            message: err instanceof Error ? err.message : String(err)
+        });
     }
 };
 
