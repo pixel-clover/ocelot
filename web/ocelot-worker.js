@@ -25,7 +25,6 @@ async function createWasiBridge() {
     let memory = null;
     const errnoSuccess = 0;
     const errnoBadf = 8;
-    const errnoInval = 28;
     const errnoNoent = 44;
     const errnoNosys = 52;
     const filetypeCharacterDevice = 2;
