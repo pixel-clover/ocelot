@@ -18,8 +18,8 @@
     {
       devShells = forAllSystems (pkgs:
         let
-          ghc = pkgs.haskell.compiler.ghc96;
-          hsPkgs = pkgs.haskell.packages.ghc96;
+          ghc = pkgs.haskell.compiler.ghc967;
+          hsPkgs = pkgs.haskell.packages.ghc967;
         in
         {
           default = pkgs.mkShell {
