@@ -38,7 +38,7 @@ jobs:
           if [ "${{ github.ref_type }}" = "tag" ]; then
             echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           else
-            echo "tag=manual-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+            echo "tag=draft-$(date -u +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create release
@@ -46,8 +46,8 @@ jobs:
         with:
           tag_name: ${{ steps.set-tag.outputs.tag }}
           name: Release ${{ steps.set-tag.outputs.tag }}
-          draft: ${{ github.ref_type != 'tag' }}
-          prerelease: true
+          draft: true
+          prerelease: false
 
   build-and-upload:
     name: Build (${{ matrix.artifact_name }})
