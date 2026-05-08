@@ -43,6 +43,8 @@ module Ocelot.Ppu (
     framebufferHeight,
     setCgbMode,
     setCgbRenderMode,
+    FbTarget (..),
+    setFbTarget,
     takePendingStatIrq,
 ) where
 
@@ -80,6 +82,20 @@ data CgbRenderMode
     | RenderCgbCompat
     | RenderCgbFull
     deriving (Eq, Show, Enum, Bounded)
+
+{- | Which color framebuffer(s) the PPU populates during rendering.
+Set once at startup via 'setFbTarget' to skip writing the buffer
+that the current frontend does not read, reducing per-scanline
+memory traffic.
+-}
+data FbTarget
+    = -- | Write only 'ppuFbRgb' (RGB888). Used by the SDL desktop frontend.
+      FbRgb
+    | -- | Write only 'ppuFbRgba' (RGBA8888). Used by the web WASM frontend.
+      FbRgba
+    | -- | Write both buffers. Default; used by tests and the terminal renderer.
+      FbBoth
+    deriving (Eq, Show)
 
 data PpuState = PpuState
     { ppuLcdc :: !(IORef Word8)
@@ -119,6 +135,8 @@ data PpuState = PpuState
     -- ^ RGBA8888 color framebuffer (160 * 144 * 4 bytes). Kept so the
     -- web frontend can copy a presentation-ready buffer without
     -- rebuilding alpha-expanded pixels every frame.
+    , ppuFbTarget :: !(IORef FbTarget)
+    -- ^ Which color framebuffer(s) to populate. Set via 'setFbTarget'.
     , ppuCgbMode :: !(IORef Bool)
     -- ^ Whether the bus is running a CGB cart. Set once at startup
     -- via 'setCgbMode'; rendering reads this to pick the BG path.
@@ -197,6 +215,7 @@ initialPpu = do
                 MV.write fbRgba (i * 4 + 3) 255
                 initAlpha (i + 1)
     initAlpha 0
+    fbTarget <- newIORef FbBoth
     cgbMode <- newIORef False
     renderMode <- newIORef RenderDmg
     vbk <- newIORef 0
@@ -230,6 +249,7 @@ initialPpu = do
             , ppuFb = fb
             , ppuFbRgb = fbRgb
             , ppuFbRgba = fbRgba
+            , ppuFbTarget = fbTarget
             , ppuCgbMode = cgbMode
             , ppuRenderMode = renderMode
             , ppuVbk = vbk
@@ -325,6 +345,13 @@ setCgbMode b ps = writeIORef (ppuCgbMode ps) b
 -- | Pick the colorization path for rendered scanlines.
 setCgbRenderMode :: CgbRenderMode -> PpuState -> IO ()
 setCgbRenderMode m ps = writeIORef (ppuRenderMode ps) m
+
+{- | Set which color framebuffer(s) the render loop writes. Call once after
+'initialPpu', before the first frame runs. Frontends that read only one
+format should call this so the PPU skips the unused writes each scanline.
+-}
+setFbTarget :: FbTarget -> PpuState -> IO ()
+setFbTarget t ps = writeIORef (ppuFbTarget ps) t
 
 {- | Standard DMG shade palette mapped to the SDL frontend's
 greenish-DMG colors. Used when converting palette indices to RGB.
@@ -707,13 +734,15 @@ renderLine ps = do
     when windowOnThisLine (writeIORef (ppuWindowLine ps) (wly + 1))
 
 renderPixelsForLine :: PpuState -> LineRenderContext -> Maybe SpriteLineContext -> IO ()
-renderPixelsForLine ps ctx mSpriteCtx = go 0
+renderPixelsForLine ps ctx mSpriteCtx = do
+    !target <- readIORef (ppuFbTarget ps)
+    go target 0
   where
     fbBase = lineLy ctx * framebufferWidth
     rgbBase = lineLy ctx * framebufferWidth * 3
     rgbaBase = lineLy ctx * framebufferWidth * 4
 
-    go !x
+    go !target !x
         | x >= framebufferWidth = pure ()
         | otherwise = do
             (!bgIdx, !bgAttr) <- bgPixelAt ps ctx x
@@ -724,10 +753,19 @@ renderPixelsForLine ps ctx mSpriteCtx = go 0
                 Nothing -> pure (bgShade, Nothing)
             MV.write (ppuFb ps) (fbBase + x) finalShade
             rgb <- pixelRgb ps (lineRenderMode ctx) bgIdx bgAttr finalShade mHit
-            writeRgbPixel (rgbBase + x * 3) (rgbaBase + x * 4) rgb
-            go (x + 1)
+            writeRgbPixel target (rgbBase + x * 3) (rgbaBase + x * 4) rgb
+            go target (x + 1)
 
-    writeRgbPixel rgbOff rgbaOff (r, g, b) = do
+    writeRgbPixel FbRgb rgbOff _ (r, g, b) = do
+        MV.write (ppuFbRgb ps) rgbOff r
+        MV.write (ppuFbRgb ps) (rgbOff + 1) g
+        MV.write (ppuFbRgb ps) (rgbOff + 2) b
+    writeRgbPixel FbRgba _ rgbaOff (r, g, b) = do
+        MV.write (ppuFbRgba ps) rgbaOff r
+        MV.write (ppuFbRgba ps) (rgbaOff + 1) g
+        MV.write (ppuFbRgba ps) (rgbaOff + 2) b
+        MV.write (ppuFbRgba ps) (rgbaOff + 3) 255
+    writeRgbPixel FbBoth rgbOff rgbaOff (r, g, b) = do
         MV.write (ppuFbRgb ps) rgbOff r
         MV.write (ppuFbRgb ps) (rgbOff + 1) g
         MV.write (ppuFbRgb ps) (rgbOff + 2) b

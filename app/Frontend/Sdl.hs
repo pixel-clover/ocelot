@@ -53,6 +53,7 @@ import qualified Ocelot.Cartridge as Cartridge
 import Ocelot.Cpu.Execute (runUntilFrame)
 import Ocelot.Joypad (Button (..))
 import Ocelot.Machine (Machine (..), machineFromCartridgeWithBoot)
+import qualified Ocelot.Ppu as Ppu
 import qualified Ocelot.Snapshot as Snap
 import SDL (($=))
 import qualified SDL
@@ -135,6 +136,12 @@ data PaceMode
     = PaceVSync
     | PaceSleep
     deriving (Eq, Show)
+
+makeMachine :: Maybe BS.ByteString -> Cartridge -> IO Machine
+makeMachine bootRom cart = do
+    machine <- machineFromCartridgeWithBoot bootRom cart
+    Ppu.setFbTarget Ppu.FbRgb (Bus.busPpu (machineBus machine))
+    pure machine
 
 newHotkeys :: IO Hotkeys
 newHotkeys =
@@ -289,7 +296,7 @@ play romPath cart bootRom title scale = do
     audioDev <- openAudio audioBuf
     audioPlaying <- newIORef True
 
-    machine0 <- machineFromCartridgeWithBoot bootRom cart
+    machine0 <- makeMachine bootRom cart
     machineRef <- newIORef machine0
     hk <- newHotkeys
     ui <- newUiState
@@ -1119,7 +1126,7 @@ handlePending romPath hk ui machineRef cart bootRom = do
     when resetReq $ do
         writeIORef (hkResetReq hk) False
         Cartridge.resetMbc cart
-        machine' <- machineFromCartridgeWithBoot bootRom cart
+        machine' <- makeMachine bootRom cart
         writeIORef machineRef machine'
         putStrLn "reset:    machine rebuilt from cartridge"
         pushToast ui ToastInfo "Machine reset"

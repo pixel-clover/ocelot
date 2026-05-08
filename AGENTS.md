@@ -171,6 +171,8 @@ Reading or writing CPU registers from outside `Ocelot.Cpu` is allowed only for t
     - `framebufferRgbaBytes :: PpuState -> IO ByteString` (used by the web frontend bridge)
 - CGB hookup: `setCgbMode :: Bool -> PpuState -> IO ()` (called by the bus once at startup)
 - CGB render-mode hookup: `setCgbRenderMode :: CgbRenderMode -> PpuState -> IO ()`
+- Framebuffer-target hookup: `setFbTarget :: FbTarget -> PpuState -> IO ()` (call once after `initialPpu`, before the first frame; `FbRgb` skips RGBA
+  writes on the desktop, `FbRgba` skips RGB writes on the web, `FbBoth` is the default and is used by tests)
 - STAT write-edge hookup: `takePendingStatIrq :: PpuState -> IO Bool` (called by the bus after PPU register writes that can raise STAT)
 
 `PpuState` exports its field record so `Bus` can route memory accesses and so `Snapshot` can serialize the IORefs and IOVectors directly. Treat

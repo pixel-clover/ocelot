@@ -969,8 +969,7 @@ function renderAudio() {
     if (sampleCount === 0) return;
     const ptr = e.ocelot_audio_buffer_ptr(emu);
     const samples = new Int16Array(e.memory.buffer, ptr, sampleCount);
-    const chunk = samples.slice();
-    audioNode.port.postMessage(chunk, [chunk.buffer]);
+    audioNode.port.postMessage(samples);
     e.ocelot_clear_audio_buffer(emu);
     if ((++audioFrameCounter % 6) === 0) {
         audioNode.port.postMessage("query-level");

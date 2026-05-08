@@ -205,7 +205,9 @@ ocelot_create ptr len = do
         loaded <- Web.loadSession romBytes
         case loaded of
             Left err -> setLastError (show err) >> pure 0
-            Right session -> insertSession =<< makeHandle session
+            Right session -> do
+                Web.setFbTargetRgba session
+                insertSession =<< makeHandle session
 
 ocelot_destroy :: CInt -> IO ()
 ocelot_destroy sid = do

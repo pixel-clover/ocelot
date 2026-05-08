@@ -21,6 +21,7 @@ module Ocelot.Web (
     loadState,
     extractSaveData,
     loadSaveData,
+    setFbTargetRgba,
     sessionTitle,
     sessionHasBattery,
     sessionIsCgb,
@@ -126,6 +127,14 @@ sessionHasBattery = wsHasBattery
 
 sessionIsCgb :: WebSession -> Bool
 sessionIsCgb session = Bus.isCgb (machineBus (wsMachine session))
+
+{- | Switch the PPU to write only the RGBA framebuffer. Call this once after
+'loadSession' in a host that reads the RGBA buffer exclusively (e.g. the
+WASM frontend), to skip the unused RGB writes each scanline.
+-}
+setFbTargetRgba :: WebSession -> IO ()
+setFbTargetRgba session =
+    Ppu.setFbTarget Ppu.FbRgba (Bus.busPpu (machineBus (wsMachine session)))
 
 framebufferWidth, framebufferHeight :: Int
 framebufferWidth = Ppu.framebufferWidth
