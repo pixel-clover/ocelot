@@ -84,7 +84,9 @@ Do not invent modules that do not yet exist when answering questions, but do pla
       instr_timing, mem_timing, dmg_sound, cgb_sound, oam_bug, halt_bug, and interrupt_time regression coverage. The `.gb`
       files live in the submodule and are read directly.
 - `docs/`: project documentation and Haddock output target (`docs/haskell/`).
-- `Makefile`: developer workflow entry points (`build`, `test`, `lint`, `format`, `format-check`, `coverage`, `doc`, and `repl`).
+- `Makefile`: developer workflow entry points (`build`, `test`, `lint`, `format`, `format-check`, `coverage`, `doc`, `repl`, and `tools`).
+- `tools/`: standalone developer diagnostics built by `make tools` into `bin/tools/` (built `-O2 -rtsopts`, so they are usable for
+  measurement). `bench.hs` is the throughput benchmark; the rest are tracing and state-dump probes.
 - `package.yaml`: hpack source of truth. Do not hand-edit `*.cabal`; let `stack build` regenerate it.
 - `stack.yaml`: resolver pin and packages.
 
@@ -137,17 +139,27 @@ Cross-subsystem read/write coordination, plus M-cycle dispatch.
 
 - `read8 :: Word16 -> Bus -> IO Word8`
 - `write8 :: Word16 -> Word8 -> Bus -> IO ()`
-- `advance :: Int -> Bus -> IO ()` (M-cycles; ticks Timer, PPU, APU, OAM DMA, serial transfer, HDMA HBlank step, and the joypad IRQ edge in
-  lockstep). In CGB double-speed mode the peripherals split two ways, per Pandocs KEY1. The timer/divider, serial port, and OAM DMA are clocked
-  from the CPU clock, so they keep their CPU-relative rate and get the unhalved count. The LCD controller, all sound timings, and HDMA keep
-  their wall-clock rate and get the halved count (odd M-cycles carry over in `busDoubleSpeedAcc`). Halving the timer along with the PPU ran
-  every TAC rate at half speed in double-speed mode and failed blargg `interrupt_time`.
+- `advance :: Int -> Bus -> IO ()` (M-cycles; ticks Timer, PPU, OAM DMA, serial transfer, HDMA HBlank step, and the joypad IRQ edge in
+  lockstep; the APU is deferred, see below). In CGB double-speed mode the peripherals split two ways, per Pandocs KEY1. The timer/divider,
+  serial port, and OAM DMA are clocked from the CPU clock, so they keep their CPU-relative rate and get the unhalved count. The LCD controller,
+  all sound timings, and HDMA keep their wall-clock rate and get the halved count (odd M-cycles carry over in `busDoubleSpeedAcc`). Halving the
+  timer along with the PPU ran every TAC rate at half speed in double-speed mode and failed blargg `interrupt_time`.
 - `drainAudioSamples :: Bus -> IO [Int16]` and `drainAudioSamplesVector :: Bus -> IO (Vector Int16)` (frontend-facing audio drains; prefer the
   vector form in hot paths)
 - `triggerSpeedSwitch :: Bus -> IO Bool` (called from the CPU's `STOP` handler)
 - `resetTimerDiv :: Bus -> IO ()` (also called from the CPU's `STOP` handler; hardware zeroes the divider on `STOP`)
 - `takeStallCycles :: Bus -> IO Int` (drains the CPU-stall debit the bus accrued during the current instruction, currently general-mode HDMA;
   the peripherals are already ticked, so the CPU only folds it into `cpuCycles`)
+- `flushApu :: Bus -> IO ()` and `discardApuDebt :: Bus -> IO ()` (settle or drop deferred APU time; see below)
+
+The APU is the one subsystem `advance` does not tick in lockstep. It accumulates peripheral M-cycles in `busApuDebt` and settles them in a single
+`Apu.advance` at the next point anything can observe APU state. That is sound because the APU raises no interrupt and feeds nothing back into
+the bus, so its only observation channels are its own register window (`0xFF10-0xFF3F`, flushed in `read8`/`write8`), the sample drains, and
+`Apu.dumpState` (flushed in `Snapshot.save`). It is bit-exact because `Apu.advance` chunks to the next event horizon and so never steps past an
+event; `Ocelot.ApuSpec`'s "advance batching equivalence" tests pin that invariant down. `apuDebtHorizon` caps the backlog so a game that never
+touches an APU register cannot grow the debt or the sample queue without bound.
+
+**If you add a new way to observe APU state, flush first.** Reaching `busApu` directly without a `flushApu` reads a stale APU.
 
 Bus is the only place that knows the full address map: it dispatches `0x0000-0x7FFF` and `0xA000-0xBFFF` to the cartridge, the VRAM/OAM windows
 to the PPU, the audio register windows to the APU, IO/HRAM/IE to its own buffers, and the CGB extension registers (VBK, BCPS/BCPD, OCPS/OCPD,
@@ -195,7 +207,9 @@ the surface listed above as the contract; do not call other PpuState fields from
 
 - Register I/O: `read8 :: Word16 -> ApuState -> IO Word8`, `write8 :: Word16 -> Word8 -> ApuState -> IO ()` (covers `0xFF10-0xFF26` and the wave
   RAM at `0xFF30-0xFF3F`)
-- Time advance: `advance :: Int -> ApuState -> IO ()` (queues stereo samples; the bus drains them)
+- Time advance: `advance :: Int -> ApuState -> IO ()` (queues stereo samples; the bus drains them). Batching must stay bit-exact: `advance n` has
+  to produce exactly what `advance 1` repeated @n@ times would, because `Ocelot.Bus` defers APU time and settles it in large chunks. `stepCycles`
+  guarantees this by chunking to the next event horizon. Any change to the chunking must keep `Ocelot.ApuSpec`'s batching-equivalence tests green.
 - Sample drain: `drainSamples :: ApuState -> IO [Int16]` and `drainSamplesVector :: ApuState -> IO (Vector Int16)` (same chronological samples; the
   vector form exists for frontend hot paths)
 - CGB hookup: `setCgbMode :: Bool -> ApuState -> IO ()`
@@ -293,9 +307,15 @@ Additional validation when relevant:
 
 Optimize-mode guidance:
 
-- Default development uses the standard `stack build` (unoptimized, fast rebuilds).
-- Use `make release` (`-O2`) for ROM-backed performance checks or long gameplay runs; do not benchmark unoptimized builds.
-- Keep unoptimized builds for stepping, tracing, and assertion-heavy debugging.
+- `-O2` is already in the library's `ghc-options`, so a plain `stack build` is optimized.
+- Benchmark with `make tools && bin/tools/bench <rom>`, which drives the SDL frontend's per-frame path and reports the multiple of real
+  hardware speed. Take the median of several runs: run-to-run spread is a few percent, comfortably wide enough to hide a small regression.
+- Add `+RTS -s` for allocation and GC figures. GC is not currently a factor (productivity sits near 99.5%); allocation *volume* in the
+  per-M-cycle path is what costs time, so treat bytes-per-M-cycle as the number to drive down.
+- Watch for lazy tuple pattern bindings (`let (a, b) = f x`) in hot paths. They allocate a pair thunk plus a selector thunk per component, and
+  the demand analyser often will not fire when the components are consumed several statements later. Prefer `(!a, !b) <- pure (f x)` in `IO`,
+  or a strict `case`, so the worker/wrapper can unbox the pair. Removing these from `Bus.advance` and the ALU dispatch cut roughly a fifth of
+  total allocation.
 
 ## Testing Expectations
 

@@ -141,10 +141,13 @@ WASM_FLAGS := -f -desktop -f wasm-reactor
 
 tools: $(TOOLS_BINS) $(TOOLS_OUT)/sameboy-trace ## Build the developer diagnostic tools under `tools/` into `bin/tools`
 
+# -O2 matches the library's own ghc-options: `stack ghc` on a standalone file
+# would otherwise default to -O0, which makes `bench` measure the wrong thing.
+# -rtsopts lets the tools take `+RTS -s` for allocation and GC figures.
 $(TOOLS_OUT)/%: tools/%.hs
 	@mkdir -p $(TOOLS_OUT)
 	@echo "Building $@"
-	@$(STACK) ghc --no-haddock-deps -- $< -package ocelot -package containers -o $@ -outputdir $(TOOLS_OUT)/.objs 2>/dev/null
+	@$(STACK) ghc --no-haddock-deps -- $< -O2 -rtsopts -package ocelot -package containers -o $@ -outputdir $(TOOLS_OUT)/.objs 2>/dev/null
 
 # SameBoy differential trace driver. Reuses the Core/*.o objects that
 # `make -C external/SameBoy tester` produces. Flags must match Core's

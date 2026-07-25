@@ -88,6 +88,12 @@ currentVersion = 2
 save :: Machine -> IO ByteString
 save m = do
     let bus = machineBus m
+    -- The bus defers APU stepping (see 'Ocelot.Bus.flushApu'), and
+    -- 'Apu.dumpState' reaches the APU directly rather than through the bus,
+    -- so settle the debt first or the snapshot captures a stale APU. This is
+    -- semantically a no-op: the debt would have been settled at the next
+    -- register touch anyway, and it is zeroed here rather than dropped.
+    Bus.flushApu bus
     cpu <- readIORef (machineCpu m)
     timer <- readIORef (Bus.busTimer bus)
     ppuBytes <- ppuSnapshot (Bus.busPpu bus)
@@ -535,6 +541,10 @@ applySnapshot sd m = do
     writeIORef (Ppu.ppuPrevStatLine ps) (pdPrevStat pd)
     writeIORef (Ppu.ppuPendingStatIrq ps) (pdPendingStat pd)
     writeIORef (Ppu.ppuOpri ps) (pdOpri pd)
+    -- Any debt on the target machine belongs to a timeline we are discarding
+    -- along with the rest of its state, so drop it rather than settling it
+    -- into the freshly restored APU.
+    Bus.discardApuDebt bus
     Apu.loadState (sdApu sd) (Bus.busApu bus)
     writeBytesToVector (bdWram bd) (Bus.busWram bus)
     writeBytesToVector (bdHram bd) (Bus.busHram bus)

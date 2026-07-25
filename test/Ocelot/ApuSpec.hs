@@ -291,6 +291,53 @@ spec = do
             abs mean `shouldSatisfy` (< 328)
             n `shouldSatisfy` (> 0)
 
+    describe "advance batching equivalence" $ do
+        -- 'Ocelot.Bus' defers the APU: it accumulates peripheral M-cycles in
+        -- 'busApuDebt' and settles them in one 'advance' call at the next APU
+        -- register touch or sample drain, instead of stepping 1 M-cycle at a
+        -- time. That is only sound if batching is bit-exact, which holds
+        -- because 'computeChunk' takes the minimum of every channel timer, the
+        -- frame-sequencer timer, and the sample-emission countdown, so a chunk
+        -- can never step past an event. These tests pin that invariant down.
+        it "produces an identical sample stream whatever the batch size" $ do
+            let run stepper = do
+                    apu <- initial
+                    write8 0xFF26 0x80 apu
+                    write8 0xFF24 0x77 apu
+                    write8 0xFF25 0xF3 apu
+                    mapM_
+                        ( \(gap, reg, val) -> do
+                            stepper gap apu
+                            write8 reg val apu
+                        )
+                        (apuScript 1500)
+                    stepper 5000 apu
+                    drainSamplesVector apu
+            oneAtATime <- run (\gap apu -> mapM_ (\_ -> advance 1 apu) [1 .. gap])
+            whole <- run advance
+            capped <- run (chunkedAdvance 64)
+            V.length oneAtATime `shouldSatisfy` (> 10000)
+            whole `shouldBe` oneAtATime
+            capped `shouldBe` oneAtATime
+
+        it "leaves identical register state whatever the batch size" $ do
+            let run stepper = do
+                    apu <- initial
+                    write8 0xFF26 0x80 apu
+                    write8 0xFF24 0x77 apu
+                    write8 0xFF25 0xF3 apu
+                    mapM_
+                        ( \(gap, reg, val) -> do
+                            stepper gap apu
+                            write8 reg val apu
+                        )
+                        (apuScript 1500)
+                    stepper 5000 apu
+                    mapM_ (`read8` apu) [0xFF10 .. 0xFF3F]
+            oneAtATime <- run (\gap apu -> mapM_ (\_ -> advance 1 apu) [1 .. gap])
+            whole <- run advance
+            whole `shouldBe` oneAtATime
+
 freshSquareWaveApu :: IO ApuState
 freshSquareWaveApu = do
     apu <- initial
@@ -371,3 +418,33 @@ nrReadMasks =
     , (0xFF24, 0x00) -- NR50
     , (0xFF25, 0x00) -- NR51
     ]
+
+{- | Advance in fixed-size chunks, modelling the bus's debt horizon: never
+more than @cap@ M-cycles settle in a single 'advance' call.
+-}
+chunkedAdvance :: Int -> Int -> ApuState -> IO ()
+chunkedAdvance cap = go
+  where
+    go remaining apu
+        | remaining <= 0 = pure ()
+        | otherwise = do
+            let k = min cap remaining
+            advance k apu
+            go (remaining - k) apu
+
+{- | A deterministic pseudo-random script of @(gap in M-cycles, register,
+value)@ triples covering the whole @0xFF10-0xFF3F@ window. Hand-rolled LCG
+rather than QuickCheck so the two runs under comparison see byte-identical
+input without needing a shared generator.
+-}
+apuScript :: Int -> [(Int, Word16, Word8)]
+apuScript n = take n (go 12345)
+  where
+    go s =
+        let s1 = (s * 1103515245 + 12345) `mod` 2147483648
+            s2 = (s1 * 1103515245 + 12345) `mod` 2147483648
+            s3 = (s2 * 1103515245 + 12345) `mod` 2147483648
+            gap = 1 + (s1 `mod` 400)
+            reg = fromIntegral (0xFF10 + (s2 `mod` 0x30))
+            val = fromIntegral (s3 `mod` 256)
+         in (gap, reg, val) : go s3
