@@ -221,13 +221,15 @@ ocelot_destroy sid = do
 ocelot_run_frame :: CInt -> IO CInt
 ocelot_run_frame sid = do
     result <- withSession sid $ \handle -> do
-        runResult <- try (Web.runFrame (shSession handle)) :: IO (Either SomeException ())
+        -- The audio drain is inside the 'try': an exception escaping a foreign
+        -- export becomes an opaque WASM trap on the JS side, with none of the
+        -- 'ocelot_last_error' detail the host reports to the user.
+        runResult <-
+            try (Web.runFrame (shSession handle) >> drainAudioIntoHandle handle) ::
+                IO (Either SomeException ())
         case runResult of
             Left err -> setLastError (displayException err) >> pure 0
-            Right () -> do
-                drainAudioIntoHandle handle
-                clearLastError
-                pure 1
+            Right () -> clearLastError >> pure 1
     pure (fromMaybe 0 result)
 
 ocelot_set_button :: CInt -> CInt -> CInt -> IO ()

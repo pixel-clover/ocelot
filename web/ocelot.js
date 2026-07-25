@@ -106,27 +106,54 @@ const AXIS_THRESHOLD = 0.5;
 
 // ─── Worker command helpers ───────────────────────────────────────────────────
 
+/* Longest a Worker command may go unanswered before we give up on it.
+
+Every command is a handful of WASM calls, so this only ever fires when the
+Worker has died or wedged. Without it a lost reply leaves the promise pending
+forever, and callers that guard on an in-flight promise (see
+'saveBatteryIfNeeded') then wedge permanently too. If a late reply does turn
+up, 'resolveCmd' simply finds no entry and drops it. */
+const WORKER_CMD_TIMEOUT_MS = 20000;
+
 function workerCmd(msg, transfer = []) {
     return new Promise((resolve, reject) => {
         const id = ++cmdSeq;
-        pendingCmds.set(id, {resolve, reject});
+        const timer = setTimeout(() => {
+            if (pendingCmds.delete(id)) {
+                reject(new Error(`Worker did not respond to "${msg.type}"`));
+            }
+        }, WORKER_CMD_TIMEOUT_MS);
+        pendingCmds.set(id, {resolve, reject, timer});
         worker.postMessage({...msg, id}, transfer);
     });
 }
 
-function resolveCmd(id, value) {
+function takePendingCmd(id) {
     const pending = pendingCmds.get(id);
-    if (pending) {
-        pendingCmds.delete(id);
-        pending.resolve(value);
-    }
+    if (!pending) return null;
+    pendingCmds.delete(id);
+    clearTimeout(pending.timer);
+    return pending;
+}
+
+function resolveCmd(id, value) {
+    const pending = takePendingCmd(id);
+    if (pending) pending.resolve(value);
 }
 
 function rejectCmd(id, message) {
-    const pending = pendingCmds.get(id);
-    if (pending) {
-        pendingCmds.delete(id);
-        pending.reject(new Error(message));
+    const pending = takePendingCmd(id);
+    if (pending) pending.reject(new Error(message));
+}
+
+// Fail every outstanding command at once. Used when the Worker itself dies, so
+// awaiting callers unwind instead of hanging.
+function rejectAllPendingCmds(message) {
+    const pending = Array.from(pendingCmds.values());
+    pendingCmds.clear();
+    for (const entry of pending) {
+        clearTimeout(entry.timer);
+        entry.reject(new Error(message));
     }
 }
 
@@ -146,6 +173,11 @@ async function init() {
     worker.onerror = (err) => {
         showError(`Worker error: ${err.message || "unknown"}`);
         console.error("Worker error", err);
+        rejectAllPendingCmds(err.message || "Worker error");
+    };
+    worker.onmessageerror = (err) => {
+        console.error("Worker message error", err);
+        rejectAllPendingCmds("Worker message could not be deserialized");
     };
 
     // Wait for 'ready' before wiring up the rest
@@ -719,6 +751,15 @@ function dbGet(storeName, key) {
     });
 }
 
+function dbDelete(storeName, key) {
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, "readwrite");
+        tx.objectStore(storeName).delete(key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
 async function sha256Hex(bytes) {
     const webCrypto = globalThis.crypto;
     if (!webCrypto || !webCrypto.subtle) throw new Error("WebCrypto SHA-256 is unavailable");
@@ -726,8 +767,42 @@ async function sha256Hex(bytes) {
     return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("");
 }
 
-function romStorageKey(hash) {
-    return `sha256:${hash}`;
+// Two FNV-1a variants over one pass, plus the length. Not cryptographic, and it
+// does not need to be: this only has to tell one ROM in a personal library from
+// another, stably across sessions.
+function fnv1aHex(bytes) {
+    let h1 = 0x811c9dc5 >>> 0;
+    let h2 = 0x01000193 >>> 0;
+    for (let i = 0; i < bytes.length; i++) {
+        const b = bytes[i];
+        h1 = Math.imul(h1 ^ b, 0x01000193) >>> 0;
+        h2 = Math.imul(h2 ^ b, 0x85ebca6b) >>> 0;
+    }
+    return [
+        bytes.length.toString(16).padStart(8, "0"),
+        h1.toString(16).padStart(8, "0"),
+        h2.toString(16).padStart(8, "0"),
+    ].join("");
+}
+
+/* Stable per-ROM storage key.
+
+`crypto.subtle` exists only in secure contexts, so a self-hosted build served
+over plain HTTP from anything but localhost does not have it. This used to
+throw before the ROM ever reached the Worker, which made the emulator refuse
+to load anything at all rather than merely losing persistence. Fall back to a
+non-cryptographic digest there. The prefix records which one produced the key,
+so existing `sha256:` entries keep resolving. */
+async function romIdentity(bytes) {
+    const webCrypto = globalThis.crypto;
+    if (webCrypto && webCrypto.subtle) {
+        try {
+            return `sha256:${await sha256Hex(bytes)}`;
+        } catch (err) {
+            console.warn("SHA-256 unavailable; falling back to FNV-1a ROM key", err);
+        }
+    }
+    return `fnv1a:${fnv1aHex(bytes)}`;
 }
 
 async function saveRecentRom(key, name, bytes) {
@@ -933,8 +1008,7 @@ async function loadRom(file) {
         file = await decompressIfNeeded(file);
         const buffer = await file.arrayBuffer();
         const romBytes = new Uint8Array(buffer);
-        const romHash = await sha256Hex(romBytes);
-        const romKey = romStorageKey(romHash);
+        const romKey = await romIdentity(romBytes);
         // Snapshot bytes for IndexedDB before transferring the buffer to the Worker
         const romBytesForDb = romBytes.slice();
 
@@ -1112,11 +1186,36 @@ async function persistentSave() {
         return;
     }
     try {
-        await dbPut("states", `${currentRomKey}:slot${currentSlot}`, new Uint8Array(stateBuffer));
+        // Tag the blob with the snapshot format version that produced it. The
+        // core rejects a blob from an older format outright, so without the tag
+        // a stale slot fails at load time with a raw "UnsupportedVersion N" and
+        // then sits in IndexedDB forever with no way to clear it.
+        await dbPut("states", stateSlotKey(currentRomKey, currentSlot), {
+            version: cachedSnapshotVersion,
+            bytes: new Uint8Array(stateBuffer),
+        });
         showToast(`Saved to slot ${currentSlot}`);
     } catch (err) {
         disableStorage(STORAGE_DISABLED_MESSAGE, err);
     }
+}
+
+function stateSlotKey(romKey, slot) {
+    return `${romKey}:slot${slot}`;
+}
+
+/* Coerce whatever is in the "states" store into `{version, bytes}`.
+
+Records written before save states carried a version tag are bare `Uint8Array`
+or `ArrayBuffer` values; report them as version 0 so they never match a real
+snapshot version and get discarded on the next load attempt. */
+function normalizeStateRecord(data) {
+    if (data instanceof Uint8Array) return {version: 0, bytes: data};
+    if (data instanceof ArrayBuffer) return {version: 0, bytes: new Uint8Array(data)};
+    const bytes = data.bytes instanceof Uint8Array
+        ? data.bytes
+        : new Uint8Array(data.bytes);
+    return {version: data.version | 0, bytes};
 }
 
 async function persistentLoad() {
@@ -1132,9 +1231,10 @@ async function persistentLoad() {
         showToast("ROM identity unavailable");
         return;
     }
+    const slotKey = stateSlotKey(currentRomKey, currentSlot);
     let data;
     try {
-        data = await dbGet("states", `${currentRomKey}:slot${currentSlot}`);
+        data = await dbGet("states", slotKey);
     } catch (err) {
         disableStorage(STORAGE_DISABLED_MESSAGE, err);
         return;
@@ -1143,9 +1243,23 @@ async function persistentLoad() {
         showToast(`No save in slot ${currentSlot}`);
         return;
     }
-    const buf = data instanceof Uint8Array
-        ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
-        : data;
+    const record = normalizeStateRecord(data);
+    if (record.version !== cachedSnapshotVersion) {
+        // An untagged or older-format blob cannot be loaded by this build.
+        // Say so in plain language and drop it, rather than surfacing the
+        // core's "UnsupportedVersion N" and leaving the slot permanently stuck.
+        try {
+            await dbDelete("states", slotKey);
+        } catch (err) {
+            console.warn("Could not discard outdated save state", err);
+        }
+        showToast(`Slot ${currentSlot} was saved by an older version; discarded`);
+        return;
+    }
+    const buf = record.bytes.buffer.slice(
+        record.bytes.byteOffset,
+        record.bytes.byteOffset + record.bytes.byteLength,
+    );
     try {
         await workerCmd({type: "loadState", buffer: buf}, [buf]);
         showToast(`Loaded slot ${currentSlot}`);

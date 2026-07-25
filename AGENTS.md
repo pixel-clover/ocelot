@@ -190,13 +190,14 @@ Reading or writing CPU registers from outside `Ocelot.Cpu` is allowed only for t
     - `framebufferRgbBytes :: PpuState -> IO ByteString`
     - `copyFramebufferRgba :: Ptr Word8 -> PpuState -> IO ()` (single `memcpy` from the storable RGBA buffer; used by tests and non-WASM callers)
     - `framebufferRgbaBytes :: PpuState -> IO ByteString`
-    - `framebufferRgbaPtr :: PpuState -> Ptr Word8` (stable pointer directly into the RGBA buffer's C-heap backing store; valid for the lifetime of
+    - `framebufferRgbaPtr :: PpuState -> Ptr Word8` (stable pointer directly into the RGBA buffer's pinned backing store; valid for the lifetime of
       the `PpuState`; the WASM host uses this to give JS a zero-copy view — no per-frame copy needed)
 - CGB hookup: `setCgbMode :: Bool -> PpuState -> IO ()` (called by the bus once at startup)
 - CGB render-mode hookup: `setCgbRenderMode :: CgbRenderMode -> PpuState -> IO ()`
 - Framebuffer-target hookup: `setFbTarget :: FbTarget -> PpuState -> IO ()` (call once after `initialPpu`, before the first frame; `FbRgb` skips RGBA
   writes on the desktop, `FbRgba` skips RGB writes on the web, `FbBoth` is the default and is used by tests)
-- `ppuFbRgba` is backed by `Data.Vector.Storable.Mutable.IOVector` (C-heap, pinned) rather than the GHC-heap unboxed `IOVector` used by all other
+- `ppuFbRgba` is backed by `Data.Vector.Storable.Mutable.IOVector`, which allocates a *pinned* buffer (`mallocPlainForeignPtrBytes`) rather than the
+  movable GHC-heap unboxed `IOVector` used by all other
   framebuffers. This is what makes `framebufferRgbaPtr` safe to call without a copy: the memory never moves. Do not change this to an unboxed vector.
 - STAT write-edge hookup: `takePendingStatIrq :: PpuState -> IO Bool` (called by the bus after PPU register writes that can raise STAT)
 

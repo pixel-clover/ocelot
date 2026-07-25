@@ -137,7 +137,7 @@ data PpuState = PpuState
     -- BG palette RAM for the BG layer and OBP0\/OBP1 for sprites.
     , ppuFbRgba :: !(VSM.IOVector Word8)
     -- ^ RGBA8888 color framebuffer (160 * 144 * 4 bytes). Backed by a
-    -- storable (C-heap) vector so that 'framebufferRgbaPtr' can return a
+    -- storable (pinned) vector so that 'framebufferRgbaPtr' can return a
     -- stable 'Ptr' directly into this buffer — eliminating the copy that
     -- the web WASM frontend would otherwise need every frame.
     , ppuFbTarget :: !(IORef FbTarget)
@@ -323,7 +323,7 @@ copyFramebufferRgba dst ps =
 
 {- | Return a stable 'Ptr' directly into the RGBA framebuffer. The pointer
 is valid for the lifetime of the 'PpuState' because 'ppuFbRgba' is backed by
-a C-heap storable vector that never moves. Use only where the 'PpuState'
+a pinned storable vector that never moves. Use only where the 'PpuState'
 outlives the pointer (e.g. a WASM session that holds the machine alive).
 -}
 framebufferRgbaPtr :: PpuState -> Ptr Word8
