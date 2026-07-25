@@ -115,7 +115,10 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Frontend window with LCD framebuffer rendering (SDL2 RGB upload via a reusable staging buffer; terminal --headless mode also kept)
 - [x] Integer scaling for SDL frontend (`--scale N`, 1–5; default 4) and web frontend (Auto/1×/2×/3×/4× in settings panel)
 - [x] Audio output via SDL audio device with a callback-drained ring buffer
-- [x] Desktop vsync-first renderer creation with sleep-based pacing fallback
+- [x] Desktop vsync-first renderer creation with sleep-based pacing fallback, overridable with `ocelot play --no-vsync`
+- [x] Emulation paced off the monotonic clock rather than the display refresh, so the Game Boy holds 59.7275 Hz on any monitor. Presenting
+  used to drive emulation one frame per `SDL.present`, which under vsync ran games and audio at the panel's refresh rate: correct at 60 Hz,
+  1.67x too fast at 100 Hz. A high-refresh display now just repeats some presented frames.
 - [x] Performance overlay with FPS and renderer pacing mode
 - [x] In-memory snapshot save and load (`Ocelot.Snapshot.save`/`load`) with versioned binary format
 - [x] Persistent save states: F5 saves, F7 loads; 5 slots (1-5) cycled with F6; files written to `<romdir>/<romstem>/slot<n>.state`
@@ -168,8 +171,7 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Blargg cgb_sound wired in (12 sub-ROMs available, aspirational; 10 currently pass: 01-registers, 02-len ctr, 03-trigger, 04-sweep, 05-sweep
   details, 06-overflow on trigger, 08-len ctr during power, 10-wave trigger while on, 11-regs after power, 12-wave)
 - [x] Blargg oam_bug wired in (8 sub-ROMs, aspirational; ~2 currently pass: 3-non_causes, 6-timing_no_bug)
-- [x] Blargg halt_bug, interrupt_time wired in (aspirational; interrupt_time passes since the timer stopped being halved in CGB double-speed
-  mode, halt_bug still reports error code 0xFF)
+- [x] Blargg halt_bug and interrupt_time both pass (interrupt_time started passing once the timer stopped being halved in CGB double-speed mode)
 - [ ] Promote aspirational blargg ROMs to strict run-to-pass as accuracy is added
 - [x] Mooneye magic-breakpoint runner in `GoldenSpec.hs`: observes BCDEHL after each chunk for the Fibonacci pass tuple or all-`0x42` failure tuple
 - [x] Mooneye prebuilt-ZIP fetcher (`make mooneye-roms`) downloads gekkio.fi's binaries to `test/testroms/mooneye/`

@@ -53,6 +53,7 @@ data PlayOpts = PlayOpts
     { playRomPath :: !(Maybe FilePath)
     , playBootRom :: !(Maybe FilePath)
     , playScale :: !Int
+    , playNoVsync :: !Bool
     }
 
 main :: IO ()
@@ -158,6 +159,14 @@ playOptsParser =
                 <> showDefault
                 <> help "Integer display scale factor (1–5). Window is 160N × 144N pixels."
             )
+        <*> switch
+            ( long "no-vsync"
+                <> help
+                    ( "Create the renderer without vsync. Emulation is paced off "
+                        <> "the monotonic clock either way, so this only affects "
+                        <> "tearing; use it if vsync adds latency on your display."
+                    )
+            )
 
 infoRom :: FilePath -> IO ()
 infoRom path = do
@@ -192,7 +201,7 @@ loadAndPlay opts path = do
                         battery = cartridgeHasBattery cart
                     when battery (loadSaveIfExists savePath cart)
                     openNew <-
-                        Sdl.play path cart bootBytes (hdrTitle hdr) (playScale opts)
+                        Sdl.play path cart bootBytes (hdrTitle hdr) (playScale opts) (not (playNoVsync opts))
                             `finally` when battery (writeSave savePath cart)
                     when openNew $ do
                         mPath' <- Sdl.startupScreen (playScale opts)

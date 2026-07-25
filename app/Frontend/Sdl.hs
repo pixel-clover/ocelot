@@ -19,6 +19,11 @@ module Frontend.Sdl (
     play,
     startupScreen,
     audioTest,
+
+    -- * Frame pacing (exposed for testing)
+    scheduleFrames,
+    maxCatchUpFrames,
+    frameNs,
 ) where
 
 import Codec.Picture (Image, PaletteCreationMethod (..), PaletteOptions (..), PixelRGB8 (..), generateImage, palettize)
@@ -185,6 +190,12 @@ data UiState = UiState
     -- ^ Nothing = not recording; Just frames = recording (newest frame first).
     , uiGifFrameCount :: !(IORef Int)
     -- ^ Number of frames currently in uiGifFrames. Kept in sync to avoid O(n) length checks.
+    , uiNextFrameDue :: !(IORef Word64)
+    -- ^ Monotonic timestamp in ns at which the next emulated frame is due.
+    -- Emulation is scheduled against this rather than against the display's
+    -- refresh, so the Game Boy still runs at 59.7275 Hz on a monitor that
+    -- refreshes at some other rate. 0 means "unscheduled": the next iteration
+    -- resyncs it to the current time.
     }
 
 newUiState :: IO UiState
@@ -198,6 +209,7 @@ newUiState =
         <*> newIORef Seq.empty
         <*> newIORef 0
         <*> newIORef Nothing
+        <*> newIORef 0
         <*> newIORef 0
 
 recordPresentedFrame :: UiState -> IO Word64
@@ -256,8 +268,8 @@ romDir romPath = takeDirectory romPath </> takeBaseName romPath
 slotPath :: FilePath -> Int -> FilePath
 slotPath romPath slot = romDir romPath </> ("slot" <> show slot <> ".state")
 
-play :: FilePath -> Cartridge -> Maybe BS.ByteString -> Text -> Int -> IO Bool
-play romPath cart bootRom title scale = do
+play :: FilePath -> Cartridge -> Maybe BS.ByteString -> Text -> Int -> Bool -> IO Bool
+play romPath cart bootRom title scale preferVSync = do
     addRecentRom romPath
     let titleStr
             | T.null title = fallbackTitle romPath
@@ -284,7 +296,7 @@ play romPath cart bootRom title scale = do
                     SDL.V2 (fromIntegral winW) (fromIntegral winH)
                 , SDL.windowResizable = True
                 }
-    (renderer, paceMode) <- createRendererWithPacing window
+    (renderer, paceMode) <- createRendererWithPacing preferVSync window
     SDL.rendererDrawBlendMode renderer $= SDL.BlendAlphaBlend
     texture <-
         SDL.createTexture
@@ -429,21 +441,38 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode au
         fast <- readIORef (hkFastFwd hk)
         stepOnce <- readIORef (hkFrameStepReq hk)
         when stepOnce (writeIORef (hkFrameStepReq hk) False)
-        let frames = if fast then 4 else 1 :: Int
+        let speedMultiplier = if fast then 4 else 1 :: Word64
             shouldRun = (not paused && not helpVisible) || (stepOnce && paused && not helpVisible)
             audioShouldPlay = not paused && not helpVisible
 
         syncAudioPlayback audioDev audioPlaying audioBuf audioShouldPlay
 
         frameStartNs <- getMonotonicTimeNSec
-        when shouldRun $ do
+        -- Fast-forward shortens the emulated frame period rather than running a
+        -- fixed burst per present, so it stays a clean multiple of real speed
+        -- whatever the display is doing.
+        let periodNs = frameNs `div` speedMultiplier
+        dueFrames <-
+            if shouldRun
+                then
+                    if stepOnce
+                        then do
+                            -- A single-step is an explicit request, not a
+                            -- scheduled frame; do not let it disturb the clock.
+                            resetFrameSchedule (uiNextFrameDue ui) periodNs frameStartNs
+                            pure 1
+                        else takeDueFrames (uiNextFrameDue ui) periodNs frameStartNs
+                else do
+                    resetFrameSchedule (uiNextFrameDue ui) periodNs frameStartNs
+                    pure 0
+        when (dueFrames > 0) $ do
             mapM_
                 ( \_ -> do
                     frameCycles <- Bus.cpuMCyclesPerLcdFrame (machineBus machine')
                     _ <- runUntilFrame (frameCycles + 32) machine'
                     pure ()
                 )
-                [1 .. frames]
+                [1 .. dueFrames]
 
             samples <- Bus.drainAudioSamplesVector (machineBus machine')
             unless (V.null samples) $ appendAudioSamples audioBuf samples
@@ -490,15 +519,19 @@ loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode au
                             writeIORef (uiGifFrameCount ui) (n + 1)
             _ -> pure ()
 
-        unless fast (paceFrame paceMode frameStartNs)
+        paceFrame paceMode (uiNextFrameDue ui)
 
-        when shouldRun $ do
+        when (dueFrames > 0) $ do
             -- Record after pacing so consecutive timestamps span the full frame
             -- (computation + sleep), giving an accurate FPS/frame-time reading.
+            -- One sample per emulated frame, so the overlay reports emulated
+            -- FPS (~59.7 when keeping up) rather than the present rate.
             frameEndNs <- getMonotonicTimeNSec
             modifyIORef' (uiFrameTimes ui) $ \ts ->
-                let ts' = ts Seq.|> frameEndNs
-                 in if Seq.length ts' > maxFrameTimeHistory then Seq.drop 1 ts' else ts'
+                let ts' = ts Seq.>< Seq.replicate dueFrames frameEndNs
+                 in if Seq.length ts' > maxFrameTimeHistory
+                        then Seq.drop (Seq.length ts' - maxFrameTimeHistory) ts'
+                        else ts'
         loop romPath titleStr hk ui machineRef cart bootRom renderer texture paceMode audioDev audioPlaying audioBuf window
 
 gatherEvents :: Bool -> Word64 -> Maybe Word64 -> IO [SDL.Event]
@@ -583,19 +616,97 @@ syncAudioPlayback audioDev audioPlaying audioBuf shouldPlay = do
                 SDL.setAudioDevicePlaybackState audioDev SDL.Pause
         writeIORef audioPlaying shouldPlay
 
-paceFrame :: PaceMode -> Word64 -> IO ()
-paceFrame PaceVSync _ = pure ()
-paceFrame PaceSleep frameStartNs = do
-    now <- getMonotonicTimeNSec
-    let elapsedNs = now - frameStartNs
-    when (elapsedNs < frameNs) $
-        threadDelay
-            ( fromIntegral $
-                (frameNs - elapsedNs + 999) `div` 1000
-            )
+{- | Most emulated frames to run in a single iteration when catching up.
 
-createRendererWithPacing :: SDL.Window -> IO (SDL.Renderer, PaceMode)
-createRendererWithPacing window = do
+Bounds the work one slow iteration can pile onto the next, so a stall (window
+drag, breakpoint, disk hitch) cannot spiral into an ever-growing backlog.
+
+Has to clear the highest legitimate frames-per-present, or normal operation
+would keep hitting the cap and silently run slow. The worst case is 4x
+fast-forward on a 60 Hz display, which needs exactly 4; 8 leaves headroom for
+jitter while still capping a single iteration at ~134 ms of emulation.
+-}
+maxCatchUpFrames :: Int
+maxCatchUpFrames = 8
+
+{- | How many emulated frames are due by @now@, advancing the schedule past them.
+
+Emulation is scheduled on the monotonic clock, not on the display's refresh.
+Presenting used to drive it: the loop ran exactly one emulated frame per
+'SDL.present', and under vsync 'paceFrame' did nothing, so the Game Boy ran at
+whatever rate the monitor refreshed. That is invisible at 60 Hz (0.46 % fast)
+and badly wrong anywhere else — a 100 Hz panel ran games and audio 1.67x too
+fast. Now a 100 Hz panel simply presents some frames twice.
+
+Falling more than 'maxCatchUpFrames' behind abandons the backlog and restarts
+the schedule from @now@; running at reduced speed beats accumulating a debt the
+host cannot pay off.
+-}
+takeDueFrames :: IORef Word64 -> Word64 -> Word64 -> IO Int
+takeDueFrames dueRef periodNs now = do
+    due <- readIORef dueRef
+    let (!due', !n) = scheduleFrames due periodNs now
+    writeIORef dueRef due'
+    pure n
+
+{- | The scheduling decision behind 'takeDueFrames', as a pure function of
+@(current due time, frame period, now)@ returning @(next due time, frames to
+run)@. All times are monotonic nanoseconds.
+
+Exported so it can be tested directly: getting this wrong is silently wrong
+(games run at the wrong speed) rather than loudly wrong.
+
+* @due == 0@ means unscheduled: run one frame and arm the clock.
+* A @now@ far enough before @due@ to be implausible means the clock moved
+  backwards; re-arm rather than stalling until it catches up.
+* Otherwise emit one frame per elapsed period, capped by 'maxCatchUpFrames'.
+-}
+scheduleFrames :: Word64 -> Word64 -> Word64 -> (Word64, Int)
+scheduleFrames due periodNs now
+    | periodNs == 0 = (now, 1)
+    | due == 0 = (now + periodNs, 1)
+    | now + periodNs < due = (now + periodNs, 0)
+    | now < due = (due, 0)
+    | n > maxCatchUpFrames = (now + periodNs, maxCatchUpFrames)
+    | otherwise = (due + fromIntegral n * periodNs, n)
+  where
+    n = fromIntegral ((now - due) `div` periodNs) + 1
+
+{- | Drop any accumulated backlog and re-arm the schedule one period out.
+Called whenever emulation is not advancing (paused, help overlay up, frame
+step) so time spent stopped is not "caught up" on resume.
+-}
+resetFrameSchedule :: IORef Word64 -> Word64 -> Word64 -> IO ()
+resetFrameSchedule dueRef periodNs now = writeIORef dueRef (now + periodNs)
+
+{- | Block until the next emulated frame is due.
+
+Only used when the renderer is not vsynced; with vsync, 'SDL.present' already
+blocks on the display. The 'minSpinGuardNs' floor keeps the loop from busy
+spinning if a driver accepts a vsync renderer but does not actually throttle
+it — a real vsync blocks for at least 4 ms even on a 240 Hz panel.
+-}
+paceFrame :: PaceMode -> IORef Word64 -> IO ()
+paceFrame PaceVSync dueRef = do
+    now <- getMonotonicTimeNSec
+    due <- readIORef dueRef
+    when (due > now && due - now > minSpinGuardNs) (threadDelay 1000)
+paceFrame PaceSleep dueRef = do
+    now <- getMonotonicTimeNSec
+    due <- readIORef dueRef
+    when (due > now) $
+        threadDelay (fromIntegral ((due - now + 999) `div` 1000))
+
+-- | See 'paceFrame'. Shorter than any real vsync interval.
+minSpinGuardNs :: Word64
+minSpinGuardNs = 2000000
+
+{- | Create the renderer, preferring a vsynced one unless the caller opted out
+(@--no-vsync@). Vsync only controls tearing now; the emulation rate is set by
+'takeDueFrames' either way.
+-}
+createRendererWithPacing :: Bool -> SDL.Window -> IO (SDL.Renderer, PaceMode)
+createRendererWithPacing preferVSync window = do
     let vsyncConfig =
             SDL.defaultRenderer
                 { SDL.rendererType = SDL.AcceleratedVSyncRenderer
@@ -604,12 +715,18 @@ createRendererWithPacing window = do
             SDL.defaultRenderer
                 { SDL.rendererType = SDL.AcceleratedRenderer
                 }
-    vsyncAttempt <- try (SDL.createRenderer window (-1) vsyncConfig) :: IO (Either SDL.SDLException SDL.Renderer)
-    case vsyncAttempt of
-        Right renderer -> pure (renderer, PaceVSync)
-        Left _ -> do
+        makeFallback = do
             renderer <- SDL.createRenderer window (-1) fallbackConfig
             pure (renderer, PaceSleep)
+    if not preferVSync
+        then makeFallback
+        else do
+            vsyncAttempt <-
+                try (SDL.createRenderer window (-1) vsyncConfig) ::
+                    IO (Either SDL.SDLException SDL.Renderer)
+            case vsyncAttempt of
+                Right renderer -> pure (renderer, PaceVSync)
+                Left _ -> makeFallback
 
 panelPrimary, panelSecondary, panelOverlay, accentOrange, accentBlue :: SDL.V4 Word8
 -- DMG-inspired backgrounds: near-black forest green, like the DMG screen surround.
@@ -1366,7 +1483,7 @@ startupScreen scale = do
                 { SDL.windowInitialSize = SDL.V2 (fromIntegral winW0) (fromIntegral winH0)
                 , SDL.windowResizable = True
                 }
-    (renderer, paceMode) <- createRendererWithPacing window
+    (renderer, paceMode) <- createRendererWithPacing True window
     SDL.rendererDrawBlendMode renderer $= SDL.BlendAlphaBlend
     selRef <- newIORef (0 :: Int)
     waitRef <- newIORef False

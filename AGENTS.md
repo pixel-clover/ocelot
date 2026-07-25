@@ -86,7 +86,8 @@ Do not invent modules that do not yet exist when answering questions, but do pla
 - `docs/`: project documentation and Haddock output target (`docs/haskell/`).
 - `Makefile`: developer workflow entry points (`build`, `test`, `lint`, `format`, `format-check`, `coverage`, `doc`, `repl`, and `tools`).
 - `tools/`: standalone developer diagnostics built by `make tools` into `bin/tools/` (built `-O2 -rtsopts`, so they are usable for
-  measurement). `bench.hs` is the throughput benchmark; the rest are tracing and state-dump probes.
+  measurement). `bench.hs` is the throughput benchmark; `ocelot-trace.hs` pairs with `sameboy-trace.c` as a differential tracer against
+  SameBoy; the rest are state-dump probes. See `tools/README.md`.
 - `package.yaml`: hpack source of truth. Do not hand-edit `*.cabal`; let `stack build` regenerate it.
 - `stack.yaml`: resolver pin and packages.
 
@@ -298,6 +299,10 @@ Implement using red-green TDD:
 5. Run the narrowest relevant spec while iterating, then `make test` and `make lint` before declaring done.
 6. Run `make format` (or `make format-check` in CI).
 7. Update docs (`README.md`, `docs/`, Haddock on the public facade) if behavior or workflow changed.
+
+Differential tracing: when a ROM fails and the verdict alone does not say why, diff Ocelot against SameBoy instruction by instruction.
+`make tools sameboy-trace` builds both halves; `tools/README.md` has the workflow. It needs the `external/SameBoy` submodule. Nothing in
+`test/` runs this — it is a manual bisection aid.
 
 Additional validation when relevant:
 
