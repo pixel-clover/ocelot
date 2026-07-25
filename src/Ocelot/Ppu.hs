@@ -21,8 +21,13 @@ window (LY-WY approximation); sprites with the DMG sort-by-X priority,
 8x8 / 8x16 sizes, X/Y flip, OBP0/OBP1, and BG-priority bit; BGP/OBP palette
 transforms; VBlank interrupt edge; LCD-off freeze.
 
-Not implemented: STAT-source interrupts, mode-3 timing variability, the
-proper window line counter, the OAM DMA delay (the bus copies instantly).
+Mode 3 is variable-length: 'mode3Length' adds the @SCX mod 8@ fine-scroll
+discard and the window-activation restart to the 172-dot base, and mode 0
+absorbs the difference so the scanline stays 456 dots.
+
+Not implemented: the per-object fetcher stall (so lines with sprites report
+their sprite-free mode 3 length), and the OAM DMA delay (the bus copies
+instantly).
 -}
 module Ocelot.Ppu (
     PpuState (..),
@@ -47,6 +52,7 @@ module Ocelot.Ppu (
     FbTarget (..),
     setFbTarget,
     takePendingStatIrq,
+    resyncMode3End,
 ) where
 
 import Control.Monad (unless, when)
@@ -115,6 +121,14 @@ data PpuState = PpuState
     , ppuObp1 :: !(IORef Word8)
     , ppuMode :: !(IORef PpuMode)
     , ppuDot :: !(IORef Int)
+    , ppuMode3End :: !(IORef Int)
+    -- ^ Dot at which mode 3 ends on the line currently being drawn, latched
+    -- when the PPU leaves OAM scan. Mode 3 is not a fixed 172 dots: the
+    -- fetcher throws away @SCX mod 8@ pixels at the left edge, activating the
+    -- window restarts it, and each object stalls it. Mode 0 absorbs whatever
+    -- mode 3 takes, so the scanline stays 456 dots either way. Derived state,
+    -- recomputed every line; 'resyncMode3End' rebuilds it after a snapshot
+    -- load so the restored line does not use the previous machine's value.
     , ppuWindowLine :: !(IORef Int)
     -- ^ Internal window-line counter (\"WLY\"). Reset to 0 at the start
     -- of each frame and on LCD-off; increments by 1 only on lines where
@@ -208,6 +222,7 @@ initialPpu = do
     obp1 <- newIORef 0x00
     mode <- newIORef ModeOamScan
     dot <- newIORef 0
+    mode3End <- newIORef (oamScanDots + mode3BaseDots)
     windowLine <- newIORef 0
     vram <- MV.replicate 0x4000 0
     oam <- MV.replicate 0xA0 0
@@ -248,6 +263,7 @@ initialPpu = do
             , ppuObp1 = obp1
             , ppuMode = mode
             , ppuDot = dot
+            , ppuMode3End = mode3End
             , ppuWindowLine = windowLine
             , ppuVram = vram
             , ppuOam = oam
@@ -537,8 +553,8 @@ stepDots 0 _ !flags = pure flags
 stepDots !n !ps !flags = do
     mode <- readIORef (ppuMode ps)
     dot <- readIORef (ppuDot ps)
-    let !next = nextBoundary mode
-        !toNext = next - dot
+    !next <- boundaryFor mode ps
+    let !toNext = next - dot
         !consume = min n toNext
         !dot' = dot + consume
     if dot' < next
@@ -549,11 +565,79 @@ stepDots !n !ps !flags = do
             !newFlags <- transition mode ps
             stepDots (n - consume) ps (flags .|. newFlags)
 
-nextBoundary :: PpuMode -> Int
-nextBoundary ModeOamScan = 80
-nextBoundary ModeDrawing = 252
-nextBoundary ModeHBlank = 456
-nextBoundary ModeVBlank = 456
+-- | Dots of OAM scan (mode 2) at the head of every visible scanline.
+oamScanDots :: Int
+oamScanDots = 80
+
+-- | Total dots per scanline, in every mode.
+scanlineDots :: Int
+scanlineDots = 456
+
+{- | Mode 3 with no penalties: 12 dots of initial fetch plus 160 pixels.
+Everything that stalls the fetcher is added on top by 'mode3Length'.
+-}
+mode3BaseDots :: Int
+mode3BaseDots = 172
+
+{- | Dot at which the current mode ends. Only mode 3 varies, and its end is
+latched per line into 'ppuMode3End' when the PPU leaves OAM scan; mode 0 then
+simply runs from there to the end of the scanline.
+-}
+boundaryFor :: PpuMode -> PpuState -> IO Int
+{-# INLINE boundaryFor #-}
+boundaryFor ModeDrawing ps = readIORef (ppuMode3End ps)
+boundaryFor ModeOamScan _ = pure oamScanDots
+boundaryFor _ _ = pure scanlineDots
+
+{- | How long mode 3 runs on the line that is about to be drawn.
+
+Three things stall the pixel fetcher, per Pandocs:
+
+* The first @SCX mod 8@ pixels are fetched and discarded, so a non-zero
+  fine scroll costs that many dots.
+* Activating the window mid-line aborts and restarts the fetcher, costing
+  6 dots on the line the window first appears.
+
+Object penalties are not modelled yet, so lines with sprites still report
+their sprite-free length; that is what leaves mooneye's
+@intr_2_mode0_timing_sprites@ pending.
+
+The result is clamped so it can never land before the end of OAM scan or
+past the end of the scanline, which keeps 'stepDots' monotonic even if a
+corrupt snapshot restores nonsense.
+-}
+mode3Length :: PpuState -> IO Int
+mode3Length ps = do
+    lcdc <- readIORef (ppuLcdc ps)
+    scx <- readIORef (ppuScx ps)
+    ly <- readIORef (ppuLy ps)
+    wy <- readIORef (ppuWy ps)
+    wx <- readIORef (ppuWx ps)
+    cgb <- readIORef (ppuCgbMode ps)
+    let !fineScroll = fromIntegral scx .&. 7
+        -- Mirrors 'renderLine': on CGB the BG layer is always active because
+        -- LCDC bit 0 means "master priority" there rather than "BG enable".
+        bgActive = cgb || testBit lcdc 0
+        windowHere =
+            testBit lcdc 5
+                && bgActive
+                && ly >= wy
+                && fromIntegral wx <= (166 :: Int)
+        !windowPenalty = if windowHere then 6 else 0
+        !len = mode3BaseDots + fineScroll + windowPenalty
+    pure (min (scanlineDots - oamScanDots - 1) len)
+
+{- | Recompute the latched mode 3 end from the current registers.
+
+'ppuMode3End' is derived state that the mode state machine refreshes once
+per line. A snapshot restores the registers but not the latch, so call this
+after a load to stop the restored line from running on the previous
+machine's value.
+-}
+resyncMode3End :: PpuState -> IO ()
+resyncMode3End ps = do
+    len <- mode3Length ps
+    writeIORef (ppuMode3End ps) (oamScanDots + len)
 
 {- | Transition out of the current mode at its boundary. Returns a bitmask:
 bit 0 = VBlank entry, bit 1 = STAT (rising edge of the OR'd STAT line),
@@ -567,13 +651,18 @@ line stays high through the boundary and no second IRQ fires.
 transition :: PpuMode -> PpuState -> IO Word8
 transition mode ps = case mode of
     ModeOamScan -> do
+        -- Latch this line's mode 3 length now: the registers it depends on
+        -- (SCX, WY/WX, LCDC) are sampled at the start of drawing, so a
+        -- mid-line write must not retroactively move the mode 0 boundary.
+        resyncMode3End ps
         writeIORef (ppuMode ps) ModeDrawing
-        writeIORef (ppuDot ps) 80
+        writeIORef (ppuDot ps) oamScanDots
         statEdge ps
     ModeDrawing -> do
         renderLine ps
         writeIORef (ppuMode ps) ModeHBlank
-        writeIORef (ppuDot ps) 252
+        end <- readIORef (ppuMode3End ps)
+        writeIORef (ppuDot ps) end
         s <- statEdge ps
         pure (s .|. 0x04) -- Bit 2: HBlank entered (consumed by Bus for HDMA).
     ModeHBlank -> do

@@ -1,7 +1,9 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Ocelot.PpuSpec (spec) where
 
+import Control.Monad (forM_)
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
@@ -31,6 +33,23 @@ writeVram ps = mapM_ (uncurry (MV.write (ppuVram ps)))
 writeOam :: PpuState -> [(Int, Word8)] -> IO ()
 writeOam ps = mapM_ (uncurry (MV.write (ppuOam ps)))
 
+{- | Advance until the current scanline has been drawn, i.e. mode 3 has ended
+and 'renderLine' has run.
+
+Mode 3 is variable-length (fine scroll and window activation extend it), so a
+test that enables either cannot assume the old fixed @80 + 172@ boundary.
+-}
+advanceThroughDraw :: PpuState -> IO ()
+advanceThroughDraw ps = go (0 :: Int)
+  where
+    go n
+        | n > 456 = pure ()
+        | otherwise = do
+            m <- readMode ps
+            if m == ModeHBlank || m == ModeVBlank
+                then pure ()
+                else advance 1 ps >> go (n + 4)
+
 spec :: Spec
 spec = do
     describe "mode timing" $ do
@@ -49,6 +68,54 @@ spec = do
             d <- readDot ps
             m `shouldBe` ModeHBlank
             d `shouldBe` 252
+
+        -- Mode 3 is not a fixed 172 dots on hardware: the fetcher discards
+        -- SCX mod 8 pixels at the left edge, and activating the window costs a
+        -- fetcher restart. Whatever mode 3 takes, mode 0 gives back, so the
+        -- scanline stays 456 dots. Drives the mooneye ppu/*_timing ROMs.
+        it "SCX mod 8 extends mode 3 and shortens HBlank by the same amount" $ do
+            let endsAt scx = do
+                    ps <- freshOn
+                    writeIORef (ppuScx ps) scx
+                    -- Step one dot at a time so we catch the exact boundary.
+                    let go !n = do
+                            m <- readMode ps
+                            if m == ModeHBlank
+                                then pure n
+                                else
+                                    if n > 456
+                                        then pure (-1)
+                                        else advance 1 ps >> go (n + 4)
+                    go 0
+            forM_ [0 .. 7 :: Int] $ \k -> do
+                got <- endsAt (fromIntegral k)
+                -- advance() steps 4 dots at a time, so round up to the M-cycle
+                -- boundary that first lands at or past the true end of mode 3.
+                let expected = ((172 + k + 80) + 3) `div` 4 * 4
+                (k, got) `shouldBe` (k, expected)
+
+        it "keeps the scanline at 456 dots whatever SCX is" $ do
+            forM_ [0, 3, 7 :: Word8] $ \scx -> do
+                ps <- freshOn
+                writeIORef (ppuScx ps) scx
+                _ <- advance 114 ps
+                ly <- readLy ps
+                m <- readMode ps
+                (scx, ly, m) `shouldBe` (scx, 1, ModeOamScan)
+
+        it "activating the window costs 6 extra dots of mode 3" $ do
+            ps <- freshOn
+            -- LCDC bit 5 enables the window; WX=7/WY=0 puts it over the line.
+            writeIORef (ppuLcdc ps) 0xB1
+            writeIORef (ppuWy ps) 0
+            writeIORef (ppuWx ps) 7
+            let go !n = do
+                    m <- readMode ps
+                    if m == ModeHBlank
+                        then pure n
+                        else if n > 456 then pure (-1) else advance 1 ps >> go (n + 4)
+            got <- go 0
+            got `shouldBe` ((172 + 6 + 80) + 3) `div` 4 * 4
 
         it "after a full scanline, LY := 1, Mode 2" $ do
             ps <- freshOn
@@ -188,7 +255,9 @@ spec = do
             writeIORef (ppuWy ps) 0
             writeIORef (ppuWx ps) 7
             writeIORef (ppuBgp ps) 0xE4
-            _ <- advance ((80 + 172) `div` 4) ps
+            -- The window is on, so mode 3 runs 6 dots past the sprite-free
+            -- boundary; step until the line is actually drawn.
+            advanceThroughDraw ps
             fb <- framebuffer ps
             fb V.! 0 `shouldBe` 0x01
 

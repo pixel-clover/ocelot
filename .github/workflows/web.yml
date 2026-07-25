@@ -1,4 +1,4 @@
-name: Publish Ocelot Web
+name: Deploy Ocelot Web
 
 on:
   workflow_dispatch:

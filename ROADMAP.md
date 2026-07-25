@@ -72,7 +72,11 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Window rendering with a window-line counter
 - [x] Sprite rendering (8x8 and 8x16) with DMG sort-by-X priority
 - [x] STAT interrupt sources (LYC, mode 0/1/2) with edge-triggered IF latch
-- [ ] Mid-scanline LCDC/SCX/WX changes reflected in mode 3 length
+- [x] Variable mode 3 length: the `SCX mod 8` fine-scroll discard and the 6-dot window-activation restart extend mode 3, and mode 0 absorbs
+  the difference so the scanline stays 456 dots. Passes mooneye `acceptance/ppu/hblank_ly_scx_timing-GS`.
+- [ ] Per-object fetcher stall in mode 3 length (6-11 dots each); lines with sprites currently report their sprite-free length, which is what
+  leaves mooneye `acceptance/ppu/intr_2_mode0_timing_sprites` pending
+- [ ] Mid-scanline LCDC/SCX/WX changes reflected in mode 3 length (the length is latched when mode 3 begins)
 - [ ] Background pixel FIFO and sprite pixel FIFO with mid-line stalls
 - [x] CGB BG and OBJ palette RAM (BCPS/BCPD/OCPS/OCPD) with auto-increment
 - [x] CGB BG attribute byte (priority, V/H flip, VRAM bank, palette)

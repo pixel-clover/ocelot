@@ -541,6 +541,10 @@ applySnapshot sd m = do
     writeIORef (Ppu.ppuPrevStatLine ps) (pdPrevStat pd)
     writeIORef (Ppu.ppuPendingStatIrq ps) (pdPendingStat pd)
     writeIORef (Ppu.ppuOpri ps) (pdOpri pd)
+    -- The mode 3 end latch is derived from the registers just restored, and is
+    -- not part of the blob. Rebuild it so the line in progress does not finish
+    -- on whatever the previous machine had latched.
+    Ppu.resyncMode3End ps
     -- Any debt on the target machine belongs to a timeline we are discarding
     -- along with the rest of its state, so drop it rather than settling it
     -- into the freshly restored APU.
