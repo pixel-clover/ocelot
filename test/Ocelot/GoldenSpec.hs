@@ -40,13 +40,13 @@ import System.Environment (lookupEnv)
 import System.FilePath ((</>))
 import Test.Hspec
 
-{- | Maximum instructions to run a blargg ROM before giving up on finding a Passed/Failed verdict.
+{- | Maximum CPU M-cycles to run a blargg ROM before giving up on finding a Passed/Failed verdict.
 Tuned so each test finishes in a few seconds on a modern host.
 -}
 blarggCap :: Int
 blarggCap = 80_000_000
 
--- | Run a blargg ROM, polling the serial port every 'pollChunk' instructions for a verdict.
+-- | Run a blargg ROM, polling the serial port every 'pollChunk' M-cycles for a verdict.
 pollChunk :: Int
 pollChunk = 1_000_000
 
@@ -367,12 +367,18 @@ data Verdict
     | BlarggFailed !ByteString
     | BlarggTimeout !ByteString
 
-{- | Idle window: if a blargg ROM emits no new serial bytes for this many instructions,
+{- | Idle window: if a blargg ROM emits no new serial bytes for this many CPU M-cycles,
 we give up early. The actual cap ('blarggCap') is the absolute upper bound; this watchdog kicks in
 for tests that get stuck in pre-Pass/Fail diagnostic loops we don't yet handle.
+
+Must stay well clear of the longest legitimate silence between a ROM printing its title and
+printing its verdict. The three biggest @cpu_instrs@ subtests (@09-op r,r@, @10-bit ops@,
+@11-op a,(hl)@) exhaustively sweep operand combinations and compute for well over 8M M-cycles
+without emitting a byte; at the old 8M window they timed out roughly one poll short of their
+own verdict.
 -}
 blarggIdleCap :: Int
-blarggIdleCap = 8_000_000
+blarggIdleCap = 40_000_000
 
 runUntilVerdict :: Int -> Machine -> IO Verdict
 runUntilVerdict cap m = go 0 0 BS.empty

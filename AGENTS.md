@@ -137,9 +137,11 @@ Cross-subsystem read/write coordination, plus M-cycle dispatch.
 
 - `read8 :: Word16 -> Bus -> IO Word8`
 - `write8 :: Word16 -> Word8 -> Bus -> IO ()`
-- `advance :: Int -> Bus -> IO ()` (M-cycles; ticks Timer, PPU, APU, OAM DMA, serial transfer, HDMA HBlank step, joypad IRQ edge in lockstep,
-  halving peripheral cycles in CGB double-speed mode. OAM DMA and the serial shift clock sit on the CPU side of the speed divider, so they see
-  the unhalved count)
+- `advance :: Int -> Bus -> IO ()` (M-cycles; ticks Timer, PPU, APU, OAM DMA, serial transfer, HDMA HBlank step, and the joypad IRQ edge in
+  lockstep). In CGB double-speed mode the peripherals split two ways, per Pandocs KEY1. The timer/divider, serial port, and OAM DMA are clocked
+  from the CPU clock, so they keep their CPU-relative rate and get the unhalved count. The LCD controller, all sound timings, and HDMA keep
+  their wall-clock rate and get the halved count (odd M-cycles carry over in `busDoubleSpeedAcc`). Halving the timer along with the PPU ran
+  every TAC rate at half speed in double-speed mode and failed blargg `interrupt_time`.
 - `drainAudioSamples :: Bus -> IO [Int16]` and `drainAudioSamplesVector :: Bus -> IO (Vector Int16)` (frontend-facing audio drains; prefer the
   vector form in hot paths)
 - `triggerSpeedSwitch :: Bus -> IO Bool` (called from the CPU's `STOP` handler)

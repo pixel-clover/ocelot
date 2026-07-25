@@ -1029,12 +1029,26 @@ readDmaSource addr b
 
 {- | Advance time-driven subsystems by N M-cycles. Ticks Timer and PPU and
 latches the Timer interrupt (bit 2) and VBlank (bit 0) into @IF@ at @0xFF0F@.
+
+Double-speed mode splits the peripherals in two, per Pandocs KEY1. These run
+twice as fast in wall-clock terms, i.e. keep their rate relative to CPU
+M-cycles and see the unhalved count:
+
+* the timer and divider,
+* the serial port,
+* OAM DMA.
+
+These keep their usual wall-clock rate, i.e. see half as many M-cycles per
+CPU instruction:
+
+* the LCD controller,
+* all sound timings and frequencies,
+* HDMA (handled in 'runGeneralHdma', which doubles its CPU-cycle debit).
 -}
 advance :: Int -> Bus -> IO ()
 advance mCycles b = do
-    -- In double-speed mode the CPU clock is twice as fast, so the
-    -- peripherals (timer, PPU, APU) should see half as many M-cycles
-    -- per CPU instruction. Track odd cycles in a 0/1 accumulator.
+    -- Halved count for the wall-clock-rate peripherals. Odd M-cycles carry
+    -- over in a 0/1 accumulator so the halving does not lose time.
     ds <- readIORef (busDoubleSpeed b)
     pCycles <-
         if ds
@@ -1044,8 +1058,12 @@ advance mCycles b = do
                 writeIORef (busDoubleSpeedAcc b) (total `mod` 2)
                 pure (total `div` 2)
             else pure mCycles
+    -- The divider is clocked from the CPU clock, so DIV/TIMA keep their
+    -- CPU-relative rate and take the unhalved count. Feeding the timer
+    -- 'pCycles' ran every TAC rate at half speed for as long as a CGB game
+    -- stayed in double-speed mode.
     ts <- readIORef (busTimer b)
-    let (ts', overflow) = Timer.advance pCycles ts
+    let (ts', overflow) = Timer.advance mCycles ts
     writeIORef (busTimer b) ts'
     ppuIrqs <- Ppu.advance pCycles (busPpu b)
     Apu.advance pCycles (busApu b)

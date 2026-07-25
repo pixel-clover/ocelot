@@ -164,7 +164,8 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Blargg cgb_sound wired in (12 sub-ROMs available, aspirational; 10 currently pass: 01-registers, 02-len ctr, 03-trigger, 04-sweep, 05-sweep
   details, 06-overflow on trigger, 08-len ctr during power, 10-wave trigger while on, 11-regs after power, 12-wave)
 - [x] Blargg oam_bug wired in (8 sub-ROMs, aspirational; ~2 currently pass: 3-non_causes, 6-timing_no_bug)
-- [x] Blargg halt_bug, interrupt_time wired in (aspirational; both currently report error code 0xFF)
+- [x] Blargg halt_bug, interrupt_time wired in (aspirational; interrupt_time passes since the timer stopped being halved in CGB double-speed
+  mode, halt_bug still reports error code 0xFF)
 - [ ] Promote aspirational blargg ROMs to strict run-to-pass as accuracy is added
 - [x] Mooneye magic-breakpoint runner in `GoldenSpec.hs`: observes BCDEHL after each chunk for the Fibonacci pass tuple or all-`0x42` failure tuple
 - [x] Mooneye prebuilt-ZIP fetcher (`make mooneye-roms`) downloads gekkio.fi's binaries to `test/testroms/mooneye/`

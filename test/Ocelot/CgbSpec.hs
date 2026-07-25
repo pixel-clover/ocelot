@@ -346,6 +346,32 @@ spec = do
             mode2 <- readIORef (Ppu.ppuMode ps)
             mode2 `shouldBe` Ppu.ModeDrawing
 
+        it "in double-speed, DIV keeps its full CPU M-cycle rate" $ do
+            -- Pandocs KEY1: double-speed runs the CPU, the timer and divider,
+            -- the serial port, and OAM DMA twice as fast, while the LCD
+            -- controller, HDMA, and all sound timings keep their usual
+            -- wall-clock rate. So relative to CPU M-cycles the divider is
+            -- unchanged: 64 M-cycles is still exactly one DIV tick. Halving it
+            -- along with the PPU and APU made every TAC rate run at half speed
+            -- for the whole time a CGB game was in double-speed mode.
+            b <- mkBus mkCgbRom
+            Bus.write8 0xFF4D 0x01 b
+            switched <- Bus.triggerSpeedSwitch b
+            switched `shouldBe` True
+            Bus.advance 64 b
+            divAfter <- Bus.read8 0xFF04 b
+            divAfter `shouldBe` 0x01
+
+        it "in double-speed, TIMA keeps its full CPU M-cycle rate" $ do
+            b <- mkBus mkCgbRom
+            Bus.write8 0xFF4D 0x01 b
+            _ <- Bus.triggerSpeedSwitch b
+            Bus.write8 0xFF07 0x05 b -- Enabled, 16 T-cycle rate
+            -- 4 M-cycles = 16 T-cycles: exactly one falling edge of divider bit 3.
+            Bus.advance 4 b
+            tima <- Bus.read8 0xFF05 b
+            tima `shouldBe` 0x01
+
     describe "CGB BG rendering" $ do
         it "draws BG palette 0 colors when the attribute byte selects palette 0" $ do
             b <- mkBus mkCgbRom
