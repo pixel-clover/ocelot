@@ -502,6 +502,9 @@ encodeSquare q =
         <> Snap.putU8 (fromIntegral (sqSweepTimer q))
         <> Snap.putU16 (fromIntegral (sqSweepShadow q))
         <> Snap.putBool (sqSweepEnabled q)
+        -- Persists until the next trigger, so it is real state: dropping it
+        -- means a later NR10 write that clears negate fails to disable CH1.
+        <> Snap.putBool (sqSweepNegUsed q)
         <> Snap.putU8 (fromIntegral (sqDutyPos q))
 
 decodeSquare :: Snap.Cursor Square
@@ -523,6 +526,7 @@ decodeSquare = do
     swT <- fromIntegral <$> Snap.getU8
     swSha <- fromIntegral <$> Snap.getU16
     swEn <- Snap.getBool
+    swNegUsed <- Snap.getBool
     dPos <- fromIntegral <$> Snap.getU8
     pure
         Square
@@ -543,7 +547,7 @@ decodeSquare = do
             , sqSweepTimer = swT
             , sqSweepShadow = swSha
             , sqSweepEnabled = swEn
-            , sqSweepNegUsed = False -- transient: cleared on every trigger
+            , sqSweepNegUsed = swNegUsed
             , sqDutyPos = dPos
             }
 

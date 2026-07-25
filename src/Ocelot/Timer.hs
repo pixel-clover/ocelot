@@ -198,12 +198,12 @@ writeTima v ts
 writeTma :: Word8 -> TimerState -> TimerState
 writeTma v ts =
     -- TMA always latches. While TIMA is in the /reloading/ window the
-    -- pending reload will pick up the new value at fire time; while
-    -- TIMA is in the /reloaded/ window the just-loaded value is
-    -- replaced by the new TMA, matching the documented "TMA write
-    -- during reload" behavior.
+    -- pending reload picks up the new value when it fires, but TIMA
+    -- itself must keep reading 0 until then. Only the /reloaded/ window
+    -- propagates a TMA write straight into TIMA, replacing the value the
+    -- reload just loaded.
     let ts' = ts{timTma = v}
-     in if timReloadCounter ts' > 0 || timReloadedCounter ts' > 0
+     in if timReloadedCounter ts' > 0
             then ts'{timTima = v}
             else ts'
 

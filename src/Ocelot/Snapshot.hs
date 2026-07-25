@@ -16,19 +16,25 @@ Format (all little-endian):
 > PPU VRAM/OAM/FB   3x length-prefixed blobs
 > PPU CGB block     u8 vbk + u8 bcps + u8 ocps + 2x palette blobs
 > PPU window line   u32
-> PPU STAT edge     u8 prev-line + u8 pending-irq (v7)
+> PPU STAT edge     u8 prev-line + u8 pending-irq
+> PPU OPRI          u8
 > APU blob          1x length-prefixed
 > Bus WRAM/HRAM/IO  3x length-prefixed blobs
 > Bus IE            u8
 > Bus CGB block     u8 wbk + u8 key1
 > Bus HDMA block    u16 src + u16 dst + u32 len + 3x bool
-> Bus OAM DMA       u8 active + u8 starting + u16 src + u8 index (v7)
+> Bus OAM DMA       u8 active + u8 starting + u16 src + u8 index
 > Cart RAM+RTC blob 1x length-prefixed (output of 'extractSave')
 > Cart MBC blob     1x length-prefixed (output of 'dumpMbc')
 
 Sections are framed with length prefixes only where the payload is
 variable-size; the fixed-size ones are inlined directly to keep the
 format compact.
+
+Loading is all-or-nothing: the whole blob is decoded into a pure
+'SnapshotData' through a bounds-checked cursor first, and only a
+complete decode is written into the live machine. A short or corrupt
+blob returns 'TruncatedBlob' with the machine untouched.
 -}
 module Ocelot.Snapshot (
     SnapshotError (..),
@@ -37,8 +43,7 @@ module Ocelot.Snapshot (
     load,
 ) where
 
-import Control.Monad (when)
-import Data.Bits (shiftL, (.&.), (.|.))
+import Data.Bits ((.&.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BB
@@ -67,14 +72,14 @@ data SnapshotError
 magic :: ByteString
 magic = BS.pack [0x4F, 0x43, 0x53, 0x31] -- "OCS1"
 
+{- | Blob format version. Bumped to 2 when the loader became strict and the
+APU section gained the CH1 sweep negate-used latch. Version 1 blobs are
+rejected with 'UnsupportedVersion': the format had in fact changed several
+times under that number, so a v1 blob's section layout is not knowable and
+accepting it would half-restore into garbage.
+-}
 currentVersion :: Word32
-currentVersion = 1
-
-cpuLen, timerLen, joyLen, ppuRegLen :: Int
-cpuLen = 24
-timerLen = 8
-joyLen = 3
-ppuRegLen = 16
+currentVersion = 2
 
 ----------------------------------------------------------------------
 -- Save
@@ -261,198 +266,296 @@ load :: ByteString -> Machine -> IO (Either SnapshotError ())
 load bs m
     | BS.length bs < 8 = pure (Left TruncatedBlob)
     | BS.take 4 bs /= magic = pure (Left BadMagic)
-    | otherwise =
-        let ver = decodeU32 (BS.drop 4 bs)
-         in if ver /= currentVersion
-                then pure (Left (UnsupportedVersion ver))
-                else do
-                    applySnapshot (BS.drop 8 bs) m
-                    pure (Right ())
+    | ver /= currentVersion = pure (Left (UnsupportedVersion ver))
+    | otherwise = case Snap.runCursorChecked decodeSnapshot (BS.drop 8 bs) of
+        Nothing -> pure (Left TruncatedBlob)
+        Just sd -> do
+            applySnapshot sd m
+            pure (Right ())
+  where
+    ver = Snap.runCursor Snap.getU32 (BS.drop 4 bs)
 
-applySnapshot :: ByteString -> Machine -> IO ()
-applySnapshot bs0 m = do
+{- | The whole snapshot payload, decoded but not yet installed. Keeping the
+decode separate from the apply is what makes a rejected load leave the
+machine untouched.
+-}
+data SnapshotData = SnapshotData
+    { sdCpu :: !CpuState
+    , sdTimer :: !TimerState
+    , sdJoypad :: !(Word8, Word8, Bool)
+    , sdPpu :: !PpuData
+    , sdApu :: !ByteString
+    , sdBus :: !BusData
+    , sdCartRam :: !ByteString
+    , sdCartMbc :: !ByteString
+    }
+
+data PpuData = PpuData
+    { pdLcdc, pdStat, pdLy, pdLyc, pdScy, pdScx, pdWy, pdWx :: !Word8
+    , pdBgp, pdObp0, pdObp1 :: !Word8
+    , pdMode :: !Ppu.PpuMode
+    , pdDot :: !Int
+    , pdVram, pdOam, pdFb :: !ByteString
+    , pdVbk, pdBcps, pdOcps :: !Word8
+    , pdBgPal, pdObjPal :: !ByteString
+    , pdWindowLine :: !Int
+    , pdPrevStat, pdPendingStat :: !Bool
+    , pdOpri :: !Word8
+    }
+
+data BusData = BusData
+    { bdWram, bdHram, bdIo :: !ByteString
+    , bdIe, bdWramBank, bdKey1 :: !Word8
+    , bdHdmaSrc, bdHdmaDst :: !Word16
+    , bdHdmaLen :: !Int
+    , bdHdmaActive, bdDoubleSpeed :: !Bool
+    , bdDoubleSpeedAcc :: !Int
+    , bdOamActive, bdOamStarting :: !Bool
+    , bdOamSrc :: !Word16
+    , bdOamIndex :: !Int
+    }
+
+decodeSnapshot :: Snap.Cursor SnapshotData
+decodeSnapshot = do
+    cpu <- decodeCpu
+    timer <- decodeTimer
+    joy <- decodeJoypad
+    ppu <- decodePpu
+    apu <- Snap.getBlob
+    bus <- decodeBus
+    cartRam <- Snap.getBlob
+    cartMbc <- Snap.getBlob
+    pure
+        SnapshotData
+            { sdCpu = cpu
+            , sdTimer = timer
+            , sdJoypad = joy
+            , sdPpu = ppu
+            , sdApu = apu
+            , sdBus = bus
+            , sdCartRam = cartRam
+            , sdCartMbc = cartMbc
+            }
+
+decodeCpu :: Snap.Cursor CpuState
+decodeCpu = do
+    a <- Snap.getU8
+    f <- Snap.getU8
+    b <- Snap.getU8
+    c <- Snap.getU8
+    d <- Snap.getU8
+    e <- Snap.getU8
+    h <- Snap.getU8
+    l <- Snap.getU8
+    sp <- Snap.getU16
+    pc <- Snap.getU16
+    ime <- Snap.getBool
+    ei <- Snap.getBool
+    halted <- Snap.getBool
+    _pad <- Snap.getU8
+    cycles <- Snap.getI64
+    pure
+        CpuState
+            { cpuRegs =
+                Registers
+                    { regA = a
+                    , regF = f
+                    , regB = b
+                    , regC = c
+                    , regD = d
+                    , regE = e
+                    , regH = h
+                    , regL = l
+                    , regSP = sp
+                    , regPC = pc
+                    }
+            , cpuIme = ime
+            , cpuEiDelay = ei
+            , cpuHalted = halted
+            , cpuHaltBug = False -- transient one-instruction latch
+            , cpuCycles = fromIntegral cycles
+            }
+
+decodeTimer :: Snap.Cursor TimerState
+decodeTimer = do
+    divider <- Snap.getU16
+    tima <- Snap.getU8
+    tma <- Snap.getU8
+    tac <- Snap.getU8
+    prevAnd <- Snap.getBool
+    reload <- Snap.getU8
+    reloaded <- Snap.getU8
+    pure
+        TimerState
+            { timDivider = divider
+            , timTima = tima
+            , timTma = tma
+            , timTac = tac
+            , timPrevAnd = prevAnd
+            , timReloadCounter = fromIntegral reload
+            , timReloadedCounter = fromIntegral reloaded
+            }
+
+decodeJoypad :: Snap.Cursor (Word8, Word8, Bool)
+decodeJoypad = (,,) <$> Snap.getU8 <*> Snap.getU8 <*> Snap.getBool
+
+decodePpu :: Snap.Cursor PpuData
+decodePpu = do
+    lcdc <- Snap.getU8
+    stat <- Snap.getU8
+    ly <- Snap.getU8
+    lyc <- Snap.getU8
+    scy <- Snap.getU8
+    scx <- Snap.getU8
+    wy <- Snap.getU8
+    wx <- Snap.getU8
+    bgp <- Snap.getU8
+    obp0 <- Snap.getU8
+    obp1 <- Snap.getU8
+    modeByte <- Snap.getU8
+    dot <- Snap.getU32
+    vram <- Snap.getBlob
+    oam <- Snap.getBlob
+    fb <- Snap.getBlob
+    vbk <- Snap.getU8
+    bcps <- Snap.getU8
+    ocps <- Snap.getU8
+    bgPal <- Snap.getBlob
+    objPal <- Snap.getBlob
+    wly <- Snap.getU32
+    prevStat <- Snap.getBool
+    pendStat <- Snap.getBool
+    opri <- Snap.getU8
+    pure
+        PpuData
+            { pdLcdc = lcdc
+            , pdStat = stat
+            , pdLy = ly
+            , pdLyc = lyc
+            , pdScy = scy
+            , pdScx = scx
+            , pdWy = wy
+            , pdWx = wx
+            , pdBgp = bgp
+            , pdObp0 = obp0
+            , pdObp1 = obp1
+            , -- The encoder only ever writes 0..3; anything else is a corrupt
+              -- blob, so clamp instead of letting 'toEnum' throw.
+              pdMode = decodePpuMode modeByte
+            , pdDot = fromIntegral dot
+            , pdVram = vram
+            , pdOam = oam
+            , pdFb = fb
+            , pdVbk = vbk
+            , pdBcps = bcps
+            , pdOcps = ocps
+            , pdBgPal = bgPal
+            , pdObjPal = objPal
+            , pdWindowLine = fromIntegral wly
+            , pdPrevStat = prevStat
+            , pdPendingStat = pendStat
+            , pdOpri = opri .&. 0x01
+            }
+
+decodePpuMode :: Word8 -> Ppu.PpuMode
+decodePpuMode 0 = Ppu.ModeHBlank
+decodePpuMode 1 = Ppu.ModeVBlank
+decodePpuMode 2 = Ppu.ModeOamScan
+decodePpuMode _ = Ppu.ModeDrawing
+
+decodeBus :: Snap.Cursor BusData
+decodeBus = do
+    wram <- Snap.getBlob
+    hram <- Snap.getBlob
+    io <- Snap.getBlob
+    ie <- Snap.getU8
+    wbk <- Snap.getU8
+    key1 <- Snap.getU8
+    hdmaSrc <- Snap.getU16
+    hdmaDst <- Snap.getU16
+    hdmaLen <- Snap.getU32
+    hdmaActive <- Snap.getBool
+    ds <- Snap.getBool
+    dsAcc <- Snap.getU8
+    oamActive <- Snap.getBool
+    oamStarting <- Snap.getBool
+    oamSrc <- Snap.getU16
+    oamIndex <- Snap.getU8
+    pure
+        BusData
+            { bdWram = wram
+            , bdHram = hram
+            , bdIo = io
+            , bdIe = ie
+            , bdWramBank = wbk
+            , bdKey1 = key1
+            , bdHdmaSrc = hdmaSrc
+            , bdHdmaDst = hdmaDst
+            , bdHdmaLen = fromIntegral hdmaLen
+            , bdHdmaActive = hdmaActive
+            , bdDoubleSpeed = ds
+            , bdDoubleSpeedAcc = fromIntegral dsAcc
+            , bdOamActive = oamActive
+            , bdOamStarting = oamStarting
+            , bdOamSrc = oamSrc
+            , bdOamIndex = fromIntegral oamIndex
+            }
+
+applySnapshot :: SnapshotData -> Machine -> IO ()
+applySnapshot sd m = do
     let bus = machineBus m
-    applyCpu (BS.take cpuLen bs0) m
-    let bs1 = BS.drop cpuLen bs0
-    applyTimer (BS.take timerLen bs1) bus
-    let bs2 = BS.drop timerLen bs1
-    applyJoypad (BS.take joyLen bs2) bus
-    let bs3 = BS.drop joyLen bs2
-    applyPpuRegs (BS.take ppuRegLen bs3) (Bus.busPpu bus)
-    let bs4 = BS.drop ppuRegLen bs3
-        (vram, bs5) = takeBlob bs4
-        (oam, bs6) = takeBlob bs5
-        (fb, bs7) = takeBlob bs6
-    writeBytesToVector vram (Ppu.ppuVram (Bus.busPpu bus))
-    writeBytesToVector oam (Ppu.ppuOam (Bus.busPpu bus))
-    writeBytesToVector fb (Ppu.ppuFb (Bus.busPpu bus))
-    -- CGB v2 PPU block: VBK, BCPS, OCPS (3 bytes), then BG/OBJ palette RAM blobs.
-    writeIORef (Ppu.ppuVbk (Bus.busPpu bus)) (BS.index bs7 0)
-    writeIORef (Ppu.ppuBcps (Bus.busPpu bus)) (BS.index bs7 1)
-    writeIORef (Ppu.ppuOcps (Bus.busPpu bus)) (BS.index bs7 2)
-    let bs7a = BS.drop 3 bs7
-        (bgPal, bs7b) = takeBlob bs7a
-        (objPal, bs7c) = takeBlob bs7b
-    writeBytesToVector bgPal (Ppu.ppuBgPalRam (Bus.busPpu bus))
-    writeBytesToVector objPal (Ppu.ppuObjPalRam (Bus.busPpu bus))
-    -- v4: window-line counter (u32).
-    when (BS.length bs7c >= 4) $
-        writeIORef
-            (Ppu.ppuWindowLine (Bus.busPpu bus))
-            (fromIntegral (decodeU32 bs7c))
-    let bs7d = BS.drop 4 bs7c
-    -- v7: STAT edge-detector latches (prev-line, pending-irq).
-    when (BS.length bs7d >= 2) $ do
-        writeIORef (Ppu.ppuPrevStatLine (Bus.busPpu bus)) (BS.index bs7d 0 /= 0)
-        writeIORef (Ppu.ppuPendingStatIrq (Bus.busPpu bus)) (BS.index bs7d 1 /= 0)
-    let bs7e = BS.drop 2 bs7d
-    -- v8: OPRI.
-    when (BS.length bs7e >= 1) $
-        writeIORef (Ppu.ppuOpri (Bus.busPpu bus)) (BS.index bs7e 0 .&. 0x01)
-    let bs7f = BS.drop 1 bs7e
-        (apuBlob, bs8) = takeBlob bs7f
-    Apu.loadState apuBlob (Bus.busApu bus)
-    let (wram, bs9) = takeBlob bs8
-        (hram, bs10) = takeBlob bs9
-        (io, bs11) = takeBlob bs10
-    writeBytesToVector wram (Bus.busWram bus)
-    writeBytesToVector hram (Bus.busHram bus)
-    writeBytesToVector io (Bus.busIo bus)
-    if BS.null bs11
-        then pure ()
-        else writeIORef (Bus.busIe bus) (BS.index bs11 0)
-    let bs12 = BS.drop 1 bs11
-    -- CGB v2 Bus block: WBK, KEY1.
-    when (BS.length bs12 >= 2) $ do
-        writeIORef (Bus.busWramBank bus) (BS.index bs12 0)
-        writeIORef (Bus.busKey1 bus) (BS.index bs12 1)
-    let bs12a = BS.drop 2 bs12
-    -- v3 additions: HDMA src (u16), dst (u16), len (u32), active (u8),
-    -- double-speed (u8), double-speed acc (u8) = 11 bytes.
-    when (BS.length bs12a >= 11) $ do
-        writeIORef (Bus.busHdmaSrc bus) (decodeU16 bs12a)
-        writeIORef (Bus.busHdmaDst bus) (decodeU16 (BS.drop 2 bs12a))
-        writeIORef (Bus.busHdmaLen bus) (fromIntegral (decodeU32 (BS.drop 4 bs12a)))
-        writeIORef (Bus.busHdmaActive bus) (BS.index bs12a 8 /= 0)
-        writeIORef (Bus.busDoubleSpeed bus) (BS.index bs12a 9 /= 0)
-        writeIORef (Bus.busDoubleSpeedAcc bus) (fromIntegral (BS.index bs12a 10))
-    let bs12b = BS.drop 11 bs12a
-    -- v7: OAM DMA state (active u8, starting u8, src u16, index u8) = 5 bytes.
-    when (BS.length bs12b >= 5) $ do
-        writeIORef (Bus.busOamDmaActive bus) (BS.index bs12b 0 /= 0)
-        writeIORef (Bus.busOamDmaStarting bus) (BS.index bs12b 1 /= 0)
-        writeIORef (Bus.busOamDmaSrc bus) (decodeU16 (BS.drop 2 bs12b))
-        writeIORef (Bus.busOamDmaIndex bus) (fromIntegral (BS.index bs12b 4))
-    let bs12c = BS.drop 5 bs12b
-        (cartRam, bs13) = takeBlob bs12c
-        (cartMbc, _) = takeBlob bs13
-    Cart.loadSave cartRam (Bus.busCart bus)
-    Cart.loadMbc cartMbc (Bus.busCart bus)
-
-takeBlob :: ByteString -> (ByteString, ByteString)
-takeBlob bs
-    | BS.length bs < 4 = (BS.empty, BS.empty)
-    | otherwise =
-        let n = fromIntegral (decodeU32 bs)
-            payload = BS.take n (BS.drop 4 bs)
-            rest = BS.drop (4 + n) bs
-         in (payload, rest)
+        ps = Bus.busPpu bus
+        pd = sdPpu sd
+        bd = sdBus sd
+    writeIORef (machineCpu m) (sdCpu sd)
+    writeIORef (Bus.busTimer bus) (sdTimer sd)
+    Joypad.loadState (sdJoypad sd) (Bus.busJoypad bus)
+    writeIORef (Ppu.ppuLcdc ps) (pdLcdc pd)
+    writeIORef (Ppu.ppuStat ps) (pdStat pd)
+    writeIORef (Ppu.ppuLy ps) (pdLy pd)
+    writeIORef (Ppu.ppuLyc ps) (pdLyc pd)
+    writeIORef (Ppu.ppuScy ps) (pdScy pd)
+    writeIORef (Ppu.ppuScx ps) (pdScx pd)
+    writeIORef (Ppu.ppuWy ps) (pdWy pd)
+    writeIORef (Ppu.ppuWx ps) (pdWx pd)
+    writeIORef (Ppu.ppuBgp ps) (pdBgp pd)
+    writeIORef (Ppu.ppuObp0 ps) (pdObp0 pd)
+    writeIORef (Ppu.ppuObp1 ps) (pdObp1 pd)
+    writeIORef (Ppu.ppuMode ps) (pdMode pd)
+    writeIORef (Ppu.ppuDot ps) (pdDot pd)
+    writeBytesToVector (pdVram pd) (Ppu.ppuVram ps)
+    writeBytesToVector (pdOam pd) (Ppu.ppuOam ps)
+    writeBytesToVector (pdFb pd) (Ppu.ppuFb ps)
+    writeIORef (Ppu.ppuVbk ps) (pdVbk pd)
+    writeIORef (Ppu.ppuBcps ps) (pdBcps pd)
+    writeIORef (Ppu.ppuOcps ps) (pdOcps pd)
+    writeBytesToVector (pdBgPal pd) (Ppu.ppuBgPalRam ps)
+    writeBytesToVector (pdObjPal pd) (Ppu.ppuObjPalRam ps)
+    writeIORef (Ppu.ppuWindowLine ps) (pdWindowLine pd)
+    writeIORef (Ppu.ppuPrevStatLine ps) (pdPrevStat pd)
+    writeIORef (Ppu.ppuPendingStatIrq ps) (pdPendingStat pd)
+    writeIORef (Ppu.ppuOpri ps) (pdOpri pd)
+    Apu.loadState (sdApu sd) (Bus.busApu bus)
+    writeBytesToVector (bdWram bd) (Bus.busWram bus)
+    writeBytesToVector (bdHram bd) (Bus.busHram bus)
+    writeBytesToVector (bdIo bd) (Bus.busIo bus)
+    writeIORef (Bus.busIe bus) (bdIe bd)
+    writeIORef (Bus.busWramBank bus) (bdWramBank bd)
+    writeIORef (Bus.busKey1 bus) (bdKey1 bd)
+    writeIORef (Bus.busHdmaSrc bus) (bdHdmaSrc bd)
+    writeIORef (Bus.busHdmaDst bus) (bdHdmaDst bd)
+    writeIORef (Bus.busHdmaLen bus) (bdHdmaLen bd)
+    writeIORef (Bus.busHdmaActive bus) (bdHdmaActive bd)
+    writeIORef (Bus.busDoubleSpeed bus) (bdDoubleSpeed bd)
+    writeIORef (Bus.busDoubleSpeedAcc bus) (bdDoubleSpeedAcc bd)
+    writeIORef (Bus.busOamDmaActive bus) (bdOamActive bd)
+    writeIORef (Bus.busOamDmaStarting bus) (bdOamStarting bd)
+    writeIORef (Bus.busOamDmaSrc bus) (bdOamSrc bd)
+    writeIORef (Bus.busOamDmaIndex bus) (bdOamIndex bd)
+    Cart.loadSave (sdCartRam sd) (Bus.busCart bus)
+    Cart.loadMbc (sdCartMbc sd) (Bus.busCart bus)
 
 writeBytesToVector :: ByteString -> MV.IOVector Word8 -> IO ()
 writeBytesToVector bs v = do
     let n = min (BS.length bs) (MV.length v)
     mapM_ (\i -> MV.write v i (BS.index bs i)) [0 .. n - 1]
-
-applyCpu :: ByteString -> Machine -> IO ()
-applyCpu bs m = do
-    let r =
-            Registers
-                { regA = BS.index bs 0
-                , regF = BS.index bs 1
-                , regB = BS.index bs 2
-                , regC = BS.index bs 3
-                , regD = BS.index bs 4
-                , regE = BS.index bs 5
-                , regH = BS.index bs 6
-                , regL = BS.index bs 7
-                , regSP = decodeU16 (BS.drop 8 bs)
-                , regPC = decodeU16 (BS.drop 10 bs)
-                }
-        ime = BS.index bs 12 /= 0
-        ei = BS.index bs 13 /= 0
-        halted = BS.index bs 14 /= 0
-        cycles = fromIntegral (decodeI64 (BS.drop 16 bs))
-    writeIORef
-        (machineCpu m)
-        CpuState
-            { cpuRegs = r
-            , cpuIme = ime
-            , cpuEiDelay = ei
-            , cpuHalted = halted
-            , cpuHaltBug = False -- transient one-instruction latch
-            , cpuCycles = cycles
-            }
-
-applyTimer :: ByteString -> Bus.Bus -> IO ()
-applyTimer bs bus =
-    writeIORef
-        (Bus.busTimer bus)
-        TimerState
-            { timDivider = decodeU16 bs
-            , timTima = BS.index bs 2
-            , timTma = BS.index bs 3
-            , timTac = BS.index bs 4
-            , timPrevAnd = BS.index bs 5 /= 0
-            , timReloadCounter = fromIntegral (BS.index bs 6)
-            , timReloadedCounter = fromIntegral (BS.index bs 7)
-            }
-
-applyJoypad :: ByteString -> Bus.Bus -> IO ()
-applyJoypad bs bus =
-    Joypad.loadState
-        ( BS.index bs 0
-        , BS.index bs 1
-        , BS.index bs 2 /= 0
-        )
-        (Bus.busJoypad bus)
-
-applyPpuRegs :: ByteString -> Ppu.PpuState -> IO ()
-applyPpuRegs bs ps = do
-    writeIORef (Ppu.ppuLcdc ps) (BS.index bs 0)
-    writeIORef (Ppu.ppuStat ps) (BS.index bs 1)
-    writeIORef (Ppu.ppuLy ps) (BS.index bs 2)
-    writeIORef (Ppu.ppuLyc ps) (BS.index bs 3)
-    writeIORef (Ppu.ppuScy ps) (BS.index bs 4)
-    writeIORef (Ppu.ppuScx ps) (BS.index bs 5)
-    writeIORef (Ppu.ppuWy ps) (BS.index bs 6)
-    writeIORef (Ppu.ppuWx ps) (BS.index bs 7)
-    writeIORef (Ppu.ppuBgp ps) (BS.index bs 8)
-    writeIORef (Ppu.ppuObp0 ps) (BS.index bs 9)
-    writeIORef (Ppu.ppuObp1 ps) (BS.index bs 10)
-    let modeByte = BS.index bs 11
-    writeIORef (Ppu.ppuMode ps) (toEnum (fromIntegral modeByte))
-    writeIORef (Ppu.ppuDot ps) (fromIntegral (decodeU32 (BS.drop 12 bs)))
-
-decodeU16 :: ByteString -> Word16
-decodeU16 bs =
-    fromIntegral (BS.index bs 0)
-        .|. (fromIntegral (BS.index bs 1) `shiftL` 8)
-
-decodeU32 :: ByteString -> Word32
-decodeU32 bs =
-    fromIntegral (BS.index bs 0)
-        .|. (fromIntegral (BS.index bs 1) `shiftL` 8)
-        .|. (fromIntegral (BS.index bs 2) `shiftL` 16)
-        .|. (fromIntegral (BS.index bs 3) `shiftL` 24)
-
-decodeI64 :: ByteString -> Int
-decodeI64 bs =
-    let b i = fromIntegral (BS.index bs i) :: Int
-     in b 0
-            .|. (b 1 `shiftL` 8)
-            .|. (b 2 `shiftL` 16)
-            .|. (b 3 `shiftL` 24)
-            .|. (b 4 `shiftL` 32)
-            .|. (b 5 `shiftL` 40)
-            .|. (b 6 `shiftL` 48)
-            .|. (b 7 `shiftL` 56)

@@ -497,6 +497,25 @@ spec = do
             v55 <- Bus.read8 0xFF55 b
             v55 `shouldBe` 0xFF
 
+        it "HDMA wraps the destination back to 0x8000 past the end of VRAM" $ do
+            -- Regression: 'advanceHdmaPointers' bumped the destination without
+            -- masking, so once it passed 0x9FFF the writes matched none of
+            -- 'Ppu.write8's guards and were silently dropped. Hardware wraps
+            -- inside the 8 KiB VRAM window.
+            b <- mkBus mkCgbRom
+            mapM_ (\i -> Bus.write8 (0xC000 + fromIntegral i) (fromIntegral i) b) [0 .. 31 :: Int]
+            -- Destination 0x9FF0: the first chunk fills the last 16 bytes of
+            -- VRAM, the second must wrap to 0x8000.
+            Bus.write8 0xFF51 0xC0 b
+            Bus.write8 0xFF52 0x00 b
+            Bus.write8 0xFF53 0x1F b -- Dest hi: 0x9F00 = 0x8000 | (0x1F << 8)
+            Bus.write8 0xFF54 0xF0 b -- Dest lo: 0x9FF0
+            Bus.write8 0xFF55 0x01 b -- General DMA, 2 chunks = 32 bytes
+            tail16 <- mapM (\i -> Bus.read8 (0x9FF0 + fromIntegral i) b) [0 .. 15 :: Int]
+            wrapped <- mapM (\i -> Bus.read8 (0x8000 + fromIntegral i) b) [0 .. 15 :: Int]
+            tail16 `shouldBe` [0 .. 15]
+            wrapped `shouldBe` [16 .. 31]
+
         it "HDMA general-mode advances peripherals during the copy block" $ do
             -- Regression: general DMA used to be instant. The fix advances peripherals for
             -- length / 2 M-cycles in single-speed so the PPU continues to tick instead of jumping

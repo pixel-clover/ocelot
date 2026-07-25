@@ -157,7 +157,11 @@ doInstruction m = do
         mapCpu (\c -> c{cpuHaltBug = False}) m
     mapCpuRegs (\r -> r{regPC = pc + fromIntegral len - (1 - operandOffset)}) m
     mc <- execute instr m
-    mapCpu (\c -> c{cpuCycles = cpuCycles c + fromIntegral mc}) m
+    -- General-mode HDMA stalls the CPU for the duration of its copy. The bus
+    -- has already ticked the peripherals for those cycles, so they count
+    -- toward 'cpuCycles' but must not be advanced again here.
+    stall <- Bus.takeStallCycles (machineBus m)
+    mapCpu (\c -> c{cpuCycles = cpuCycles c + fromIntegral (mc + stall)}) m
     consumed <- readIORef (machineInternalAdvance m)
     let remaining = mc - consumed
     when (remaining > 0) (advanceBus remaining m)
@@ -652,8 +656,9 @@ execute instr m = case instr of
     Stop -> do
         -- On a CGB cart with KEY1 bit 0 set, STOP triggers the
         -- single/double-speed switch instead of halting; otherwise it
-        -- halts as on DMG.
+        -- halts as on DMG. Either way the internal divider is reset.
         switched <- Bus.triggerSpeedSwitch (machineBus m)
+        Bus.resetTimerDiv (machineBus m)
         if switched
             then pure 1
             else mapCpu (\c -> c{cpuHalted = True}) m >> pure 1

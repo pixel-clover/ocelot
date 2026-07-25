@@ -4,7 +4,9 @@ module Ocelot.Cpu.ExecuteSpec (spec) where
 
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
+import Data.IORef (readIORef, writeIORef)
 import Data.Word (Word8)
+import qualified Ocelot.Bus as Bus
 import Ocelot.Cpu.Execute (runUntilHalt, step)
 import Ocelot.Cpu.Registers (
     getBC,
@@ -19,6 +21,7 @@ import Ocelot.Cpu.Registers (
 import Ocelot.Cpu.State (CpuState (..))
 import Ocelot.Machine (Machine (..), getCpu, getCpuRegs, readMem)
 import Ocelot.Testing (machineWithProgram)
+import qualified Ocelot.Timer as Timer
 import Test.Hspec
 
 prog :: [Word8] -> IO Machine
@@ -239,3 +242,22 @@ spec = do
             _ <- run m2
             cpu2 <- getCpu m2
             cpuIme cpu2 `shouldBe` False
+
+    describe "STOP" $ do
+        it "resets the internal divider" $ do
+            -- Real hardware zeroes the 16-bit divider on STOP, in both the
+            -- plain-halt and the CGB speed-switch case. Without this a CGB
+            -- title that switches speed and then times off DIV/TIMA resumes
+            -- with the wrong divider phase.
+            m <- prog [0x10, 0x00, 0x76]
+            let bus = machineBus m
+            writeIORef (Bus.busTimer bus) Timer.initialTimer{Timer.timDivider = 0x1234}
+            step m
+            ts <- readIORef (Bus.busTimer bus)
+            Timer.timDivider ts `shouldBe` 0x0000
+
+        it "halts on DMG hardware when no speed switch is armed" $ do
+            m <- prog [0x10, 0x00, 0x76]
+            step m
+            cpu <- getCpu m
+            cpuHalted cpu `shouldBe` True

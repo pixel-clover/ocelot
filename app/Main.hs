@@ -208,11 +208,17 @@ loadSaveIfExists path cart = do
             loadSave bs cart
         Left _ -> putStrLn ("save:     no existing " <> path <> " (will create on exit)")
 
+{- | Flush battery-backed RAM on exit. This runs from a 'finally', so an
+IO error here would otherwise replace whatever exception was already
+unwinding; report it and let the original propagate instead.
+-}
 writeSave :: FilePath -> Cartridge.Cartridge -> IO ()
 writeSave path cart = do
     bs <- extractSave cart
-    BS.writeFile path bs
-    putStrLn ("save:     wrote " <> path)
+    r <- try (BS.writeFile path bs) :: IO (Either IOException ())
+    case r of
+        Right () -> putStrLn ("save:     wrote " <> path)
+        Left e -> putStrLn ("save:     write failed: " <> show e)
 
 describeRom :: FilePath -> IO ()
 describeRom path = do

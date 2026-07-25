@@ -53,11 +53,14 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 
 ### Timer and Serial
 
-- [x] DIV register at 16384 Hz with reset-on-write
+- [x] DIV register at 16384 Hz with reset-on-write, and reset-on-`STOP`
 - [x] TIMA/TMA/TAC with selectable input clock
-- [x] Timer falling-edge detector and TIMA reload window (writes to TIMA cancel reload, writes to TMA shift the loaded value, DIV/TAC writes that drop
-  the AND signal increment TIMA). Mooneye timer category: 12/13 passing; `acceptance/timer/rapid_toggle.gb` is still pending.
-- [x] Serial transfer (SB/SC) with stub clock for blargg test ROM output capture (writes to SC with bit 7 set capture SB to a buffer)
+- [x] Timer falling-edge detector and TIMA reload window (writes to TIMA cancel reload, writes to TMA shift the loaded value but leave TIMA
+  reading 0 until the reload fires, DIV/TAC writes that drop the AND signal increment TIMA). Mooneye timer category: 12/13 passing;
+  `acceptance/timer/rapid_toggle.gb` is still pending.
+- [x] Serial transfer (SB/SC) with a timed internal clock: 8 bits over 128 CPU M-cycles, then SB reads 0xFF (line idles high with no peer),
+  SC bit 7 clears, and IF bit 3 is raised. The outgoing byte is also captured to a buffer for blargg test ROM output. External-clock
+  transfers never complete, since there is no peer to supply the clock.
 - [ ] Link cable peer mode (deferred; see Future Goals)
 
 ### Picture Processing Unit
@@ -112,6 +115,9 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Performance overlay with FPS and renderer pacing mode
 - [x] In-memory snapshot save and load (`Ocelot.Snapshot.save`/`load`) with versioned binary format
 - [x] Persistent save states: F5 saves, F7 loads; 5 slots (1-5) cycled with F6; files written to `<romdir>/<romstem>/slot<n>.state`
+    - Snapshot format is at version 2. Version 1 blobs are rejected with `UnsupportedVersion`: the section layout changed repeatedly
+      without a version bump, so a v1 file's shape is not knowable and loading it would half-restore into garbage. Existing
+      `slot<n>.state` files predating version 2 need to be re-saved.
 - [x] Screenshot capture: F12 writes a P6 PPM to `<romdir>/<romstem>/screenshot-<timestamp>.ppm`
 - [x] GIF recording: Shift+F12 toggles capture; frames are palette-quantized and written to `<romdir>/<romstem>/recording-<timestamp>.gif`
 - [x] Pause toggle (Space) and fast-forward (Tab held, 4x)

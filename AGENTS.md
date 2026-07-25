@@ -137,11 +137,15 @@ Cross-subsystem read/write coordination, plus M-cycle dispatch.
 
 - `read8 :: Word16 -> Bus -> IO Word8`
 - `write8 :: Word16 -> Word8 -> Bus -> IO ()`
-- `advance :: Int -> Bus -> IO ()` (M-cycles; ticks Timer, PPU, APU, OAM DMA, HDMA HBlank step, joypad IRQ edge in lockstep, halving peripheral
-  cycles in CGB double-speed mode)
+- `advance :: Int -> Bus -> IO ()` (M-cycles; ticks Timer, PPU, APU, OAM DMA, serial transfer, HDMA HBlank step, joypad IRQ edge in lockstep,
+  halving peripheral cycles in CGB double-speed mode. OAM DMA and the serial shift clock sit on the CPU side of the speed divider, so they see
+  the unhalved count)
 - `drainAudioSamples :: Bus -> IO [Int16]` and `drainAudioSamplesVector :: Bus -> IO (Vector Int16)` (frontend-facing audio drains; prefer the
   vector form in hot paths)
 - `triggerSpeedSwitch :: Bus -> IO Bool` (called from the CPU's `STOP` handler)
+- `resetTimerDiv :: Bus -> IO ()` (also called from the CPU's `STOP` handler; hardware zeroes the divider on `STOP`)
+- `takeStallCycles :: Bus -> IO Int` (drains the CPU-stall debit the bus accrued during the current instruction, currently general-mode HDMA;
+  the peripherals are already ticked, so the CPU only folds it into `cpuCycles`)
 
 Bus is the only place that knows the full address map: it dispatches `0x0000-0x7FFF` and `0xA000-0xBFFF` to the cartridge, the VRAM/OAM windows
 to the PPU, the audio register windows to the APU, IO/HRAM/IE to its own buffers, and the CGB extension registers (VBK, BCPS/BCPD, OCPS/OCPD,
@@ -153,8 +157,9 @@ WBK, KEY1, HDMA1-5) to the right peer.
 - `Ocelot.Cpu.Execute.runFor :: Int -> Machine -> IO Int` and `runUntilHalt :: Int -> Machine -> IO Int` (test/headless helpers)
 - Interrupt servicing is folded into `step`; there is no separately exposed entry point.
 
-CPU never imports `Ocelot.Ppu`, `Ocelot.Apu`, `Ocelot.Timer`, or `Ocelot.Cartridge`. Memory access goes through `Bus`. The single `Ocelot.Bus`
-import inside `Cpu.Execute` is for `triggerSpeedSwitch` (the `STOP` instruction) and is the only cross-subsystem coupling outside the bus.
+CPU never imports `Ocelot.Ppu`, `Ocelot.Apu`, `Ocelot.Timer`, or `Ocelot.Cartridge`. Memory access goes through `Bus`. The `Ocelot.Bus` import
+inside `Cpu.Execute` covers `triggerSpeedSwitch` and `resetTimerDiv` (the `STOP` instruction) plus `takeStallCycles` (cycle accounting), and is
+the only cross-subsystem coupling outside the bus.
 Reading or writing CPU registers from outside `Ocelot.Cpu` is allowed only for tests; production code does not poke `regA`, `regPC`, etc.
 
 ### `Ocelot.Ppu`
@@ -230,8 +235,15 @@ VBA-M-compatible 48-byte suffix appended to the RAM bytes in `extractSave`/`load
 ### `Ocelot.Snapshot`
 
 - `save :: Machine -> IO ByteString` and `load :: ByteString -> Machine -> IO (Either SnapshotError ())`
-- Versioned binary format (`OCS1` magic + LE u32 version). When the format changes incompatibly, bump the version; old blobs are
-  rejected with `UnsupportedVersion`.
+- Versioned binary format (`OCS1` magic + LE u32 version). Any change to the section layout, including adding a field to a subsystem's
+  blob, must bump `currentVersion`; old blobs are then rejected with `UnsupportedVersion`. Adding fields without a bump is what left the
+  format silently mutating under version 1 through seven revisions.
+- Loading is all-or-nothing: `load` decodes the whole blob into a pure `SnapshotData` through the bounds-checked cursor and only writes
+  the machine on a complete decode. A short or corrupt blob returns `TruncatedBlob` with the machine untouched. Do not reintroduce
+  "decode straight into the live IORefs" — the register records are lazy in their fields, so a bad read survives as a thunk and detonates
+  far from the decode site.
+- `Ocelot.Snapshot.Binary` reads are bounds-checked. Use `runCursorChecked` (returns `Nothing` on overrun) for anything parsing untrusted
+  bytes; `runCursor` is the lenient zero-filling variant, valid only where an outer decoder already framed the payload length.
 - Reaches across subsystems via the per-module `dumpState`/`loadState` hooks listed above and via direct PpuState/Bus field access where the
   state is in IORefs and IOVectors that the per-module hooks would just wrap.
 
