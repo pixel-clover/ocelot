@@ -99,6 +99,9 @@ let keyMap = {...DEFAULT_KEY_MAP};
 const REMAP_BUTTONS = ["Up", "Down", "Left", "Right", "A", "B", "Start", "Select"];
 let keyButtonsDown = new Set();
 let gamepadButtonsDown = new Set();
+// Last state posted to the Worker per button, so 'syncButton' can skip no-ops.
+// Cleared whenever the Worker's joypad state is reset (i.e. on ROM load).
+const lastSentButtons = new Map();
 
 const DEFAULT_GP_MAP = Object.freeze({Up: 12, Down: 13, Left: 14, Right: 15, A: 0, B: 1, Start: 9, Select: 8});
 let gpMap = {...DEFAULT_GP_MAP};
@@ -588,7 +591,7 @@ function startGpListening(rbtn, btnName) {
     rbtn.textContent = "Press a button…";
 
     const interval = setInterval(() => {
-        const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+        const gamepads = gamepadApiAvailable() ? navigator.getGamepads() : [];
         for (const gp of gamepads) {
             if (!gp || !gp.connected) continue;
             for (let i = 0; i < gp.buttons.length; i++) {
@@ -652,6 +655,28 @@ function pauseForOverlay() {
         worker.postMessage({type: "pause"});
         if (audioCtx) audioCtx.suspend();
     }
+}
+
+/* Close every open overlay and clear the pause-depth bookkeeping.
+
+'loadRom' used to hand-decrement 'overlayDepth' once per open overlay, which
+duplicated 'resumeAfterOverlay''s accounting in a second place: any future
+overlay added to one path and not the other would leave the depth stuck above
+zero, and a non-zero depth means 'resumeAfterOverlay' never resumes — the
+emulator stays paused with no visible reason. Resetting outright removes the
+chance of a mismatch. The caller is about to start a fresh session and set the
+run state itself, so there is nothing to resume back into. */
+function closeAllOverlays() {
+    if (helpOpen) {
+        document.getElementById("help-overlay").classList.remove("visible");
+        helpOpen = false;
+    }
+    if (aboutOpen) {
+        document.getElementById("about-overlay").classList.remove("visible");
+        aboutOpen = false;
+    }
+    overlayDepth = 0;
+    wasRunningBeforeOverlay = false;
 }
 
 function resumeAfterOverlay() {
@@ -973,6 +998,7 @@ async function destroyCurrentSession() {
     cachedIsCgb = false;
     keyButtonsDown = new Set();
     gamepadButtonsDown = new Set();
+    lastSentButtons.clear();
     latestFrameReady = false;
     syncLedState();
 }
@@ -992,16 +1018,7 @@ async function decompressIfNeeded(file) {
 async function loadRom(file) {
     if (!workerReady) return;
     hideError();
-    if (helpOpen) {
-        document.getElementById("help-overlay").classList.remove("visible");
-        helpOpen = false;
-        overlayDepth = Math.max(0, overlayDepth - 1);
-    }
-    if (aboutOpen) {
-        document.getElementById("about-overlay").classList.remove("visible");
-        aboutOpen = false;
-        overlayDepth = Math.max(0, overlayDepth - 1);
-    }
+    closeAllOverlays();
     await destroyCurrentSession();
     await initAudio();
     try {
@@ -1125,9 +1142,36 @@ function updateFps(now) {
 
 // ─── Gamepad ──────────────────────────────────────────────────────────────────
 
+/* Whether the Gamepad API exists at all.
+
+'navigator.getGamepads' is a secure-context-only API, so a build served over
+plain HTTP from anything but localhost simply does not have it. The polling
+below degrades to an empty list there, which looks exactly like "no controller
+plugged in" — hence the one-shot notice, so a silent no-op is at least
+attributable. */
+function gamepadApiAvailable() {
+    return typeof navigator.getGamepads === "function";
+}
+
+let gamepadNoticeShown = false;
+
+function noteGamepadUnavailable() {
+    if (gamepadNoticeShown) return;
+    gamepadNoticeShown = true;
+    console.warn(
+        "Gamepad API unavailable (it requires a secure context: HTTPS or localhost). "
+            + "Controller input is disabled; keyboard input still works."
+    );
+    showToast("Controller input needs HTTPS");
+}
+
 function pollGamepads() {
     if (!currentRomName) return;
-    const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+    if (!gamepadApiAvailable()) {
+        noteGamepadUnavailable();
+        return;
+    }
+    const gamepads = navigator.getGamepads();
     const nextDown = new Set();
     for (let gi = 0; gi < gamepads.length; gi++) {
         const gp = gamepads[gi];
@@ -1350,13 +1394,18 @@ function updatePerf() {
     }
 
     const gpDescriptions = [];
-    const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-    for (const gp of gamepads) {
-        if (!gp || !gp.connected) continue;
-        gpDescriptions.push(`${(gp.id || "?").slice(0, 20)} (${gp.buttons.length}b)`);
+    if (gamepadApiAvailable()) {
+        for (const gp of navigator.getGamepads()) {
+            if (!gp || !gp.connected) continue;
+            gpDescriptions.push(`${(gp.id || "?").slice(0, 20)} (${gp.buttons.length}b)`);
+        }
     }
     document.getElementById("perf-gamepads").textContent =
-        gpDescriptions.length ? gpDescriptions.join("; ") : "none";
+        !gamepadApiAvailable()
+            ? "unavailable (needs HTTPS)"
+            : gpDescriptions.length
+              ? gpDescriptions.join("; ")
+              : "none connected";
 }
 
 function formatMs(value) {
@@ -1493,9 +1542,17 @@ function buttonForCode(code) {
     return keyMap[code] || null;
 }
 
+/* Push one button's state to the Worker, but only when it actually changed.
+
+'pollGamepads' runs every animation frame and calls 'syncAllButtons', so an
+unconditional post sent eight messages per frame — roughly 500 a second at
+60 Hz, every one of them redundant while nothing is held. That is pure queue
+pressure on the thread doing the emulation. */
 function syncButton(button) {
     if (!currentRomName || BUTTONS[button] === undefined) return;
     const down = keyButtonsDown.has(button) || gamepadButtonsDown.has(button);
+    if (lastSentButtons.get(button) === down) return;
+    lastSentButtons.set(button, down);
     worker.postMessage({type: "setButton", button: BUTTONS[button], down});
 }
 

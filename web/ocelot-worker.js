@@ -377,6 +377,25 @@ function stopTicking() {
     }
 }
 
+/* Restart the tick loop if it should be running but is not.
+
+The loop stops itself whenever `running` is false, which means "running implies
+tickTimer is armed" is now an invariant every caller has to maintain. Every
+current caller does, but the failure mode if one ever does not is a silent,
+permanent freeze: the emulator simply never advances again and nothing reports
+an error. Before the loop became self-terminating it idled on a 16 ms poll and
+would pick `running` back up on its own, so this restores that safety net
+without restoring the constant wakeups. */
+const WATCHDOG_INTERVAL_MS = 250;
+
+setInterval(() => {
+    if (running && emu && tickTimer === null) {
+        console.warn("[worker] tick loop was stopped while running; restarting");
+        lastFrameTime = performance.now();
+        startTicking();
+    }
+}, WATCHDOG_INTERVAL_MS);
+
 // ─── Message handler ──────────────────────────────────────────────────────────
 
 self.onmessage = function (ev) {
