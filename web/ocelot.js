@@ -1195,6 +1195,25 @@ function pollGamepads() {
 
 // ─── Save / Load ──────────────────────────────────────────────────────────────
 
+/* Advance to the next save slot, wrapping 1..SLOT_COUNT.
+
+The desktop frontend cycles slots with F6 between its save (F5) and load (F7)
+keys; the web had the dropdown only, so the two frontends disagreed on both
+the load key and whether slots were reachable from the keyboard at all. */
+const SLOT_COUNT = 5;
+
+function cycleSlot() {
+    if (!currentRomName) {
+        showToast("Load a ROM first");
+        return;
+    }
+    currentSlot = (currentSlot % SLOT_COUNT) + 1;
+    const select = document.getElementById("slot-select");
+    if (select) select.value = String(currentSlot);
+    saveSettings();
+    showToast(`Slot ${currentSlot}`);
+}
+
 function quickSave() {
     persistentSave().catch((err) => {
         console.error(err);
@@ -1581,7 +1600,13 @@ function onKeyDown(ev) {
         quickSave();
         return;
     }
-    if (ev.code === "F8") {
+    if (ev.code === "F6") {
+        ev.preventDefault();
+        cycleSlot();
+        return;
+    }
+    if (ev.code === "F7") {
+        // preventDefault also suppresses Firefox's caret-browsing toggle.
         ev.preventDefault();
         quickLoad();
         return;

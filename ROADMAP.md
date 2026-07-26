@@ -214,6 +214,8 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [ ] Configurable color correction (CGB LCD color profile, no-correction)
 - [x] WebAssembly build with Canvas rendering and Web Audio playback (GHC WASM cross-compilation; browser host now uses RGBA framebuffer exports,
   direct `ImageData` blits, and transferable audio chunks)
+- [x] Save-state hotkeys match the desktop frontend: F5 saves, F6 cycles slot (1-5), F7 loads. The web build previously used F8 to load and had
+  no keyboard slot control at all.
 - [ ] Libretro core packaging
 - [ ] Cheat code support (Game Genie, GameShark)
 - [ ] Lua or Haskell-script hookable trace API for tool-assisted runs
