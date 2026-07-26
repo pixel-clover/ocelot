@@ -143,15 +143,71 @@ spec = do
             ser <- drainSerial b
             ser `shouldBe` [0x48, 0x49, 0x21]
 
-        it "clears the SC start bit after capture" $ do
+        it "holds the SC start bit until the transfer completes" $ do
             b <- emptyBus
             write8 0xFF01 0x41 b
             write8 0xFF02 0x81 b
-            v <- read8 0xFF02 b
-            -- SC bits 6..1 read as 1 on hardware; bit 7 (transfer-start) has been cleared by the
-            -- capture; bit 0 (internal clock) holds its written value. So the readback is 0x7F.
-            (v .&. 0x80) `shouldBe` 0x00 -- start bit cleared
-            (v .&. 0x01) `shouldBe` 0x01 -- internal-clock bit preserved
+            during <- read8 0xFF02 b
+            -- An internal-clock transfer shifts 8 bits at 8192 Hz, i.e. 512
+            -- T-cycles = 128 M-cycles. Until then SC bit 7 stays set.
+            (during .&. 0x80) `shouldBe` 0x80
+            advance 127 b
+            justBefore <- read8 0xFF02 b
+            (justBefore .&. 0x80) `shouldBe` 0x80
+            advance 1 b
+            after <- read8 0xFF02 b
+            -- SC bits 6..1 read as 1 on hardware; bit 0 (internal clock) holds
+            -- its written value, so the completed readback is 0x7F.
+            (after .&. 0x80) `shouldBe` 0x00
+            (after .&. 0x01) `shouldBe` 0x01
+
+        it "raises IF bit 3 when the transfer completes" $ do
+            b <- emptyBus
+            write8 0xFF01 0x41 b
+            write8 0xFF02 0x81 b
+            during <- read8 0xFF0F b
+            (during .&. 0x08) `shouldBe` 0x00
+            advance 128 b
+            after <- read8 0xFF0F b
+            (after .&. 0x08) `shouldBe` 0x08
+
+        it "reads back 0xFF from SB after a transfer with no link peer" $ do
+            b <- emptyBus
+            write8 0xFF01 0x41 b
+            write8 0xFF02 0x81 b
+            advance 128 b
+            sb <- read8 0xFF01 b
+            sb `shouldBe` 0xFF
+
+        it "takes the same CPU M-cycle count in double-speed mode" $ do
+            -- The serial shift clock hangs off the CPU clock, so like OAM DMA
+            -- it sits on the CPU side of the speed divider: a transfer still
+            -- costs 128 CPU M-cycles (half the wall-clock time) in double
+            -- speed. Ticking it at the halved peripheral rate would stall a
+            -- CGB game that busy-waits ~128 cycles for its transfer.
+            b <- cgbBus
+            write8 0xFF4D 0x01 b -- Arm the KEY1 speed switch
+            switched <- Bus.triggerSpeedSwitch b
+            switched `shouldBe` True
+            write8 0xFF01 0x41 b
+            write8 0xFF02 0x81 b
+            advance 127 b
+            mid <- read8 0xFF0F b
+            (mid .&. 0x08) `shouldBe` 0x00
+            advance 1 b
+            after <- read8 0xFF0F b
+            (after .&. 0x08) `shouldBe` 0x08
+
+        it "an external-clock transfer never completes without a peer" $ do
+            b <- emptyBus
+            write8 0xFF01 0x41 b
+            write8 0xFF02 0x80 b -- bit 7 set, bit 0 clear: external clock
+            advance 4096 b
+            sc <- read8 0xFF02 b
+            iflag <- read8 0xFF0F b
+            (sc .&. 0x80) `shouldBe` 0x80
+            (iflag .&. 0x08) `shouldBe` 0x00
+
         it "writes to SC without bit 7 set do not capture" $ do
             b <- emptyBus
             write8 0xFF01 0x42 b

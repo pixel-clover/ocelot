@@ -346,6 +346,32 @@ spec = do
             mode2 <- readIORef (Ppu.ppuMode ps)
             mode2 `shouldBe` Ppu.ModeDrawing
 
+        it "in double-speed, DIV keeps its full CPU M-cycle rate" $ do
+            -- Pandocs KEY1: double-speed runs the CPU, the timer and divider,
+            -- the serial port, and OAM DMA twice as fast, while the LCD
+            -- controller, HDMA, and all sound timings keep their usual
+            -- wall-clock rate. So relative to CPU M-cycles the divider is
+            -- unchanged: 64 M-cycles is still exactly one DIV tick. Halving it
+            -- along with the PPU and APU made every TAC rate run at half speed
+            -- for the whole time a CGB game was in double-speed mode.
+            b <- mkBus mkCgbRom
+            Bus.write8 0xFF4D 0x01 b
+            switched <- Bus.triggerSpeedSwitch b
+            switched `shouldBe` True
+            Bus.advance 64 b
+            divAfter <- Bus.read8 0xFF04 b
+            divAfter `shouldBe` 0x01
+
+        it "in double-speed, TIMA keeps its full CPU M-cycle rate" $ do
+            b <- mkBus mkCgbRom
+            Bus.write8 0xFF4D 0x01 b
+            _ <- Bus.triggerSpeedSwitch b
+            Bus.write8 0xFF07 0x05 b -- Enabled, 16 T-cycle rate
+            -- 4 M-cycles = 16 T-cycles: exactly one falling edge of divider bit 3.
+            Bus.advance 4 b
+            tima <- Bus.read8 0xFF05 b
+            tima `shouldBe` 0x01
+
     describe "CGB BG rendering" $ do
         it "draws BG palette 0 colors when the attribute byte selects palette 0" $ do
             b <- mkBus mkCgbRom
@@ -496,6 +522,25 @@ spec = do
             -- HDMA5 reads as 0xFF when idle.
             v55 <- Bus.read8 0xFF55 b
             v55 `shouldBe` 0xFF
+
+        it "HDMA wraps the destination back to 0x8000 past the end of VRAM" $ do
+            -- Regression: 'advanceHdmaPointers' bumped the destination without
+            -- masking, so once it passed 0x9FFF the writes matched none of
+            -- 'Ppu.write8's guards and were silently dropped. Hardware wraps
+            -- inside the 8 KiB VRAM window.
+            b <- mkBus mkCgbRom
+            mapM_ (\i -> Bus.write8 (0xC000 + fromIntegral i) (fromIntegral i) b) [0 .. 31 :: Int]
+            -- Destination 0x9FF0: the first chunk fills the last 16 bytes of
+            -- VRAM, the second must wrap to 0x8000.
+            Bus.write8 0xFF51 0xC0 b
+            Bus.write8 0xFF52 0x00 b
+            Bus.write8 0xFF53 0x1F b -- Dest hi: 0x9F00 = 0x8000 | (0x1F << 8)
+            Bus.write8 0xFF54 0xF0 b -- Dest lo: 0x9FF0
+            Bus.write8 0xFF55 0x01 b -- General DMA, 2 chunks = 32 bytes
+            tail16 <- mapM (\i -> Bus.read8 (0x9FF0 + fromIntegral i) b) [0 .. 15 :: Int]
+            wrapped <- mapM (\i -> Bus.read8 (0x8000 + fromIntegral i) b) [0 .. 15 :: Int]
+            tail16 `shouldBe` [0 .. 15]
+            wrapped `shouldBe` [16 .. 31]
 
         it "HDMA general-mode advances peripherals during the copy block" $ do
             -- Regression: general DMA used to be instant. The fix advances peripherals for

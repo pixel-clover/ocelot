@@ -99,6 +99,9 @@ let keyMap = {...DEFAULT_KEY_MAP};
 const REMAP_BUTTONS = ["Up", "Down", "Left", "Right", "A", "B", "Start", "Select"];
 let keyButtonsDown = new Set();
 let gamepadButtonsDown = new Set();
+// Last state posted to the Worker per button, so 'syncButton' can skip no-ops.
+// Cleared whenever the Worker's joypad state is reset (i.e. on ROM load).
+const lastSentButtons = new Map();
 
 const DEFAULT_GP_MAP = Object.freeze({Up: 12, Down: 13, Left: 14, Right: 15, A: 0, B: 1, Start: 9, Select: 8});
 let gpMap = {...DEFAULT_GP_MAP};
@@ -106,27 +109,54 @@ const AXIS_THRESHOLD = 0.5;
 
 // ─── Worker command helpers ───────────────────────────────────────────────────
 
+/* Longest a Worker command may go unanswered before we give up on it.
+
+Every command is a handful of WASM calls, so this only ever fires when the
+Worker has died or wedged. Without it a lost reply leaves the promise pending
+forever, and callers that guard on an in-flight promise (see
+'saveBatteryIfNeeded') then wedge permanently too. If a late reply does turn
+up, 'resolveCmd' simply finds no entry and drops it. */
+const WORKER_CMD_TIMEOUT_MS = 20000;
+
 function workerCmd(msg, transfer = []) {
     return new Promise((resolve, reject) => {
         const id = ++cmdSeq;
-        pendingCmds.set(id, {resolve, reject});
+        const timer = setTimeout(() => {
+            if (pendingCmds.delete(id)) {
+                reject(new Error(`Worker did not respond to "${msg.type}"`));
+            }
+        }, WORKER_CMD_TIMEOUT_MS);
+        pendingCmds.set(id, {resolve, reject, timer});
         worker.postMessage({...msg, id}, transfer);
     });
 }
 
-function resolveCmd(id, value) {
+function takePendingCmd(id) {
     const pending = pendingCmds.get(id);
-    if (pending) {
-        pendingCmds.delete(id);
-        pending.resolve(value);
-    }
+    if (!pending) return null;
+    pendingCmds.delete(id);
+    clearTimeout(pending.timer);
+    return pending;
+}
+
+function resolveCmd(id, value) {
+    const pending = takePendingCmd(id);
+    if (pending) pending.resolve(value);
 }
 
 function rejectCmd(id, message) {
-    const pending = pendingCmds.get(id);
-    if (pending) {
-        pendingCmds.delete(id);
-        pending.reject(new Error(message));
+    const pending = takePendingCmd(id);
+    if (pending) pending.reject(new Error(message));
+}
+
+// Fail every outstanding command at once. Used when the Worker itself dies, so
+// awaiting callers unwind instead of hanging.
+function rejectAllPendingCmds(message) {
+    const pending = Array.from(pendingCmds.values());
+    pendingCmds.clear();
+    for (const entry of pending) {
+        clearTimeout(entry.timer);
+        entry.reject(new Error(message));
     }
 }
 
@@ -146,6 +176,11 @@ async function init() {
     worker.onerror = (err) => {
         showError(`Worker error: ${err.message || "unknown"}`);
         console.error("Worker error", err);
+        rejectAllPendingCmds(err.message || "Worker error");
+    };
+    worker.onmessageerror = (err) => {
+        console.error("Worker message error", err);
+        rejectAllPendingCmds("Worker message could not be deserialized");
     };
 
     // Wait for 'ready' before wiring up the rest
@@ -556,7 +591,7 @@ function startGpListening(rbtn, btnName) {
     rbtn.textContent = "Press a button…";
 
     const interval = setInterval(() => {
-        const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+        const gamepads = gamepadApiAvailable() ? navigator.getGamepads() : [];
         for (const gp of gamepads) {
             if (!gp || !gp.connected) continue;
             for (let i = 0; i < gp.buttons.length; i++) {
@@ -620,6 +655,28 @@ function pauseForOverlay() {
         worker.postMessage({type: "pause"});
         if (audioCtx) audioCtx.suspend();
     }
+}
+
+/* Close every open overlay and clear the pause-depth bookkeeping.
+
+'loadRom' used to hand-decrement 'overlayDepth' once per open overlay, which
+duplicated 'resumeAfterOverlay''s accounting in a second place: any future
+overlay added to one path and not the other would leave the depth stuck above
+zero, and a non-zero depth means 'resumeAfterOverlay' never resumes — the
+emulator stays paused with no visible reason. Resetting outright removes the
+chance of a mismatch. The caller is about to start a fresh session and set the
+run state itself, so there is nothing to resume back into. */
+function closeAllOverlays() {
+    if (helpOpen) {
+        document.getElementById("help-overlay").classList.remove("visible");
+        helpOpen = false;
+    }
+    if (aboutOpen) {
+        document.getElementById("about-overlay").classList.remove("visible");
+        aboutOpen = false;
+    }
+    overlayDepth = 0;
+    wasRunningBeforeOverlay = false;
 }
 
 function resumeAfterOverlay() {
@@ -719,6 +776,15 @@ function dbGet(storeName, key) {
     });
 }
 
+function dbDelete(storeName, key) {
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, "readwrite");
+        tx.objectStore(storeName).delete(key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
 async function sha256Hex(bytes) {
     const webCrypto = globalThis.crypto;
     if (!webCrypto || !webCrypto.subtle) throw new Error("WebCrypto SHA-256 is unavailable");
@@ -726,8 +792,42 @@ async function sha256Hex(bytes) {
     return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("");
 }
 
-function romStorageKey(hash) {
-    return `sha256:${hash}`;
+// Two FNV-1a variants over one pass, plus the length. Not cryptographic, and it
+// does not need to be: this only has to tell one ROM in a personal library from
+// another, stably across sessions.
+function fnv1aHex(bytes) {
+    let h1 = 0x811c9dc5 >>> 0;
+    let h2 = 0x01000193 >>> 0;
+    for (let i = 0; i < bytes.length; i++) {
+        const b = bytes[i];
+        h1 = Math.imul(h1 ^ b, 0x01000193) >>> 0;
+        h2 = Math.imul(h2 ^ b, 0x85ebca6b) >>> 0;
+    }
+    return [
+        bytes.length.toString(16).padStart(8, "0"),
+        h1.toString(16).padStart(8, "0"),
+        h2.toString(16).padStart(8, "0"),
+    ].join("");
+}
+
+/* Stable per-ROM storage key.
+
+`crypto.subtle` exists only in secure contexts, so a self-hosted build served
+over plain HTTP from anything but localhost does not have it. This used to
+throw before the ROM ever reached the Worker, which made the emulator refuse
+to load anything at all rather than merely losing persistence. Fall back to a
+non-cryptographic digest there. The prefix records which one produced the key,
+so existing `sha256:` entries keep resolving. */
+async function romIdentity(bytes) {
+    const webCrypto = globalThis.crypto;
+    if (webCrypto && webCrypto.subtle) {
+        try {
+            return `sha256:${await sha256Hex(bytes)}`;
+        } catch (err) {
+            console.warn("SHA-256 unavailable; falling back to FNV-1a ROM key", err);
+        }
+    }
+    return `fnv1a:${fnv1aHex(bytes)}`;
 }
 
 async function saveRecentRom(key, name, bytes) {
@@ -898,6 +998,7 @@ async function destroyCurrentSession() {
     cachedIsCgb = false;
     keyButtonsDown = new Set();
     gamepadButtonsDown = new Set();
+    lastSentButtons.clear();
     latestFrameReady = false;
     syncLedState();
 }
@@ -917,24 +1018,14 @@ async function decompressIfNeeded(file) {
 async function loadRom(file) {
     if (!workerReady) return;
     hideError();
-    if (helpOpen) {
-        document.getElementById("help-overlay").classList.remove("visible");
-        helpOpen = false;
-        overlayDepth = Math.max(0, overlayDepth - 1);
-    }
-    if (aboutOpen) {
-        document.getElementById("about-overlay").classList.remove("visible");
-        aboutOpen = false;
-        overlayDepth = Math.max(0, overlayDepth - 1);
-    }
+    closeAllOverlays();
     await destroyCurrentSession();
     await initAudio();
     try {
         file = await decompressIfNeeded(file);
         const buffer = await file.arrayBuffer();
         const romBytes = new Uint8Array(buffer);
-        const romHash = await sha256Hex(romBytes);
-        const romKey = romStorageKey(romHash);
+        const romKey = await romIdentity(romBytes);
         // Snapshot bytes for IndexedDB before transferring the buffer to the Worker
         const romBytesForDb = romBytes.slice();
 
@@ -1051,9 +1142,36 @@ function updateFps(now) {
 
 // ─── Gamepad ──────────────────────────────────────────────────────────────────
 
+/* Whether the Gamepad API exists at all.
+
+'navigator.getGamepads' is a secure-context-only API, so a build served over
+plain HTTP from anything but localhost simply does not have it. The polling
+below degrades to an empty list there, which looks exactly like "no controller
+plugged in" — hence the one-shot notice, so a silent no-op is at least
+attributable. */
+function gamepadApiAvailable() {
+    return typeof navigator.getGamepads === "function";
+}
+
+let gamepadNoticeShown = false;
+
+function noteGamepadUnavailable() {
+    if (gamepadNoticeShown) return;
+    gamepadNoticeShown = true;
+    console.warn(
+        "Gamepad API unavailable (it requires a secure context: HTTPS or localhost). "
+            + "Controller input is disabled; keyboard input still works."
+    );
+    showToast("Controller input needs HTTPS");
+}
+
 function pollGamepads() {
     if (!currentRomName) return;
-    const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+    if (!gamepadApiAvailable()) {
+        noteGamepadUnavailable();
+        return;
+    }
+    const gamepads = navigator.getGamepads();
     const nextDown = new Set();
     for (let gi = 0; gi < gamepads.length; gi++) {
         const gp = gamepads[gi];
@@ -1076,6 +1194,25 @@ function pollGamepads() {
 }
 
 // ─── Save / Load ──────────────────────────────────────────────────────────────
+
+/* Advance to the next save slot, wrapping 1..SLOT_COUNT.
+
+The desktop frontend cycles slots with F6 between its save (F5) and load (F7)
+keys; the web had the dropdown only, so the two frontends disagreed on both
+the load key and whether slots were reachable from the keyboard at all. */
+const SLOT_COUNT = 5;
+
+function cycleSlot() {
+    if (!currentRomName) {
+        showToast("Load a ROM first");
+        return;
+    }
+    currentSlot = (currentSlot % SLOT_COUNT) + 1;
+    const select = document.getElementById("slot-select");
+    if (select) select.value = String(currentSlot);
+    saveSettings();
+    showToast(`Slot ${currentSlot}`);
+}
 
 function quickSave() {
     persistentSave().catch((err) => {
@@ -1112,11 +1249,36 @@ async function persistentSave() {
         return;
     }
     try {
-        await dbPut("states", `${currentRomKey}:slot${currentSlot}`, new Uint8Array(stateBuffer));
+        // Tag the blob with the snapshot format version that produced it. The
+        // core rejects a blob from an older format outright, so without the tag
+        // a stale slot fails at load time with a raw "UnsupportedVersion N" and
+        // then sits in IndexedDB forever with no way to clear it.
+        await dbPut("states", stateSlotKey(currentRomKey, currentSlot), {
+            version: cachedSnapshotVersion,
+            bytes: new Uint8Array(stateBuffer),
+        });
         showToast(`Saved to slot ${currentSlot}`);
     } catch (err) {
         disableStorage(STORAGE_DISABLED_MESSAGE, err);
     }
+}
+
+function stateSlotKey(romKey, slot) {
+    return `${romKey}:slot${slot}`;
+}
+
+/* Coerce whatever is in the "states" store into `{version, bytes}`.
+
+Records written before save states carried a version tag are bare `Uint8Array`
+or `ArrayBuffer` values; report them as version 0 so they never match a real
+snapshot version and get discarded on the next load attempt. */
+function normalizeStateRecord(data) {
+    if (data instanceof Uint8Array) return {version: 0, bytes: data};
+    if (data instanceof ArrayBuffer) return {version: 0, bytes: new Uint8Array(data)};
+    const bytes = data.bytes instanceof Uint8Array
+        ? data.bytes
+        : new Uint8Array(data.bytes);
+    return {version: data.version | 0, bytes};
 }
 
 async function persistentLoad() {
@@ -1132,9 +1294,10 @@ async function persistentLoad() {
         showToast("ROM identity unavailable");
         return;
     }
+    const slotKey = stateSlotKey(currentRomKey, currentSlot);
     let data;
     try {
-        data = await dbGet("states", `${currentRomKey}:slot${currentSlot}`);
+        data = await dbGet("states", slotKey);
     } catch (err) {
         disableStorage(STORAGE_DISABLED_MESSAGE, err);
         return;
@@ -1143,9 +1306,23 @@ async function persistentLoad() {
         showToast(`No save in slot ${currentSlot}`);
         return;
     }
-    const buf = data instanceof Uint8Array
-        ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
-        : data;
+    const record = normalizeStateRecord(data);
+    if (record.version !== cachedSnapshotVersion) {
+        // An untagged or older-format blob cannot be loaded by this build.
+        // Say so in plain language and drop it, rather than surfacing the
+        // core's "UnsupportedVersion N" and leaving the slot permanently stuck.
+        try {
+            await dbDelete("states", slotKey);
+        } catch (err) {
+            console.warn("Could not discard outdated save state", err);
+        }
+        showToast(`Slot ${currentSlot} was saved by an older version; discarded`);
+        return;
+    }
+    const buf = record.bytes.buffer.slice(
+        record.bytes.byteOffset,
+        record.bytes.byteOffset + record.bytes.byteLength,
+    );
     try {
         await workerCmd({type: "loadState", buffer: buf}, [buf]);
         showToast(`Loaded slot ${currentSlot}`);
@@ -1236,13 +1413,18 @@ function updatePerf() {
     }
 
     const gpDescriptions = [];
-    const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-    for (const gp of gamepads) {
-        if (!gp || !gp.connected) continue;
-        gpDescriptions.push(`${(gp.id || "?").slice(0, 20)} (${gp.buttons.length}b)`);
+    if (gamepadApiAvailable()) {
+        for (const gp of navigator.getGamepads()) {
+            if (!gp || !gp.connected) continue;
+            gpDescriptions.push(`${(gp.id || "?").slice(0, 20)} (${gp.buttons.length}b)`);
+        }
     }
     document.getElementById("perf-gamepads").textContent =
-        gpDescriptions.length ? gpDescriptions.join("; ") : "none";
+        !gamepadApiAvailable()
+            ? "unavailable (needs HTTPS)"
+            : gpDescriptions.length
+              ? gpDescriptions.join("; ")
+              : "none connected";
 }
 
 function formatMs(value) {
@@ -1379,9 +1561,17 @@ function buttonForCode(code) {
     return keyMap[code] || null;
 }
 
+/* Push one button's state to the Worker, but only when it actually changed.
+
+'pollGamepads' runs every animation frame and calls 'syncAllButtons', so an
+unconditional post sent eight messages per frame — roughly 500 a second at
+60 Hz, every one of them redundant while nothing is held. That is pure queue
+pressure on the thread doing the emulation. */
 function syncButton(button) {
     if (!currentRomName || BUTTONS[button] === undefined) return;
     const down = keyButtonsDown.has(button) || gamepadButtonsDown.has(button);
+    if (lastSentButtons.get(button) === down) return;
+    lastSentButtons.set(button, down);
     worker.postMessage({type: "setButton", button: BUTTONS[button], down});
 }
 
@@ -1410,7 +1600,13 @@ function onKeyDown(ev) {
         quickSave();
         return;
     }
-    if (ev.code === "F8") {
+    if (ev.code === "F6") {
+        ev.preventDefault();
+        cycleSlot();
+        return;
+    }
+    if (ev.code === "F7") {
+        // preventDefault also suppresses Firefox's caret-browsing toggle.
         ev.preventDefault();
         quickLoad();
         return;

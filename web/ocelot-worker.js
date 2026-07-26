@@ -330,11 +330,15 @@ function runFrame() {
     };
 }
 
+/* Drive one frame, then re-arm.
+
+The loop stops itself whenever it is not running rather than idling on a 16 ms
+poll: a paused or ROM-less tab woke the Worker ~60 times a second to do
+nothing. Every path that sets 'running' back to true restarts it, so the
+invariant to preserve is "running implies tickTimer is armed". */
 function workerTick() {
-    if (!running || !emu) {
-        tickTimer = setTimeout(workerTick, 16);
-        return;
-    }
+    tickTimer = null;
+    if (!running || !emu) return;
     const now = performance.now();
     const sinceLast = now - lastFrameTime;
     if (sinceLast < FRAME_INTERVAL - 1) {
@@ -346,9 +350,51 @@ function workerTick() {
     } else {
         lastFrameTime += FRAME_INTERVAL;
     }
-    runFrame();
+    // runFrame runs from a timer callback, not from onmessage, so nothing else
+    // would catch a WASM trap here: it would escape to the host as an uncaught
+    // Worker error and strand every in-flight command on the main thread.
+    try {
+        runFrame();
+    } catch (err) {
+        running = false;
+        postMessage({
+            type: "frameError",
+            message: err instanceof Error ? err.message : String(err),
+        });
+        return;
+    }
     tickTimer = setTimeout(workerTick, 0);
 }
+
+function startTicking() {
+    if (tickTimer === null) tickTimer = setTimeout(workerTick, 0);
+}
+
+function stopTicking() {
+    if (tickTimer !== null) {
+        clearTimeout(tickTimer);
+        tickTimer = null;
+    }
+}
+
+/* Restart the tick loop if it should be running but is not.
+
+The loop stops itself whenever `running` is false, which means "running implies
+tickTimer is armed" is now an invariant every caller has to maintain. Every
+current caller does, but the failure mode if one ever does not is a silent,
+permanent freeze: the emulator simply never advances again and nothing reports
+an error. Before the loop became self-terminating it idled on a 16 ms poll and
+would pick `running` back up on its own, so this restores that safety net
+without restoring the constant wakeups. */
+const WATCHDOG_INTERVAL_MS = 250;
+
+setInterval(() => {
+    if (running && emu && tickTimer === null) {
+        console.warn("[worker] tick loop was stopped while running; restarting");
+        lastFrameTime = performance.now();
+        startTicking();
+    }
+}, WATCHDOG_INTERVAL_MS);
 
 // ─── Message handler ──────────────────────────────────────────────────────────
 
@@ -394,11 +440,8 @@ self.onmessage = function (ev) {
 
                 running = true;
                 lastFrameTime = performance.now();
-                if (tickTimer !== null) {
-                    clearTimeout(tickTimer);
-                    tickTimer = null;
-                }
-                tickTimer = setTimeout(workerTick, 0);
+                stopTicking();
+                startTicking();
 
                 postMessage({type: "romLoaded", id, title, isCgb, hasBattery, wasmMemBytes});
                 break;
@@ -406,10 +449,7 @@ self.onmessage = function (ev) {
 
             case "destroyRom": {
                 running = false;
-                if (tickTimer !== null) {
-                    clearTimeout(tickTimer);
-                    tickTimer = null;
-                }
+                stopTicking();
                 if (emu) {
                     wasm.instance.exports.ocelot_destroy(emu);
                     emu = 0;
@@ -424,13 +464,14 @@ self.onmessage = function (ev) {
 
             case "pause":
                 running = false;
+                stopTicking();
                 break;
 
             case "resume":
                 if (emu) {
                     running = true;
                     lastFrameTime = performance.now();
-                    if (tickTimer === null) tickTimer = setTimeout(workerTick, 0);
+                    startTicking();
                 }
                 break;
 
@@ -560,7 +601,6 @@ self.onmessage = function (ev) {
             snapshotVersion: e.ocelot_snapshot_version(),
             audioSampleRate: e.ocelot_audio_sample_rate(),
         });
-        tickTimer = setTimeout(workerTick, 16);
     } catch (err) {
         postMessage({type: "initError", message: err instanceof Error ? err.message : String(err)});
     }

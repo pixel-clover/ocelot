@@ -1,8 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-{- | Per-instruction CPU trace, format-matched with @sameboy-trace@. Pipe both side by side through
-'diff -u' (or @tools/diff-traces@) to find the first instruction at which Ocelot and SameBoy diverge
-for a given ROM.
+{- | Per-instruction CPU trace, format-matched with @sameboy-trace@, for finding the first
+instruction at which Ocelot and SameBoy diverge on a given ROM:
+
+> make tools sameboy-trace
+> bin/tools/ocelot-trace  rom.gb 200000 > /tmp/ocelot.trace
+> bin/tools/sameboy-trace rom.gb 200000 > /tmp/sameboy.trace
+> diff -u /tmp/sameboy.trace /tmp/ocelot.trace | head
 
 Output line format (matches sameboy-trace.c):
 

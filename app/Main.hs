@@ -53,6 +53,7 @@ data PlayOpts = PlayOpts
     { playRomPath :: !(Maybe FilePath)
     , playBootRom :: !(Maybe FilePath)
     , playScale :: !Int
+    , playNoVsync :: !Bool
     }
 
 main :: IO ()
@@ -158,6 +159,14 @@ playOptsParser =
                 <> showDefault
                 <> help "Integer display scale factor (1–5). Window is 160N × 144N pixels."
             )
+        <*> switch
+            ( long "no-vsync"
+                <> help
+                    ( "Create the renderer without vsync. Emulation is paced off "
+                        <> "the monotonic clock either way, so this only affects "
+                        <> "tearing; use it if vsync adds latency on your display."
+                    )
+            )
 
 infoRom :: FilePath -> IO ()
 infoRom path = do
@@ -192,7 +201,7 @@ loadAndPlay opts path = do
                         battery = cartridgeHasBattery cart
                     when battery (loadSaveIfExists savePath cart)
                     openNew <-
-                        Sdl.play path cart bootBytes (hdrTitle hdr) (playScale opts)
+                        Sdl.play path cart bootBytes (hdrTitle hdr) (playScale opts) (not (playNoVsync opts))
                             `finally` when battery (writeSave savePath cart)
                     when openNew $ do
                         mPath' <- Sdl.startupScreen (playScale opts)
@@ -208,11 +217,17 @@ loadSaveIfExists path cart = do
             loadSave bs cart
         Left _ -> putStrLn ("save:     no existing " <> path <> " (will create on exit)")
 
+{- | Flush battery-backed RAM on exit. This runs from a 'finally', so an
+IO error here would otherwise replace whatever exception was already
+unwinding; report it and let the original propagate instead.
+-}
 writeSave :: FilePath -> Cartridge.Cartridge -> IO ()
 writeSave path cart = do
     bs <- extractSave cart
-    BS.writeFile path bs
-    putStrLn ("save:     wrote " <> path)
+    r <- try (BS.writeFile path bs) :: IO (Either IOException ())
+    case r of
+        Right () -> putStrLn ("save:     wrote " <> path)
+        Left e -> putStrLn ("save:     write failed: " <> show e)
 
 describeRom :: FilePath -> IO ()
 describeRom path = do

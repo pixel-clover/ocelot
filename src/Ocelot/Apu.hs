@@ -1,6 +1,6 @@
 {-# LANGUAGE BangPatterns #-}
 
-{- | Game Boy Audio Processing Unit (DMG only).
+{- | Game Boy Audio Processing Unit, covering both DMG and CGB.
 
 The APU has four channels:
 
@@ -14,16 +14,24 @@ A 512 Hz frame sequencer drives length (256 Hz), envelope (64 Hz), and sweep
 byte (NR51) and master volume (NR50). NR52 power-off zeros all channel state
 except wave RAM and length counters.
 
-State is kept in a single 'IORef' over a pure 'ApuInternal' record. Wave RAM
-is also part of that record (only 16 bytes; updates copy cheaply). The
-emulator calls 'advance' to tick the APU and 'drainSamples' to read
-accumulated stereo samples in @S16@ format.
+'setCgbMode' selects the host: on CGB, powering the APU off also clears the
+length counters, while DMG preserves them.
+
+State is kept in a single 'IORef' over a pure 'ApuInternal' record, alongside
+a reusable sample queue. Wave RAM is part of that record (only 16 bytes;
+updates copy cheaply). The emulator calls 'advance' to tick the APU and
+'drainSamples' to read accumulated stereo samples in @S16@ format.
+
+'advance' must stay bit-exact under batching: @advance n@ has to produce
+exactly what @advance 1@ repeated @n@ times would, because 'Ocelot.Bus'
+defers APU time and settles it in large chunks. 'stepCycles' guarantees this
+by chunking to the next event horizon, and @Ocelot.ApuSpec@'s
+\"advance batching equivalence\" tests pin it down.
 
 What is /not/ modeled:
 
-* Length-counter \"obscure\" behavior on writes during specific frame
-  sequencer steps.
 * NR12 \"zombie mode\" envelope tweaks.
+* The CGB stereo wave-RAM read-during-play quirk.
 -}
 module Ocelot.Apu (
     ApuState,
@@ -502,6 +510,9 @@ encodeSquare q =
         <> Snap.putU8 (fromIntegral (sqSweepTimer q))
         <> Snap.putU16 (fromIntegral (sqSweepShadow q))
         <> Snap.putBool (sqSweepEnabled q)
+        -- Persists until the next trigger, so it is real state: dropping it
+        -- means a later NR10 write that clears negate fails to disable CH1.
+        <> Snap.putBool (sqSweepNegUsed q)
         <> Snap.putU8 (fromIntegral (sqDutyPos q))
 
 decodeSquare :: Snap.Cursor Square
@@ -523,6 +534,7 @@ decodeSquare = do
     swT <- fromIntegral <$> Snap.getU8
     swSha <- fromIntegral <$> Snap.getU16
     swEn <- Snap.getBool
+    swNegUsed <- Snap.getBool
     dPos <- fromIntegral <$> Snap.getU8
     pure
         Square
@@ -543,7 +555,7 @@ decodeSquare = do
             , sqSweepTimer = swT
             , sqSweepShadow = swSha
             , sqSweepEnabled = swEn
-            , sqSweepNegUsed = False -- transient: cleared on every trigger
+            , sqSweepNegUsed = swNegUsed
             , sqDutyPos = dPos
             }
 

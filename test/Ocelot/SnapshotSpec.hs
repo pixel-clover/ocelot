@@ -2,16 +2,18 @@
 
 module Ocelot.SnapshotSpec (spec) where
 
+import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
 import Data.IORef (readIORef, writeIORef)
 import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word8)
 import qualified Ocelot.Bus as Bus
 import qualified Ocelot.Cartridge as Cart
+import Ocelot.Cpu.Execute (step)
 import Ocelot.Cpu.Registers (Registers (..))
 import Ocelot.Cpu.State (CpuState (..))
 import qualified Ocelot.Joypad as Joypad
-import Ocelot.Machine (Machine (..), machineFromCartridge)
+import Ocelot.Machine (Machine (..), getCpuRegs, machineFromCartridge, mapCpuRegs)
 import qualified Ocelot.Machine
 import qualified Ocelot.Ppu as Ppu
 import qualified Ocelot.Snapshot as Snap
@@ -325,6 +327,26 @@ spec = do
             prev `shouldBe` True
             pend `shouldBe` True
 
+        it "round-trips the CH1 sweep negate-used latch" $ do
+            -- 'sqSweepNegUsed' persists until the next trigger, so it is not
+            -- transient state. Dropping it on load means a later NR10 write
+            -- that clears the negate bit fails to disable CH1.
+            m <- mkMachine
+            let bus = Ocelot.Machine.machineBus m
+            -- NR10: sweep period 1, negate on, shift 1.
+            Bus.write8 0xFF10 0x19 bus
+            Bus.write8 0xFF12 0xF0 bus -- DAC on, volume 15
+            Bus.write8 0xFF14 0x80 bus -- Trigger: runs one negate-mode calc
+            enabled <- Bus.read8 0xFF26 bus
+            (enabled .&. 0x01) `shouldBe` 0x01
+            blob <- Snap.save m
+            r <- Snap.load blob m
+            r `shouldBe` Right ()
+            -- Clearing negate after a negate-mode calculation disables CH1.
+            Bus.write8 0xFF10 0x11 bus
+            after <- Bus.read8 0xFF26 bus
+            (after .&. 0x01) `shouldBe` 0x00
+
         it "rejects a blob with an unknown version" $ do
             m <- mkMachine
             blob <- Snap.save m
@@ -334,3 +356,56 @@ spec = do
                 bumped = header <> BS.pack [99, 0, 0, 0] <> rest
             r <- Snap.load bumped m
             r `shouldBe` Left (Snap.UnsupportedVersion 99)
+
+    describe "truncated blobs" $ do
+        -- Regression: 'applySnapshot' used to read every fixed-size section with
+        -- unchecked 'BS.index'. Because the register records are lazy in their
+        -- fields, the out-of-range reads became bottom thunks inside the live
+        -- IORefs instead of throwing, so 'load' reported success and the machine
+        -- died with "Data.ByteString.index: index too large" at the next step.
+        it "reports TruncatedBlob instead of succeeding" $ do
+            m <- mkMachine
+            blob <- Snap.save m
+            rs <- mapM (\n -> Snap.load (BS.take n blob) m) [8, 20, 100, 5000]
+            rs `shouldBe` replicate 4 (Left Snap.TruncatedBlob)
+
+        it "leaves the machine untouched and steppable after a rejected load" $ do
+            m <- mkMachine
+            blob <- Snap.save m
+            -- Move the CPU off its post-boot state so a partial restore would show.
+            mapCpuRegs (\r -> r{regPC = 0x0150, regA = 0x5A}) m
+            r <- Snap.load (BS.take 100 blob) m
+            r `shouldBe` Left Snap.TruncatedBlob
+            regs <- getCpuRegs m
+            regPC regs `shouldBe` 0x0150
+            regA regs `shouldBe` 0x5A
+            -- The real symptom: stepping used to force the planted thunks.
+            step m
+
+        it "rejects a blob truncated inside a length-prefixed payload" $ do
+            m <- mkMachine
+            blob <- Snap.save m
+            -- Drop the final byte: the trailing MBC blob's payload is short.
+            r <- Snap.load (BS.take (BS.length blob - 1) blob) m
+            r `shouldBe` Left Snap.TruncatedBlob
+
+        it "rejects a blob whose length prefix overruns the buffer" $ do
+            m <- mkMachine
+            blob <- Snap.save m
+            -- The first blob prefix is the PPU VRAM length, right after the
+            -- fixed CPU/timer/joypad/PPU-register sections. Inflate it.
+            let off = 8 + cpuLen + timerLen + joyLen + ppuRegLen
+                bogus = BS.pack [0xFF, 0xFF, 0xFF, 0x0F]
+                mangled =
+                    BS.take off blob <> bogus <> BS.drop (off + 4) blob
+            r <- Snap.load mangled m
+            r `shouldBe` Left Snap.TruncatedBlob
+
+{- | Section sizes mirrored from 'Ocelot.Snapshot' so the truncation tests can
+point at a known offset without exporting the internals.
+-}
+cpuLen, timerLen, joyLen, ppuRegLen :: Int
+cpuLen = 24
+timerLen = 8
+joyLen = 3
+ppuRegLen = 16

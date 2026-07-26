@@ -96,6 +96,38 @@ spec = do
             readTima ts3 `shouldBe` 0x77
             ov `shouldBe` True
 
+        it "writing TMA during the reload window leaves TIMA reading 0 until the reload fires" $ do
+            -- The reload window (T1..T3 after the wrap) must keep TIMA reading
+            -- 0; only the *reloaded* window propagates a TMA write straight
+            -- into TIMA. 'writeTma' used to set TIMA on both, so a read inside
+            -- the reload window returned TMA instead of 0.
+            let ts0 =
+                    writeTac
+                        0x05
+                        ( writeTma
+                            0x42
+                            (writeTima 0xFF initialTimer)
+                        )
+                (ts1, _) = advance 4 ts0
+                ts2 = writeTma 0x77 ts1
+            readTima ts2 `shouldBe` 0x00
+
+        it "writing TMA during the reloaded window propagates straight into TIMA" $ do
+            let ts0 =
+                    writeTac
+                        0x05
+                        ( writeTma
+                            0x42
+                            (writeTima 0xFF initialTimer)
+                        )
+                -- 5 M-cycles: the reload has fired (TIMA = TMA = 0x42) and we
+                -- are inside the 4 T-cycle "reloaded" window.
+                (ts1, ov) = advance 5 ts0
+                ts2 = writeTma 0x77 ts1
+            ov `shouldBe` True
+            readTima ts1 `shouldBe` 0x42
+            readTima ts2 `shouldBe` 0x77
+
         it "writing DIV that drops the AND signal high->low increments TIMA" $ do
             -- TAC=0x05 selects bit 3 of the divider. Pre-set divider so bit 3 is 1 (so the AND signal is high).
             -- Writing DIV resets to 0 and drops the AND signal, which is a falling edge.

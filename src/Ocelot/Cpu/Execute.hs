@@ -157,7 +157,11 @@ doInstruction m = do
         mapCpu (\c -> c{cpuHaltBug = False}) m
     mapCpuRegs (\r -> r{regPC = pc + fromIntegral len - (1 - operandOffset)}) m
     mc <- execute instr m
-    mapCpu (\c -> c{cpuCycles = cpuCycles c + fromIntegral mc}) m
+    -- General-mode HDMA stalls the CPU for the duration of its copy. The bus
+    -- has already ticked the peripherals for those cycles, so they count
+    -- toward 'cpuCycles' but must not be advanced again here.
+    stall <- Bus.takeStallCycles (machineBus m)
+    mapCpu (\c -> c{cpuCycles = cpuCycles c + fromIntegral (mc + stall)}) m
     consumed <- readIORef (machineInternalAdvance m)
     let remaining = mc - consumed
     when (remaining > 0) (advanceBus remaining m)
@@ -543,7 +547,7 @@ execute instr m = case instr of
         hl <- getReg16 RHL m
         v <- getReg16 rr m
         zIn <- (`testBit` 7) . regF <$> getCpuRegs m
-        let (r, flags) = Alu.add16 hl v zIn
+        (!r, !flags) <- pure (Alu.add16 hl v zIn)
         setReg16 RHL r m
         setFlagsByte (flagsToByte flags) m
         cycleNoAccess m
@@ -551,7 +555,7 @@ execute instr m = case instr of
     AddSpE e -> do
         -- ADD SP, e (4 cycles): prefetch M1+M2, +2 internal cycles.
         sp <- regSP <$> getCpuRegs m
-        let (r, flags) = Alu.addSP sp e
+        (!r, !flags) <- pure (Alu.addSP sp e)
         mapCpuRegs (\rs -> rs{regSP = r}) m
         setFlagsByte (flagsToByte flags) m
         cycleNoAccess m
@@ -560,7 +564,7 @@ execute instr m = case instr of
     LdHlSpE e -> do
         -- LD HL, SP+e (3 cycles): prefetch M1+M2, +1 internal cycle.
         sp <- regSP <$> getCpuRegs m
-        let (r, flags) = Alu.addSP sp e
+        (!r, !flags) <- pure (Alu.addSP sp e)
         setReg16 RHL r m
         setFlagsByte (flagsToByte flags) m
         cycleNoAccess m
@@ -614,7 +618,7 @@ execute instr m = case instr of
             n = testBit (regF regs) 6
             h = testBit (regF regs) 5
             c = testBit (regF regs) 4
-            (a', flags) = Alu.daa a n h c
+        (!a', !flags) <- pure (Alu.daa a n h c)
         setReg8 RA a' m
         setFlagsByte (flagsToByte flags) m
         pure 1
@@ -652,8 +656,9 @@ execute instr m = case instr of
     Stop -> do
         -- On a CGB cart with KEY1 bit 0 set, STOP triggers the
         -- single/double-speed switch instead of halting; otherwise it
-        -- halts as on DMG.
+        -- halts as on DMG. Either way the internal divider is reset.
         switched <- Bus.triggerSpeedSwitch (machineBus m)
+        Bus.resetTimerDiv (machineBus m)
         if switched
             then pure 1
             else mapCpu (\c -> c{cpuHalted = True}) m >> pure 1
@@ -692,7 +697,7 @@ applyInc :: Reg8 -> Machine -> IO MCycles
 applyInc r m = do
     v <- getReg8 r m
     cIn <- getFlagC m
-    let (v', flags) = Alu.inc8 v cIn
+    (!v', !flags) <- pure (Alu.inc8 v cIn)
     setReg8 r v' m
     setFlagsByte (flagsToByte flags) m
     pure (if r == RIndHL then 3 else 1)
@@ -702,36 +707,46 @@ applyDec :: Reg8 -> Machine -> IO MCycles
 applyDec r m = do
     v <- getReg8 r m
     cIn <- getFlagC m
-    let (v', flags) = Alu.dec8 v cIn
+    (!v', !flags) <- pure (Alu.dec8 v cIn)
     setReg8 r v' m
     setFlagsByte (flagsToByte flags) m
     pure (if r == RIndHL then 3 else 1)
 
+{- | Dispatch one ALU operation onto @A@.
+
+Written as a direct case per opcode rather than building an intermediate
+@(Maybe Word8, Flags)@ pair. The old shape allocated a @Just@ box, a pair
+thunk, and a selector thunk per component on every arithmetic instruction,
+because a lazy @let@ pattern binding is not forced until its components are
+demanded. 'store' takes the result pair in a strict argument pattern, so the
+worker/wrapper unboxes it and nothing reaches the heap.
+-}
 applyAlu :: AluOp -> Word8 -> Machine -> IO ()
 {-# INLINE applyAlu #-}
 applyAlu op operand m = do
     a <- getReg8 RA m
     cIn <- getFlagC m
-    let (resultMaybe, flags) = case op of
-            AluAdd -> let (r, f) = Alu.add8 a operand in (Just r, f)
-            AluAdc -> let (r, f) = Alu.adc8 a operand cIn in (Just r, f)
-            AluSub -> let (r, f) = Alu.sub8 a operand in (Just r, f)
-            AluSbc -> let (r, f) = Alu.sbc8 a operand cIn in (Just r, f)
-            AluAnd -> let (r, f) = Alu.and8 a operand in (Just r, f)
-            AluXor -> let (r, f) = Alu.xor8 a operand in (Just r, f)
-            AluOr -> let (r, f) = Alu.or8 a operand in (Just r, f)
-            AluCp -> (Nothing, Alu.cp8 a operand)
-    case resultMaybe of
-        Just r -> setReg8 RA r m
-        Nothing -> pure ()
-    setFlagsByte (flagsToByte flags) m
+    case op of
+        -- CP discards the result and writes flags only.
+        AluCp -> setFlagsByte (flagsToByte (Alu.cp8 a operand)) m
+        AluAdd -> store (Alu.add8 a operand)
+        AluAdc -> store (Alu.adc8 a operand cIn)
+        AluSub -> store (Alu.sub8 a operand)
+        AluSbc -> store (Alu.sbc8 a operand cIn)
+        AluAnd -> store (Alu.and8 a operand)
+        AluXor -> store (Alu.xor8 a operand)
+        AluOr -> store (Alu.or8 a operand)
+  where
+    store (!r, !flags) = do
+        setReg8 RA r m
+        setFlagsByte (flagsToByte flags) m
 
 aRotate :: (Word8 -> (Word8, Alu.Flags)) -> Machine -> IO MCycles
 {-# INLINE aRotate #-}
 aRotate op m = do
     a <- getReg8 RA m
-    let (a', flags) = op a
-        flags' = flags{Alu.flagZ = False}
+    (!a', !flags) <- pure (op a)
+    let !flags' = flags{Alu.flagZ = False}
     setReg8 RA a' m
     setFlagsByte (flagsToByte flags') m
     pure 1
@@ -741,8 +756,8 @@ aRotateC :: (Word8 -> Bool -> (Word8, Alu.Flags)) -> Machine -> IO MCycles
 aRotateC op m = do
     a <- getReg8 RA m
     cIn <- getFlagC m
-    let (a', flags) = op a cIn
-        flags' = flags{Alu.flagZ = False}
+    (!a', !flags) <- pure (op a cIn)
+    let !flags' = flags{Alu.flagZ = False}
     setReg8 RA a' m
     setFlagsByte (flagsToByte flags') m
     pure 1
@@ -755,7 +770,7 @@ cbRotate ::
 {-# INLINE cbRotate #-}
 cbRotate op r m = do
     v <- getReg8 r m
-    let (v', flags) = op v
+    (!v', !flags) <- pure (op v)
     setReg8 r v' m
     setFlagsByte (flagsToByte flags) m
     pure (if r == RIndHL then 4 else 2)
@@ -769,7 +784,7 @@ cbRotateC ::
 cbRotateC op r m = do
     v <- getReg8 r m
     cIn <- getFlagC m
-    let (v', flags) = op v cIn
+    (!v', !flags) <- pure (op v cIn)
     setReg8 r v' m
     setFlagsByte (flagsToByte flags) m
     pure (if r == RIndHL then 4 else 2)

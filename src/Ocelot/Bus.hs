@@ -14,13 +14,20 @@ Special handling on writes:
 
 * Writes to the cartridge ROM window @0x0000-0x7FFF@ are forwarded to
   'Ocelot.Cartridge.write8'.
-* Writes to the serial control register @0xFF02@ that initiate a transfer
-  capture the byte at @0xFF01@ into the serial output buffer and clear the
-  start bit.
-* Writes to @0xFF46@ trigger an immediate OAM DMA copying 160 bytes from
-  @(v << 8)@ into OAM.
+* Writes to the serial control register @0xFF02@ that start an internal-clock
+  transfer capture the byte at @0xFF01@ into the serial output buffer and arm
+  a 128 M-cycle countdown. @SC@ bit 7 stays set until that expires, at which
+  point @SB@ reads @0xFF@ (the line idles high with no peer) and @IF@ bit 3 is
+  raised. See 'stepSerial'.
+* Writes to @0xFF46@ start an OAM DMA, which then copies one byte per CPU
+  M-cycle for 160 M-cycles. While it runs the CPU is locked off everything
+  below @0xFF00@. See 'stepOamDma'.
 * The unusable region @0xFEA0-0xFEFF@ ignores writes; reads return @0xFF@.
-* @0xFF00@ (joypad) returns "no buttons pressed" and lets row-select round-trip.
+* @0xFF00@ (joypad) is routed to 'Ocelot.Joypad', which drives the active-low
+  button matrix and latches the joypad interrupt edge.
+
+The APU is the one peripheral 'advance' does not tick in lockstep; it is
+deferred and settled on demand. See 'flushApu'.
 -}
 module Ocelot.Bus (
     Bus (..),
@@ -48,6 +55,10 @@ module Ocelot.Bus (
     drainAudioSamplesVector,
     drainAudioSamplesInto,
     triggerSpeedSwitch,
+    resetTimerDiv,
+    takeStallCycles,
+    flushApu,
+    discardApuDebt,
     installBootRom,
 ) where
 
@@ -88,6 +99,12 @@ data Bus = Bus
     , busApu :: !ApuState
     , busJoypad :: !JoypadState
     , busSerialOut :: !(IORef [Word8])
+    , busSerialCountdown :: !(IORef Int)
+    -- ^ CPU M-cycles left in an in-flight internal-clock serial transfer,
+    -- or 0 when idle. A transfer shifts 8 bits at 8192 Hz, i.e. 512
+    -- T-cycles = 128 M-cycles. The serial shift clock is derived from the
+    -- CPU clock, so like OAM DMA this counts CPU M-cycles rather than the
+    -- speed-divided peripheral cycles.
     , busFrameReady :: !(IORef Bool)
     , busCgb :: !Bool
     -- ^ True when the host hardware is CGB. Gates CGB-only registers
@@ -152,6 +169,24 @@ data Bus = Bus
     -- ^ True for one M-cycle between the FF46 write and the first byte
     -- copy. Models the documented "DMA starts after the cycle in which
     -- it was triggered" behavior.
+    , busApuDebt :: !(IORef Int)
+    -- ^ Peripheral M-cycles owed to the APU but not yet stepped. The APU is
+    -- the one subsystem whose state nothing observes between accesses: it
+    -- raises no interrupt and feeds nothing back into the bus, so its only
+    -- observation channels are its own register window, the sample drain,
+    -- and the snapshot dump. Settling the debt at those points (see
+    -- 'flushApu') instead of stepping every M-cycle is bit-exact, because
+    -- 'Ocelot.Apu.advance' chunks to the next event horizon and so never
+    -- steps past an event. It avoids rebuilding the whole @ApuInternal@
+    -- record once per M-cycle, which was the single largest source of
+    -- allocation in the emulator.
+    , busStallCycles :: !(IORef Int)
+    -- ^ CPU M-cycles the bus consumed on the CPU's behalf during the
+    -- current instruction (currently only general-mode HDMA, which stalls
+    -- the CPU for the duration of the copy). 'Ocelot.Cpu.Execute' drains
+    -- this after each instruction and folds it into @cpuCycles@; the
+    -- peripherals have already been ticked, so it must not be advanced
+    -- again.
     }
 
 {- | Choice of host model for the emulated bus. Most CGB-only registers
@@ -233,6 +268,7 @@ fromCartridgeOnHost host bootMode c = do
     apu <- Apu.initial
     joypad <- Joypad.initial
     serial <- newIORef []
+    serialCountdown <- newIORef 0
     frameReady <- newIORef False
     wramBank <- newIORef 0x01
     key1 <- newIORef 0x00
@@ -248,6 +284,8 @@ fromCartridgeOnHost host bootMode c = do
     oamDmaSrc <- newIORef 0
     oamDmaIndex <- newIORef 0
     oamDmaStarting <- newIORef False
+    apuDebt <- newIORef 0
+    stallCycles <- newIORef 0
     let cgbCart = case Header.hdrCgbFlag (Cartridge.cartridgeHeader c) of
             Header.DmgOnly -> False
             Header.DmgAndCgb -> True
@@ -324,6 +362,7 @@ fromCartridgeOnHost host bootMode c = do
             , busApu = apu
             , busJoypad = joypad
             , busSerialOut = serial
+            , busSerialCountdown = serialCountdown
             , busFrameReady = frameReady
             , busCgb = cgb
             , busCgbDmgCompat = cgb && not cgbCart
@@ -342,6 +381,8 @@ fromCartridgeOnHost host bootMode c = do
             , busOamDmaSrc = oamDmaSrc
             , busOamDmaIndex = oamDmaIndex
             , busOamDmaStarting = oamDmaStarting
+            , busApuDebt = apuDebt
+            , busStallCycles = stallCycles
             }
 
 {- | CPU-side bus read. While an OAM DMA is in progress, only HRAM
@@ -406,7 +447,7 @@ read8Raw addr b
     | addr == 0xFF05 = Timer.readTima <$> readIORef (busTimer b)
     | addr == 0xFF06 = Timer.readTma <$> readIORef (busTimer b)
     | addr == 0xFF07 = Timer.readTac <$> readIORef (busTimer b)
-    | addr >= 0xFF10 && addr <= 0xFF3F = Apu.read8 addr (busApu b)
+    | addr >= 0xFF10 && addr <= 0xFF3F = flushApu b >> Apu.read8 addr (busApu b)
     -- DMA register (FF46): reads back the last-written source-high byte.
     | addr == 0xFF46 = MV.read (busIo b) 0x46
     | addr >= 0xFF40 && addr <= 0xFF4B = Ppu.read8 addr (busPpu b)
@@ -520,7 +561,7 @@ write8Raw addr !v b
     | addr == 0xFF05 = modifyIORef' (busTimer b) (Timer.writeTima v)
     | addr == 0xFF06 = modifyIORef' (busTimer b) (Timer.writeTma v)
     | addr == 0xFF07 = modifyIORef' (busTimer b) (Timer.writeTac v)
-    | addr >= 0xFF10 && addr <= 0xFF3F = Apu.write8 addr v (busApu b)
+    | addr >= 0xFF10 && addr <= 0xFF3F = flushApu b >> Apu.write8 addr v (busApu b)
     | addr == 0xFF46 = oamDma v b
     | addr >= 0xFF40 && addr <= 0xFF4B = Ppu.write8 addr v (busPpu b)
     | addr == 0xFF4D = writeKey1 v b
@@ -537,13 +578,53 @@ write8Raw addr !v b
     | addr <= 0xFFFE = MV.write (busHram b) (fromIntegral addr .&. 0x7F) v
     | otherwise = writeIORef (busIe b) v
 
+{- | Write to @SC@ (@0xFF02@). Setting bit 7 starts a transfer; bit 0
+selects the internal clock.
+
+The outgoing byte is captured into the serial output buffer straight away
+(that buffer is the emulator's stand-in for a printer/link peer, and test
+ROMs use it as their verdict channel), but the register-visible side of the
+transfer is timed: @SC@ bit 7 stays set and no interrupt fires until the
+eighth bit has been shifted out, 128 CPU M-cycles later. An external-clock
+transfer has no peer to supply the clock, so it never completes.
+-}
 handleSerialControl :: Word8 -> Bus -> IO ()
 handleSerialControl v b
     | testBit v 7 = do
         sb <- MV.read (busIo b) 0x01
-        MV.write (busIo b) 0x02 (v .&. 0x7F)
+        MV.write (busIo b) 0x02 v
         modifyIORef' (busSerialOut b) (sb :)
-    | otherwise = MV.write (busIo b) 0x02 v
+        writeIORef
+            (busSerialCountdown b)
+            (if testBit v 0 then serialTransferMCycles else 0)
+    | otherwise = do
+        MV.write (busIo b) 0x02 v
+        writeIORef (busSerialCountdown b) 0
+
+{- | CPU M-cycles an internal-clock serial transfer takes: 8 bits at
+8192 Hz is 512 T-cycles.
+-}
+serialTransferMCycles :: Int
+serialTransferMCycles = 128
+
+{- | Tick an in-flight serial transfer. On completion the incoming byte
+lands in @SB@ (@0xFF@ with no link peer, since the line idles high), @SC@
+bit 7 clears, and @IF@ bit 3 is raised.
+-}
+stepSerial :: Int -> Bus -> IO ()
+{-# INLINE stepSerial #-}
+stepSerial n b = do
+    remaining <- readIORef (busSerialCountdown b)
+    when (remaining > 0) $ do
+        let !remaining' = remaining - n
+        if remaining' > 0
+            then writeIORef (busSerialCountdown b) remaining'
+            else do
+                writeIORef (busSerialCountdown b) 0
+                MV.write (busIo b) 0x01 0xFF
+                sc <- MV.read (busIo b) 0x02
+                MV.write (busIo b) 0x02 (sc .&. 0x7F)
+                setIfBit 3 b
 
 {- | Resolve the active upper-WRAM bank: bank 0 is treated as bank 1 on
 real hardware, so the lower 4 KiB (always bank 0) is mirrored only when
@@ -703,6 +784,67 @@ writePalEntry pal palIdx bytes =
         (\(i, b) -> MV.write pal (palIdx * 8 + i) b)
         (zip [0 ..] (take 8 bytes))
 
+----------------------------------------------------------------------
+-- Deferred APU
+----------------------------------------------------------------------
+
+{- | Upper bound on outstanding APU debt, in peripheral M-cycles. A game
+that never touches an APU register and never drains audio would otherwise
+let the debt (and the queued samples it will produce) grow without limit.
+Roughly 1 ms of emulated time: far below one frame, and far above the
+batch size at which the per-call overhead stops mattering.
+-}
+apuDebtHorizon :: Int
+apuDebtHorizon = 1024
+
+-- | Add to the outstanding APU debt, settling it if it hits the horizon.
+accrueApuDebt :: Int -> Bus -> IO ()
+{-# INLINE accrueApuDebt #-}
+accrueApuDebt n b = do
+    debt <- readIORef (busApuDebt b)
+    let !debt' = debt + n
+    if debt' >= apuDebtHorizon
+        then do
+            writeIORef (busApuDebt b) 0
+            Apu.advance debt' (busApu b)
+        else writeIORef (busApuDebt b) debt'
+
+{- | Settle any outstanding APU debt so the APU is current as of now. Must
+run before anything observes APU state: a register read or write, a sample
+drain, or a snapshot dump. Cheap and idempotent when the debt is zero.
+-}
+flushApu :: Bus -> IO ()
+{-# INLINE flushApu #-}
+flushApu b = do
+    debt <- readIORef (busApuDebt b)
+    when (debt > 0) $ do
+        writeIORef (busApuDebt b) 0
+        Apu.advance debt (busApu b)
+
+{- | Discard outstanding APU debt without settling it. Only for snapshot
+load, where the APU state is being replaced wholesale and the debt belongs
+to a timeline that no longer exists.
+-}
+discardApuDebt :: Bus -> IO ()
+discardApuDebt b = writeIORef (busApuDebt b) 0
+
+{- | Zero the timer's internal 16-bit divider. @STOP@ resets it on real
+hardware, in both the plain-halt and the CGB speed-switch case. Routed
+through 'Timer.writeDiv' so the falling-edge quirk (a high AND signal
+dropping to 0 bumps TIMA once) still applies.
+-}
+resetTimerDiv :: Bus -> IO ()
+resetTimerDiv b = modifyIORef' (busTimer b) Timer.writeDiv
+
+{- | Read and clear the CPU-stall debit the bus accrued during the current
+instruction. See 'busStallCycles'.
+-}
+takeStallCycles :: Bus -> IO Int
+takeStallCycles b = atomicModifyIORef' (busStallCycles b) clearStallCycles
+
+clearStallCycles :: Int -> (Int, Int)
+clearStallCycles n = (0, n)
+
 {- | Called by the @STOP@ instruction. On a CGB cart with KEY1 bit 0
 set, this toggles the double-speed bit and clears the prepare-switch
 latch; otherwise it's a no-op (the caller still sets cpuHalted).
@@ -814,6 +956,10 @@ runGeneralHdma b = do
     ds <- readIORef (busDoubleSpeed b)
     let !blockCycles = if ds then len else len `div` 2
     advance blockCycles b
+    -- Record the stall so the CPU's cycle counter reflects the time the
+    -- copy took. The peripherals were just advanced, so the CPU must not
+    -- advance them again for these cycles.
+    modifyIORef' (busStallCycles b) (+ blockCycles)
 
 {- | Copy one 16-byte chunk for an active HBlank-mode transfer; called
 by 'advance' when the PPU enters Mode 0. Marks the transfer
@@ -833,6 +979,16 @@ stepHdmaHBlank b = do
             writeIORef (busHdmaLen b) len'
             when (len' == 0) (writeIORef (busHdmaActive b) False)
 
+{- | Wrap an HDMA destination back into the 8 KiB VRAM window. Hardware
+only wires the low 13 address bits of the destination pointer, so a
+transfer that runs past @0x9FFF@ continues at @0x8000@ rather than
+spilling into the cartridge RAM window (where 'Ppu.write8' would match
+nothing and silently drop the byte).
+-}
+vramDest :: Word16 -> Word16
+{-# INLINE vramDest #-}
+vramDest addr = 0x8000 .|. (addr .&. 0x1FFF)
+
 copyHdmaBytes :: Bus -> Word16 -> Word16 -> Int -> IO ()
 copyHdmaBytes b src dst n =
     mapM_
@@ -847,14 +1003,14 @@ copyHdmaBytes b src dst n =
             byte <- read8Raw (src + fromIntegral i) b
             -- Direct VRAM write (respects current VBK) bypassing the
             -- bus dispatcher to avoid recursion.
-            Ppu.write8 (dst + fromIntegral i) byte (busPpu b)
+            Ppu.write8 (vramDest (dst + fromIntegral i)) byte (busPpu b)
         )
         [0 .. n - 1]
 
 advanceHdmaPointers :: Bus -> Int -> IO ()
 advanceHdmaPointers b n = do
     modifyIORef' (busHdmaSrc b) (+ fromIntegral n)
-    modifyIORef' (busHdmaDst b) (+ fromIntegral n)
+    modifyIORef' (busHdmaDst b) (vramDest . (+ fromIntegral n))
 
 {- | OAM DMA: copy 160 bytes from @(v << 8)@ into OAM, going through the bus
 read path so any source region (cart ROM/RAM, WRAM) works. Done instantly;
@@ -891,6 +1047,17 @@ Reads from VRAM during the PPU's mode 3 normally return @0xFF@; we read
 through 'read8' which already returns the locked value, so a DMA whose
 source overlaps VRAM produces the same garbled OAM as on hardware.
 -}
+
+{- | Step OAM DMA by @n@ M-cycles. Top-level rather than a @let@-bound loop
+inside 'advance' so it cannot capture a closure on the (overwhelmingly
+common) path where no transfer is in flight.
+-}
+stepOamDmaN :: Int -> Bus -> IO ()
+stepOamDmaN n b = go n
+  where
+    go 0 = pure ()
+    go !k = stepOamDma b >> go (k - 1)
+
 stepOamDma :: Bus -> IO ()
 stepOamDma b = do
     active <- readIORef (busOamDmaActive b)
@@ -940,26 +1107,56 @@ readDmaSource addr b
 
 {- | Advance time-driven subsystems by N M-cycles. Ticks Timer and PPU and
 latches the Timer interrupt (bit 2) and VBlank (bit 0) into @IF@ at @0xFF0F@.
+
+Double-speed mode splits the peripherals in two, per Pandocs KEY1. These run
+twice as fast in wall-clock terms, i.e. keep their rate relative to CPU
+M-cycles and see the unhalved count:
+
+* the timer and divider,
+* the serial port,
+* OAM DMA.
+
+These keep their usual wall-clock rate, i.e. see half as many M-cycles per
+CPU instruction:
+
+* the LCD controller,
+* all sound timings and frequencies,
+* HDMA (handled in 'runGeneralHdma', which doubles its CPU-cycle debit).
 -}
 advance :: Int -> Bus -> IO ()
 advance mCycles b = do
-    -- In double-speed mode the CPU clock is twice as fast, so the
-    -- peripherals (timer, PPU, APU) should see half as many M-cycles
-    -- per CPU instruction. Track odd cycles in a 0/1 accumulator.
-    ds <- readIORef (busDoubleSpeed b)
+    -- Halved count for the wall-clock-rate peripherals. Odd M-cycles carry
+    -- over in a 0/1 accumulator so the halving does not lose time. Only a
+    -- CGB host can ever be in double speed, and 'busCgb' is a pure field, so
+    -- a DMG host skips the IORef read entirely.
     pCycles <-
-        if ds
-            then do
-                acc <- readIORef (busDoubleSpeedAcc b)
-                let total = acc + mCycles
-                writeIORef (busDoubleSpeedAcc b) (total `mod` 2)
-                pure (total `div` 2)
-            else pure mCycles
+        if not (busCgb b)
+            then pure mCycles
+            else do
+                ds <- readIORef (busDoubleSpeed b)
+                if not ds
+                    then pure mCycles
+                    else do
+                        acc <- readIORef (busDoubleSpeedAcc b)
+                        let total = acc + mCycles
+                        writeIORef (busDoubleSpeedAcc b) (total `mod` 2)
+                        pure (total `div` 2)
+    -- The divider is clocked from the CPU clock, so DIV/TIMA keep their
+    -- CPU-relative rate and take the unhalved count. Feeding the timer
+    -- 'pCycles' ran every TAC rate at half speed for as long as a CGB game
+    -- stayed in double-speed mode.
     ts <- readIORef (busTimer b)
-    let (ts', overflow) = Timer.advance pCycles ts
+    -- Scrutinise with 'case', not a lazy @let (ts', overflow) = ...@ pattern
+    -- binding. 'overflow' is not demanded until the IF-latching block several
+    -- statements below, which is far enough that the demand analyser did not
+    -- fire: the binding allocated a pair thunk plus a selector thunk per
+    -- component, and stored the new TimerState into the IORef as a thunk,
+    -- every M-cycle. A strict case lets the worker/wrapper unbox the pair.
+    (!ts', !overflow) <- pure (Timer.advance mCycles ts)
     writeIORef (busTimer b) ts'
     ppuIrqs <- Ppu.advance pCycles (busPpu b)
-    Apu.advance pCycles (busApu b)
+    -- The APU is deferred rather than stepped here; see 'flushApu'.
+    accrueApuDebt pCycles b
     -- OAM DMA copies one byte per *CPU* M-cycle, NOT per peripheral
     -- M-cycle: the DMA controller is on the CPU side of the speed
     -- divider, so a 160 M-cycle CPU wait covers the whole transfer in
@@ -973,15 +1170,24 @@ advance mCycles b = do
     -- white-screen reboot loop. Matches SameBoy 'GB_advance_cycles'
     -- 'gb->dma_cycles = cycles' (line 455) which captures the count
     -- \*before* the single-speed 'cycles <<= 1' doubling.
-    let stepOamDmaLoop 0 = pure ()
-        stepOamDmaLoop !n = stepOamDma b >> stepOamDmaLoop (n - 1)
-    stepOamDmaLoop mCycles
-    -- The "starting" flag holds the DMA off for the duration of the
-    -- triggering instruction (we run advance after the instruction has
-    -- already completed its register-store side-effect). Clearing it at
-    -- the end of advance lets copying begin on the *next* instruction's
-    -- first M-cycle, matching the documented 1-cycle startup delay.
-    writeIORef (busOamDmaStarting b) False
+    --
+    -- The whole block is gated on the transfer being live at entry. When it
+    -- is not, every 'stepOamDma' iteration would read two IORefs only to
+    -- no-op, and the "starting" reset below would dirty a clean IORef once
+    -- per M-cycle. 'busOamDmaStarting' is only ever set alongside
+    -- 'busOamDmaActive', so an inactive DMA already has it clear.
+    oamActive <- readIORef (busOamDmaActive b)
+    when oamActive $ do
+        stepOamDmaN mCycles b
+        -- The "starting" flag holds the DMA off for the duration of the
+        -- triggering instruction (we run advance after the instruction has
+        -- already completed its register-store side-effect). Clearing it at
+        -- the end of advance lets copying begin on the *next* instruction's
+        -- first M-cycle, matching the documented 1-cycle startup delay.
+        writeIORef (busOamDmaStarting b) False
+    -- Serial, like OAM DMA, is clocked from the CPU side of the speed
+    -- divider, so it also sees the unhalved count.
+    stepSerial mCycles b
     when overflow (setIfBit 2 b) -- Timer
     when (testBit ppuIrqs 0) $ do
         writeIORef (busFrameReady b) True
@@ -1019,14 +1225,15 @@ framebufferRgbaPtr b = Ppu.framebufferRgbaPtr (busPpu b)
 
 -- | Drain the APU's pending stereo samples (interleaved L,R) for the frontend.
 drainAudioSamples :: Bus -> IO [Int16]
-drainAudioSamples b = Apu.drainSamples (busApu b)
+drainAudioSamples b = flushApu b >> Apu.drainSamples (busApu b)
 
 -- | Drain the APU's pending stereo samples into an immutable vector.
 drainAudioSamplesVector :: Bus -> IO (Vector Int16)
-drainAudioSamplesVector b = Apu.drainSamplesVector (busApu b)
+drainAudioSamplesVector b = flushApu b >> Apu.drainSamplesVector (busApu b)
 
 drainAudioSamplesInto :: Ptr Int16 -> Int -> Bus -> IO Int
-drainAudioSamplesInto ptr capacity b = Apu.drainSamplesInto ptr capacity (busApu b)
+drainAudioSamplesInto ptr capacity b =
+    flushApu b >> Apu.drainSamplesInto ptr capacity (busApu b)
 
 setIfBit :: Int -> Bus -> IO ()
 {-# INLINE setIfBit #-}

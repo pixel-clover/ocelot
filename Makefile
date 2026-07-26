@@ -60,11 +60,22 @@ format-check: ## Check formatting without modifying files
 	@echo "Checking Haskell formatting..."
 	$(STACK) exec -- fourmolu --mode check $(SRC_DIR) $(APP_DIR) $(APP_WEB_DIR) $(TEST_DIR)
 
+# `stack haddock` writes under .stack-work; copy the result to $(DOC_OUT) so
+# there is a stable, documented path to open. The target used to only mkdir an
+# empty $(DOC_OUT) and then tell you to go look in .stack-work.
 docs: ## Generate Haddock documentation for the project
 	@echo "Generating documentation to $(DOC_OUT)..."
 	$(STACK) haddock --no-haddock-deps
+	@rm -rf $(DOC_OUT)
 	@mkdir -p $(DOC_OUT)
-	@echo "Documentation generated. Check .stack-work for output."
+	@SRC="$$($(STACK) path --dist-dir)/doc/html/ocelot"; \
+		if [ -d "$$SRC" ]; then \
+			cp -R "$$SRC"/. $(DOC_OUT)/; \
+			echo "Documentation copied to $(DOC_OUT) (open $(DOC_OUT)/index.html)"; \
+		else \
+			echo "Could not locate Haddock output at $$SRC"; \
+			exit 1; \
+		fi
 
 install-deps: ## Install system dependencies (for Debian-based systems)
 	@echo "Installing system dependencies..."
@@ -141,10 +152,13 @@ WASM_FLAGS := -f -desktop -f wasm-reactor
 
 tools: $(TOOLS_BINS) $(TOOLS_OUT)/sameboy-trace ## Build the developer diagnostic tools under `tools/` into `bin/tools`
 
+# -O2 matches the library's own ghc-options: `stack ghc` on a standalone file
+# would otherwise default to -O0, which makes `bench` measure the wrong thing.
+# -rtsopts lets the tools take `+RTS -s` for allocation and GC figures.
 $(TOOLS_OUT)/%: tools/%.hs
 	@mkdir -p $(TOOLS_OUT)
 	@echo "Building $@"
-	@$(STACK) ghc --no-haddock-deps -- $< -package ocelot -package containers -o $@ -outputdir $(TOOLS_OUT)/.objs 2>/dev/null
+	@$(STACK) ghc --no-haddock-deps -- $< -O2 -rtsopts -package ocelot -package containers -o $@ -outputdir $(TOOLS_OUT)/.objs 2>/dev/null
 
 # SameBoy differential trace driver. Reuses the Core/*.o objects that
 # `make -C external/SameBoy tester` produces. Flags must match Core's

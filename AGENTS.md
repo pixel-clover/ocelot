@@ -74,8 +74,8 @@ Do not invent modules that do not yet exist when answering questions, but do pla
     - `src/Ocelot/Testing.hs`: deliberate testing facade for low-level access.
 - `test/`: Hspec suite. `Spec.hs` is the `hspec-discover` entry; per-module specs live alongside as `Ocelot/<Module>Spec.hs`. Cross-cutting specs are
   `IntegrationSpec`, `GoldenSpec` (ROM-driven, gated on `OCELOT_GOLDEN=1`), `CgbSpec`, and `SnapshotSpec`.
-- `test/testroms/`: third-party and custom test ROMs the regression suite reads at runtime. Hand-authored regression ROMs are
-  tracked here; downloaded artifacts (mooneye, acid2) are gitignored and fetched with `make test-roms`. Layout:
+- `test/testroms/`: third-party test ROMs the regression suite reads at runtime. Nothing here is committed except `README.md`: the
+  ROMs are gitignored and fetched with `make test-roms`. Layout:
     - `test/testroms/mooneye/`: prebuilt mooneye-test-suite ROMs from gekkio.fi (`make mooneye-roms`).
     - `test/testroms/dmg-acid2.gb`: Matt Currie's DMG PPU acid2 (`make acid2-roms`).
     - `test/testroms/cgb-acid2.gbc`: Matt Currie's CGB PPU acid2 (`make acid2-roms`).
@@ -83,8 +83,12 @@ Do not invent modules that do not yet exist when answering questions, but do pla
     - `external/gb-test-roms/`: blargg test ROM collection from `retrio/gb-test-roms`. Load-bearing for the cpu_instrs,
       instr_timing, mem_timing, dmg_sound, cgb_sound, oam_bug, halt_bug, and interrupt_time regression coverage. The `.gb`
       files live in the submodule and are read directly.
-- `docs/`: project documentation and Haddock output target (`docs/haskell/`).
-- `Makefile`: developer workflow entry points (`build`, `test`, `lint`, `format`, `format-check`, `coverage`, `doc`, and `repl`).
+- `docs/`: project documentation and image assets. `make docs` runs Haddock and copies the generated HTML into `docs/haskell/`
+  (untracked); `stack haddock` itself writes under `.stack-work`.
+- `Makefile`: developer workflow entry points (`build`, `test`, `lint`, `format`, `format-check`, `coverage`, `docs`, `repl`, and `tools`).
+- `tools/`: standalone developer diagnostics built by `make tools` into `bin/tools/` (built `-O2 -rtsopts`, so they are usable for
+  measurement). `bench.hs` is the throughput benchmark; `ocelot-trace.hs` pairs with `sameboy-trace.c` as a differential tracer against
+  SameBoy; the rest are state-dump probes. See `tools/README.md`.
 - `package.yaml`: hpack source of truth. Do not hand-edit `*.cabal`; let `stack build` regenerate it.
 - `stack.yaml`: resolver pin and packages.
 
@@ -137,11 +141,27 @@ Cross-subsystem read/write coordination, plus M-cycle dispatch.
 
 - `read8 :: Word16 -> Bus -> IO Word8`
 - `write8 :: Word16 -> Word8 -> Bus -> IO ()`
-- `advance :: Int -> Bus -> IO ()` (M-cycles; ticks Timer, PPU, APU, OAM DMA, HDMA HBlank step, joypad IRQ edge in lockstep, halving peripheral
-  cycles in CGB double-speed mode)
+- `advance :: Int -> Bus -> IO ()` (M-cycles; ticks Timer, PPU, OAM DMA, serial transfer, HDMA HBlank step, and the joypad IRQ edge in
+  lockstep; the APU is deferred, see below). In CGB double-speed mode the peripherals split two ways, per Pandocs KEY1. The timer/divider,
+  serial port, and OAM DMA are clocked from the CPU clock, so they keep their CPU-relative rate and get the unhalved count. The LCD controller,
+  all sound timings, and HDMA keep their wall-clock rate and get the halved count (odd M-cycles carry over in `busDoubleSpeedAcc`). Halving the
+  timer along with the PPU ran every TAC rate at half speed in double-speed mode and failed blargg `interrupt_time`.
 - `drainAudioSamples :: Bus -> IO [Int16]` and `drainAudioSamplesVector :: Bus -> IO (Vector Int16)` (frontend-facing audio drains; prefer the
   vector form in hot paths)
 - `triggerSpeedSwitch :: Bus -> IO Bool` (called from the CPU's `STOP` handler)
+- `resetTimerDiv :: Bus -> IO ()` (also called from the CPU's `STOP` handler; hardware zeroes the divider on `STOP`)
+- `takeStallCycles :: Bus -> IO Int` (drains the CPU-stall debit the bus accrued during the current instruction, currently general-mode HDMA;
+  the peripherals are already ticked, so the CPU only folds it into `cpuCycles`)
+- `flushApu :: Bus -> IO ()` and `discardApuDebt :: Bus -> IO ()` (settle or drop deferred APU time; see below)
+
+The APU is the one subsystem `advance` does not tick in lockstep. It accumulates peripheral M-cycles in `busApuDebt` and settles them in a single
+`Apu.advance` at the next point anything can observe APU state. That is sound because the APU raises no interrupt and feeds nothing back into
+the bus, so its only observation channels are its own register window (`0xFF10-0xFF3F`, flushed in `read8`/`write8`), the sample drains, and
+`Apu.dumpState` (flushed in `Snapshot.save`). It is bit-exact because `Apu.advance` chunks to the next event horizon and so never steps past an
+event; `Ocelot.ApuSpec`'s "advance batching equivalence" tests pin that invariant down. `apuDebtHorizon` caps the backlog so a game that never
+touches an APU register cannot grow the debt or the sample queue without bound.
+
+**If you add a new way to observe APU state, flush first.** Reaching `busApu` directly without a `flushApu` reads a stale APU.
 
 Bus is the only place that knows the full address map: it dispatches `0x0000-0x7FFF` and `0xA000-0xBFFF` to the cartridge, the VRAM/OAM windows
 to the PPU, the audio register windows to the APU, IO/HRAM/IE to its own buffers, and the CGB extension registers (VBK, BCPS/BCPD, OCPS/OCPD,
@@ -153,8 +173,9 @@ WBK, KEY1, HDMA1-5) to the right peer.
 - `Ocelot.Cpu.Execute.runFor :: Int -> Machine -> IO Int` and `runUntilHalt :: Int -> Machine -> IO Int` (test/headless helpers)
 - Interrupt servicing is folded into `step`; there is no separately exposed entry point.
 
-CPU never imports `Ocelot.Ppu`, `Ocelot.Apu`, `Ocelot.Timer`, or `Ocelot.Cartridge`. Memory access goes through `Bus`. The single `Ocelot.Bus`
-import inside `Cpu.Execute` is for `triggerSpeedSwitch` (the `STOP` instruction) and is the only cross-subsystem coupling outside the bus.
+CPU never imports `Ocelot.Ppu`, `Ocelot.Apu`, `Ocelot.Timer`, or `Ocelot.Cartridge`. Memory access goes through `Bus`. The `Ocelot.Bus` import
+inside `Cpu.Execute` covers `triggerSpeedSwitch` and `resetTimerDiv` (the `STOP` instruction) plus `takeStallCycles` (cycle accounting), and is
+the only cross-subsystem coupling outside the bus.
 Reading or writing CPU registers from outside `Ocelot.Cpu` is allowed only for tests; production code does not poke `regA`, `regPC`, etc.
 
 ### `Ocelot.Ppu`
@@ -171,13 +192,14 @@ Reading or writing CPU registers from outside `Ocelot.Cpu` is allowed only for t
     - `framebufferRgbBytes :: PpuState -> IO ByteString`
     - `copyFramebufferRgba :: Ptr Word8 -> PpuState -> IO ()` (single `memcpy` from the storable RGBA buffer; used by tests and non-WASM callers)
     - `framebufferRgbaBytes :: PpuState -> IO ByteString`
-    - `framebufferRgbaPtr :: PpuState -> Ptr Word8` (stable pointer directly into the RGBA buffer's C-heap backing store; valid for the lifetime of
+    - `framebufferRgbaPtr :: PpuState -> Ptr Word8` (stable pointer directly into the RGBA buffer's pinned backing store; valid for the lifetime of
       the `PpuState`; the WASM host uses this to give JS a zero-copy view — no per-frame copy needed)
 - CGB hookup: `setCgbMode :: Bool -> PpuState -> IO ()` (called by the bus once at startup)
 - CGB render-mode hookup: `setCgbRenderMode :: CgbRenderMode -> PpuState -> IO ()`
 - Framebuffer-target hookup: `setFbTarget :: FbTarget -> PpuState -> IO ()` (call once after `initialPpu`, before the first frame; `FbRgb` skips RGBA
   writes on the desktop, `FbRgba` skips RGB writes on the web, `FbBoth` is the default and is used by tests)
-- `ppuFbRgba` is backed by `Data.Vector.Storable.Mutable.IOVector` (C-heap, pinned) rather than the GHC-heap unboxed `IOVector` used by all other
+- `ppuFbRgba` is backed by `Data.Vector.Storable.Mutable.IOVector`, which allocates a *pinned* buffer (`mallocPlainForeignPtrBytes`) rather than the
+  movable GHC-heap unboxed `IOVector` used by all other
   framebuffers. This is what makes `framebufferRgbaPtr` safe to call without a copy: the memory never moves. Do not change this to an unboxed vector.
 - STAT write-edge hookup: `takePendingStatIrq :: PpuState -> IO Bool` (called by the bus after PPU register writes that can raise STAT)
 
@@ -188,7 +210,9 @@ the surface listed above as the contract; do not call other PpuState fields from
 
 - Register I/O: `read8 :: Word16 -> ApuState -> IO Word8`, `write8 :: Word16 -> Word8 -> ApuState -> IO ()` (covers `0xFF10-0xFF26` and the wave
   RAM at `0xFF30-0xFF3F`)
-- Time advance: `advance :: Int -> ApuState -> IO ()` (queues stereo samples; the bus drains them)
+- Time advance: `advance :: Int -> ApuState -> IO ()` (queues stereo samples; the bus drains them). Batching must stay bit-exact: `advance n` has
+  to produce exactly what `advance 1` repeated @n@ times would, because `Ocelot.Bus` defers APU time and settles it in large chunks. `stepCycles`
+  guarantees this by chunking to the next event horizon. Any change to the chunking must keep `Ocelot.ApuSpec`'s batching-equivalence tests green.
 - Sample drain: `drainSamples :: ApuState -> IO [Int16]` and `drainSamplesVector :: ApuState -> IO (Vector Int16)` (same chronological samples; the
   vector form exists for frontend hot paths)
 - CGB hookup: `setCgbMode :: Bool -> ApuState -> IO ()`
@@ -230,8 +254,15 @@ VBA-M-compatible 48-byte suffix appended to the RAM bytes in `extractSave`/`load
 ### `Ocelot.Snapshot`
 
 - `save :: Machine -> IO ByteString` and `load :: ByteString -> Machine -> IO (Either SnapshotError ())`
-- Versioned binary format (`OCS1` magic + LE u32 version). When the format changes incompatibly, bump the version; old blobs are
-  rejected with `UnsupportedVersion`.
+- Versioned binary format (`OCS1` magic + LE u32 version). Any change to the section layout, including adding a field to a subsystem's
+  blob, must bump `currentVersion`; old blobs are then rejected with `UnsupportedVersion`. Adding fields without a bump is what left the
+  format silently mutating under version 1 through seven revisions.
+- Loading is all-or-nothing: `load` decodes the whole blob into a pure `SnapshotData` through the bounds-checked cursor and only writes
+  the machine on a complete decode. A short or corrupt blob returns `TruncatedBlob` with the machine untouched. Do not reintroduce
+  "decode straight into the live IORefs" — the register records are lazy in their fields, so a bad read survives as a thunk and detonates
+  far from the decode site.
+- `Ocelot.Snapshot.Binary` reads are bounds-checked. Use `runCursorChecked` (returns `Nothing` on overrun) for anything parsing untrusted
+  bytes; `runCursor` is the lenient zero-filling variant, valid only where an outer decoder already framed the payload length.
 - Reaches across subsystems via the per-module `dumpState`/`loadState` hooks listed above and via direct PpuState/Bus field access where the
   state is in IORefs and IOVectors that the per-module hooks would just wrap.
 
@@ -270,18 +301,28 @@ Implement using red-green TDD:
 6. Run `make format` (or `make format-check` in CI).
 7. Update docs (`README.md`, `docs/`, Haddock on the public facade) if behavior or workflow changed.
 
+Differential tracing: when a ROM fails and the verdict alone does not say why, diff Ocelot against SameBoy instruction by instruction.
+`make tools sameboy-trace` builds both halves; `tools/README.md` has the workflow. It needs the `external/SameBoy` submodule. Nothing in
+`test/` runs this — it is a manual bisection aid.
+
 Additional validation when relevant:
 
-- `make doc` for Haddock changes on the public API.
+- `make docs` for Haddock changes on the public API.
 - `make coverage` when adding or restructuring tests; check `.stack-work/install/*/hpc/`.
 - `make repl` (`stack ghci`) for ad-hoc exploration; do not commit REPL-only helpers.
 - `stack run -- <path-to-rom>` for frontend or end-to-end manual checks.
 
 Optimize-mode guidance:
 
-- Default development uses the standard `stack build` (unoptimized, fast rebuilds).
-- Use `make release` (`-O2`) for ROM-backed performance checks or long gameplay runs; do not benchmark unoptimized builds.
-- Keep unoptimized builds for stepping, tracing, and assertion-heavy debugging.
+- `-O2` is already in the library's `ghc-options`, so a plain `stack build` is optimized.
+- Benchmark with `make tools && bin/tools/bench <rom>`, which drives the SDL frontend's per-frame path and reports the multiple of real
+  hardware speed. Take the median of several runs: run-to-run spread is a few percent, comfortably wide enough to hide a small regression.
+- Add `+RTS -s` for allocation and GC figures. GC is not currently a factor (productivity sits near 99.5%); allocation *volume* in the
+  per-M-cycle path is what costs time, so treat bytes-per-M-cycle as the number to drive down.
+- Watch for lazy tuple pattern bindings (`let (a, b) = f x`) in hot paths. They allocate a pair thunk plus a selector thunk per component, and
+  the demand analyser often will not fire when the components are consumed several statements later. Prefer `(!a, !b) <- pure (f x)` in `IO`,
+  or a strict `case`, so the worker/wrapper can unbox the pair. Removing these from `Bus.advance` and the ALU dispatch cut roughly a fifth of
+  total allocation.
 
 ## Testing Expectations
 

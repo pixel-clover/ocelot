@@ -36,10 +36,11 @@ This document outlines the features implemented in the Ocelot emulator, and the 
   startup delay matching real hardware
 - [x] CGB WRAM banking (`SVBK`/`WBK` at `0xFF70`, banks 1-7, bank 0 treated as bank 1)
 - [x] CGB VRAM banking (`VBK` at `0xFF4F`, two 8 KiB banks)
-- [x] CGB HDMA: general-purpose (instant copy) and HBlank (one 16-byte chunk per HBlank entry)
+- [x] CGB HDMA: general-purpose (copied in one go, but charging the CPU stall and advancing peripherals for the block; see below) and
+  HBlank (one 16-byte chunk per HBlank entry)
 - [x] Cartridge header parsing (title, CGB flag, MBC type, ROM/RAM size, checksum)
 - [x] No-MBC cartridges (32 KiB, optional 8 KiB RAM)
-- [x] MBC1 with mode select (multicart variant detection deferred)
+- [x] MBC1 with mode select and MBC1M multicart detection (Nintendo-logo match at `0x40000`); mooneye `emulator-only/mbc1` is 13/13
 - [x] MBC2 (built-in 512x4-bit RAM, bit-8-of-address dispatch between RAM enable and ROM bank select)
 - [x] MBC3 with RTC (POSIX-time backed live counter, halt, day-carry, latch sequence, RTC bank reads/writes)
 - [x] MBC5 with bank switching (rumble bit not yet observable)
@@ -53,11 +54,14 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 
 ### Timer and Serial
 
-- [x] DIV register at 16384 Hz with reset-on-write
+- [x] DIV register at 16384 Hz with reset-on-write, and reset-on-`STOP`
 - [x] TIMA/TMA/TAC with selectable input clock
-- [x] Timer falling-edge detector and TIMA reload window (writes to TIMA cancel reload, writes to TMA shift the loaded value, DIV/TAC writes that drop
-  the AND signal increment TIMA). Mooneye timer category: 12/13 passing; `acceptance/timer/rapid_toggle.gb` is still pending.
-- [x] Serial transfer (SB/SC) with stub clock for blargg test ROM output capture (writes to SC with bit 7 set capture SB to a buffer)
+- [x] Timer falling-edge detector and TIMA reload window (writes to TIMA cancel reload, writes to TMA shift the loaded value but leave TIMA
+  reading 0 until the reload fires, DIV/TAC writes that drop the AND signal increment TIMA). Mooneye timer category: 12/13 passing;
+  `acceptance/timer/rapid_toggle.gb` is still pending.
+- [x] Serial transfer (SB/SC) with a timed internal clock: 8 bits over 128 CPU M-cycles, then SB reads 0xFF (line idles high with no peer),
+  SC bit 7 clears, and IF bit 3 is raised. The outgoing byte is also captured to a buffer for blargg test ROM output. External-clock
+  transfers never complete, since there is no peer to supply the clock.
 - [ ] Link cable peer mode (deferred; see Future Goals)
 
 ### Picture Processing Unit
@@ -69,7 +73,11 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Window rendering with a window-line counter
 - [x] Sprite rendering (8x8 and 8x16) with DMG sort-by-X priority
 - [x] STAT interrupt sources (LYC, mode 0/1/2) with edge-triggered IF latch
-- [ ] Mid-scanline LCDC/SCX/WX changes reflected in mode 3 length
+- [x] Variable mode 3 length: the `SCX mod 8` fine-scroll discard and the 6-dot window-activation restart extend mode 3, and mode 0 absorbs
+  the difference so the scanline stays 456 dots. Passes mooneye `acceptance/ppu/hblank_ly_scx_timing-GS`.
+- [ ] Per-object fetcher stall in mode 3 length (6-11 dots each); lines with sprites currently report their sprite-free length, which is what
+  leaves mooneye `acceptance/ppu/intr_2_mode0_timing_sprites` pending
+- [ ] Mid-scanline LCDC/SCX/WX changes reflected in mode 3 length (the length is latched when mode 3 begins)
 - [ ] Background pixel FIFO and sprite pixel FIFO with mid-line stalls
 - [x] CGB BG and OBJ palette RAM (BCPS/BCPD/OCPS/OCPD) with auto-increment
 - [x] CGB BG attribute byte (priority, V/H flip, VRAM bank, palette)
@@ -108,10 +116,16 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Frontend window with LCD framebuffer rendering (SDL2 RGB upload via a reusable staging buffer; terminal --headless mode also kept)
 - [x] Integer scaling for SDL frontend (`--scale N`, 1–5; default 4) and web frontend (Auto/1×/2×/3×/4× in settings panel)
 - [x] Audio output via SDL audio device with a callback-drained ring buffer
-- [x] Desktop vsync-first renderer creation with sleep-based pacing fallback
+- [x] Desktop vsync-first renderer creation with sleep-based pacing fallback, overridable with `ocelot play --no-vsync`
+- [x] Emulation paced off the monotonic clock rather than the display refresh, so the Game Boy holds 59.7275 Hz on any monitor. Presenting
+  used to drive emulation one frame per `SDL.present`, which under vsync ran games and audio at the panel's refresh rate: correct at 60 Hz,
+  1.67x too fast at 100 Hz. A high-refresh display now just repeats some presented frames.
 - [x] Performance overlay with FPS and renderer pacing mode
 - [x] In-memory snapshot save and load (`Ocelot.Snapshot.save`/`load`) with versioned binary format
 - [x] Persistent save states: F5 saves, F7 loads; 5 slots (1-5) cycled with F6; files written to `<romdir>/<romstem>/slot<n>.state`
+    - Snapshot format is at version 2. Version 1 blobs are rejected with `UnsupportedVersion`: the section layout changed repeatedly
+      without a version bump, so a v1 file's shape is not knowable and loading it would half-restore into garbage. Existing
+      `slot<n>.state` files predating version 2 need to be re-saved.
 - [x] Screenshot capture: F12 writes a P6 PPM to `<romdir>/<romstem>/screenshot-<timestamp>.ppm`
 - [x] GIF recording: Shift+F12 toggles capture; frames are palette-quantized and written to `<romdir>/<romstem>/recording-<timestamp>.gif`
 - [x] Pause toggle (Space) and fast-forward (Tab held, 4x)
@@ -158,7 +172,7 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Blargg cgb_sound wired in (12 sub-ROMs available, aspirational; 10 currently pass: 01-registers, 02-len ctr, 03-trigger, 04-sweep, 05-sweep
   details, 06-overflow on trigger, 08-len ctr during power, 10-wave trigger while on, 11-regs after power, 12-wave)
 - [x] Blargg oam_bug wired in (8 sub-ROMs, aspirational; ~2 currently pass: 3-non_causes, 6-timing_no_bug)
-- [x] Blargg halt_bug, interrupt_time wired in (aspirational; both currently report error code 0xFF)
+- [x] Blargg halt_bug and interrupt_time both pass (interrupt_time started passing once the timer stopped being halved in CGB double-speed mode)
 - [ ] Promote aspirational blargg ROMs to strict run-to-pass as accuracy is added
 - [x] Mooneye magic-breakpoint runner in `GoldenSpec.hs`: observes BCDEHL after each chunk for the Fibonacci pass tuple or all-`0x42` failure tuple
 - [x] Mooneye prebuilt-ZIP fetcher (`make mooneye-roms`) downloads gekkio.fi's binaries to `test/testroms/mooneye/`
@@ -200,6 +214,8 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [ ] Configurable color correction (CGB LCD color profile, no-correction)
 - [x] WebAssembly build with Canvas rendering and Web Audio playback (GHC WASM cross-compilation; browser host now uses RGBA framebuffer exports,
   direct `ImageData` blits, and transferable audio chunks)
+- [x] Save-state hotkeys match the desktop frontend: F5 saves, F6 cycles slot (1-5), F7 loads. The web build previously used F8 to load and had
+  no keyboard slot control at all.
 - [ ] Libretro core packaging
 - [ ] Cheat code support (Game Genie, GameShark)
 - [ ] Lua or Haskell-script hookable trace API for tool-assisted runs
