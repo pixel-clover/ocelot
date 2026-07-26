@@ -1,33 +1,38 @@
 {-# LANGUAGE BangPatterns #-}
 
-{- | Game Boy Picture Processing Unit (DMG only).
+{- | Game Boy Picture Processing Unit, covering both DMG and CGB.
 
-The PPU owns its own VRAM (8 KiB at @0x8000-0x9FFF@), OAM (160 bytes at
-@0xFE00-0xFE9F@), and the register file at @0xFF40-0xFF4B@. The bus
-dispatches reads and writes for those ranges to 'read8' and 'write8'.
+The PPU owns its own VRAM (8 KiB on DMG, two banks on CGB, at
+@0x8000-0x9FFF@), OAM (160 bytes at @0xFE00-0xFE9F@), and the register file
+at @0xFF40-0xFF4B@ plus the CGB-only registers at @0xFF4F@ and
+@0xFF68-0xFF6C@. The bus dispatches reads and writes for those ranges to
+'read8' and 'write8'.
 
-Mode timing follows the standard scanline structure:
+Every scanline is 456 dots, split between the modes:
 
-> Mode 2 (OAM scan): T-cycles   0..79  (80)
-> Mode 3 (drawing) : T-cycles  80..251 (172)
-> Mode 0 (HBlank)  : T-cycles 252..455 (204)
-> Mode 1 (VBlank)  : 10 lines * 456 T-cycles = 4560 T-cycles
+> Mode 2 (OAM scan): dots 0..79                (80, fixed)
+> Mode 3 (drawing) : dots 80..(80 + len - 1)   (len, variable; 172 minimum)
+> Mode 0 (HBlank)  : the rest of the scanline  (456 - 80 - len)
+> Mode 1 (VBlank)  : 10 lines * 456 dots = 4560 dots
+
+Mode 3 is variable-length: 'mode3Length' adds the @SCX mod 8@ fine-scroll
+discard and the 6-dot window-activation restart to the 172-dot base, and mode
+0 absorbs the difference.
 
 State is held in 'IORef's and 'IOVector's so reads and writes are O(1) and
 the rendered framebuffer is updated in place.
 
 What is implemented: the mode state machine and LY counter; background;
-window (LY-WY approximation); sprites with the DMG sort-by-X priority,
-8x8 / 8x16 sizes, X/Y flip, OBP0/OBP1, and BG-priority bit; BGP/OBP palette
-transforms; VBlank interrupt edge; LCD-off freeze.
+window, with a real window-line counter ('ppuWindowLine') rather than an
+@LY - WY@ approximation; sprites with the DMG sort-by-X priority, 8x8 / 8x16
+sizes, X/Y flip, OBP0/OBP1, and the BG-priority bit; BGP/OBP palette
+transforms; the VBlank interrupt edge and all four STAT interrupt sources;
+LCD-off freeze; and the CGB pipeline (VRAM banking, BG attributes, BG/OBJ
+palette RAM, and OPRI sprite priority).
 
-Mode 3 is variable-length: 'mode3Length' adds the @SCX mod 8@ fine-scroll
-discard and the window-activation restart to the 172-dot base, and mode 0
-absorbs the difference so the scanline stays 456 dots.
-
-Not implemented: the per-object fetcher stall (so lines with sprites report
-their sprite-free mode 3 length), and the OAM DMA delay (the bus copies
-instantly).
+Not implemented: the per-object fetcher stall, so lines with sprites report
+their sprite-free mode 3 length. That is what leaves mooneye
+@acceptance/ppu/intr_2_mode0_timing_sprites@ pending.
 -}
 module Ocelot.Ppu (
     PpuState (..),

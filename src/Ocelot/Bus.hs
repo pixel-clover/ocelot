@@ -14,13 +14,20 @@ Special handling on writes:
 
 * Writes to the cartridge ROM window @0x0000-0x7FFF@ are forwarded to
   'Ocelot.Cartridge.write8'.
-* Writes to the serial control register @0xFF02@ that initiate a transfer
-  capture the byte at @0xFF01@ into the serial output buffer and clear the
-  start bit.
-* Writes to @0xFF46@ trigger an immediate OAM DMA copying 160 bytes from
-  @(v << 8)@ into OAM.
+* Writes to the serial control register @0xFF02@ that start an internal-clock
+  transfer capture the byte at @0xFF01@ into the serial output buffer and arm
+  a 128 M-cycle countdown. @SC@ bit 7 stays set until that expires, at which
+  point @SB@ reads @0xFF@ (the line idles high with no peer) and @IF@ bit 3 is
+  raised. See 'stepSerial'.
+* Writes to @0xFF46@ start an OAM DMA, which then copies one byte per CPU
+  M-cycle for 160 M-cycles. While it runs the CPU is locked off everything
+  below @0xFF00@. See 'stepOamDma'.
 * The unusable region @0xFEA0-0xFEFF@ ignores writes; reads return @0xFF@.
-* @0xFF00@ (joypad) returns "no buttons pressed" and lets row-select round-trip.
+* @0xFF00@ (joypad) is routed to 'Ocelot.Joypad', which drives the active-low
+  button matrix and latches the joypad interrupt edge.
+
+The APU is the one peripheral 'advance' does not tick in lockstep; it is
+deferred and settled on demand. See 'flushApu'.
 -}
 module Ocelot.Bus (
     Bus (..),

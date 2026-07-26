@@ -22,6 +22,6 @@ Note that the blargg test ROM collection is in `external/gb-test-roms/` as a git
 
 ```sh
 make test-roms       # Download both mooneye and acid2 ROMs (recommended)
-make mooneye-roms    # Mooneye ROMS only
+make mooneye-roms    # Mooneye ROMs only
 make acid2-roms      # Acid2 ROMs only
 ```

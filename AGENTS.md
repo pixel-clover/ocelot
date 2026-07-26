@@ -74,8 +74,8 @@ Do not invent modules that do not yet exist when answering questions, but do pla
     - `src/Ocelot/Testing.hs`: deliberate testing facade for low-level access.
 - `test/`: Hspec suite. `Spec.hs` is the `hspec-discover` entry; per-module specs live alongside as `Ocelot/<Module>Spec.hs`. Cross-cutting specs are
   `IntegrationSpec`, `GoldenSpec` (ROM-driven, gated on `OCELOT_GOLDEN=1`), `CgbSpec`, and `SnapshotSpec`.
-- `test/testroms/`: third-party and custom test ROMs the regression suite reads at runtime. Hand-authored regression ROMs are
-  tracked here; downloaded artifacts (mooneye, acid2) are gitignored and fetched with `make test-roms`. Layout:
+- `test/testroms/`: third-party test ROMs the regression suite reads at runtime. Nothing here is committed except `README.md`: the
+  ROMs are gitignored and fetched with `make test-roms`. Layout:
     - `test/testroms/mooneye/`: prebuilt mooneye-test-suite ROMs from gekkio.fi (`make mooneye-roms`).
     - `test/testroms/dmg-acid2.gb`: Matt Currie's DMG PPU acid2 (`make acid2-roms`).
     - `test/testroms/cgb-acid2.gbc`: Matt Currie's CGB PPU acid2 (`make acid2-roms`).
@@ -83,8 +83,9 @@ Do not invent modules that do not yet exist when answering questions, but do pla
     - `external/gb-test-roms/`: blargg test ROM collection from `retrio/gb-test-roms`. Load-bearing for the cpu_instrs,
       instr_timing, mem_timing, dmg_sound, cgb_sound, oam_bug, halt_bug, and interrupt_time regression coverage. The `.gb`
       files live in the submodule and are read directly.
-- `docs/`: project documentation and Haddock output target (`docs/haskell/`).
-- `Makefile`: developer workflow entry points (`build`, `test`, `lint`, `format`, `format-check`, `coverage`, `doc`, `repl`, and `tools`).
+- `docs/`: project documentation and image assets. `make docs` runs Haddock and copies the generated HTML into `docs/haskell/`
+  (untracked); `stack haddock` itself writes under `.stack-work`.
+- `Makefile`: developer workflow entry points (`build`, `test`, `lint`, `format`, `format-check`, `coverage`, `docs`, `repl`, and `tools`).
 - `tools/`: standalone developer diagnostics built by `make tools` into `bin/tools/` (built `-O2 -rtsopts`, so they are usable for
   measurement). `bench.hs` is the throughput benchmark; `ocelot-trace.hs` pairs with `sameboy-trace.c` as a differential tracer against
   SameBoy; the rest are state-dump probes. See `tools/README.md`.
@@ -306,7 +307,7 @@ Differential tracing: when a ROM fails and the verdict alone does not say why, d
 
 Additional validation when relevant:
 
-- `make doc` for Haddock changes on the public API.
+- `make docs` for Haddock changes on the public API.
 - `make coverage` when adding or restructuring tests; check `.stack-work/install/*/hpc/`.
 - `make repl` (`stack ghci`) for ad-hoc exploration; do not commit REPL-only helpers.
 - `stack run -- <path-to-rom>` for frontend or end-to-end manual checks.

@@ -60,11 +60,22 @@ format-check: ## Check formatting without modifying files
 	@echo "Checking Haskell formatting..."
 	$(STACK) exec -- fourmolu --mode check $(SRC_DIR) $(APP_DIR) $(APP_WEB_DIR) $(TEST_DIR)
 
+# `stack haddock` writes under .stack-work; copy the result to $(DOC_OUT) so
+# there is a stable, documented path to open. The target used to only mkdir an
+# empty $(DOC_OUT) and then tell you to go look in .stack-work.
 docs: ## Generate Haddock documentation for the project
 	@echo "Generating documentation to $(DOC_OUT)..."
 	$(STACK) haddock --no-haddock-deps
+	@rm -rf $(DOC_OUT)
 	@mkdir -p $(DOC_OUT)
-	@echo "Documentation generated. Check .stack-work for output."
+	@SRC="$$($(STACK) path --dist-dir)/doc/html/ocelot"; \
+		if [ -d "$$SRC" ]; then \
+			cp -R "$$SRC"/. $(DOC_OUT)/; \
+			echo "Documentation copied to $(DOC_OUT) (open $(DOC_OUT)/index.html)"; \
+		else \
+			echo "Could not locate Haddock output at $$SRC"; \
+			exit 1; \
+		fi
 
 install-deps: ## Install system dependencies (for Debian-based systems)
 	@echo "Installing system dependencies..."

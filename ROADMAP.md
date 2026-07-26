@@ -36,10 +36,11 @@ This document outlines the features implemented in the Ocelot emulator, and the 
   startup delay matching real hardware
 - [x] CGB WRAM banking (`SVBK`/`WBK` at `0xFF70`, banks 1-7, bank 0 treated as bank 1)
 - [x] CGB VRAM banking (`VBK` at `0xFF4F`, two 8 KiB banks)
-- [x] CGB HDMA: general-purpose (instant copy) and HBlank (one 16-byte chunk per HBlank entry)
+- [x] CGB HDMA: general-purpose (copied in one go, but charging the CPU stall and advancing peripherals for the block; see below) and
+  HBlank (one 16-byte chunk per HBlank entry)
 - [x] Cartridge header parsing (title, CGB flag, MBC type, ROM/RAM size, checksum)
 - [x] No-MBC cartridges (32 KiB, optional 8 KiB RAM)
-- [x] MBC1 with mode select (multicart variant detection deferred)
+- [x] MBC1 with mode select and MBC1M multicart detection (Nintendo-logo match at `0x40000`); mooneye `emulator-only/mbc1` is 13/13
 - [x] MBC2 (built-in 512x4-bit RAM, bit-8-of-address dispatch between RAM enable and ROM bank select)
 - [x] MBC3 with RTC (POSIX-time backed live counter, halt, day-carry, latch sequence, RTC bank reads/writes)
 - [x] MBC5 with bank switching (rumble bit not yet observable)
