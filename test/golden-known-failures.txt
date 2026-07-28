@@ -1,0 +1,67 @@
+# Test ROMs that Ocelot is currently known to fail.
+#
+# The golden suite reports accuracy gaps as pending rather than failing, so the run stays green and
+# the gap list stays visible. On its own that means a ROM sliding from passing to failing shows up
+# only as a changed pending entry somebody has to spot in a diff. This file makes it a ratchet:
+#
+#   * A ROM not listed here MUST pass. If it fails, the suite fails and names it a regression.
+#   * A ROM listed here that starts passing ALSO fails the suite, asking you to delete its line.
+#
+# Both directions are deliberate. Silent movement either way is what let two regressions through
+# before this file existed.
+#
+# Paths are repo-relative and must match the ROM path the spec loads. Blank lines and lines starting
+# with '#' are ignored. Keep entries sorted so the diff reads cleanly.
+#
+# Run the golden suite with: OCELOT_GOLDEN=1 stack test
+
+# The nine instruction-timing ROMs (add_sp_e, ld_hl_sp_e, call, call_cc, ret, ret_cc, reti, jp,
+# jp_cc) used to live here. They were never timing failures: OAM DMA locked the CPU off every
+# address below 0xFF00, so an instruction fetch from WRAM or echo RAM read 0xFF, decoded as RST 38h,
+# and wedged at PC=0x38. Modelling the DMA conflict per-bus fixed all nine at once.
+
+# ---------------------------------------------------------------------------
+# mooneye acceptance: PPU mode and STAT timing
+#
+# intr_2_mode0_timing_sprites is expected: the per-object fetcher stall is not modelled, so lines
+# with sprites report their sprite-free mode 3 length. stat_lyc_onoff most likely wants the delayed
+# LY-to-LYC comparison that SameBoy models with ly_for_comparison.
+# ---------------------------------------------------------------------------
+test/testroms/mooneye/acceptance/ppu/intr_2_mode0_timing.gb
+test/testroms/mooneye/acceptance/ppu/intr_2_mode0_timing_sprites.gb
+test/testroms/mooneye/acceptance/ppu/intr_2_mode3_timing.gb
+test/testroms/mooneye/acceptance/ppu/intr_2_oam_ok_timing.gb
+test/testroms/mooneye/acceptance/ppu/lcdon_timing-GS.gb
+test/testroms/mooneye/acceptance/ppu/lcdon_write_timing-GS.gb
+test/testroms/mooneye/acceptance/ppu/stat_lyc_onoff.gb
+
+# ---------------------------------------------------------------------------
+# mooneye acceptance and misc: other
+# ---------------------------------------------------------------------------
+test/testroms/mooneye/acceptance/halt_ime0_nointr_timing.gb
+test/testroms/mooneye/acceptance/oam_dma_start.gb
+test/testroms/mooneye/acceptance/serial/boot_sclk_align-dmgABCmgb.gb
+test/testroms/mooneye/acceptance/timer/rapid_toggle.gb
+test/testroms/mooneye/misc/ppu/vblank_stat_intr-C.gb
+
+# ---------------------------------------------------------------------------
+# blargg: APU
+# ---------------------------------------------------------------------------
+external/gb-test-roms/cgb_sound/rom_singles/07-len sweep period sync.gb
+external/gb-test-roms/cgb_sound/rom_singles/09-wave read while on.gb
+external/gb-test-roms/dmg_sound/rom_singles/07-len sweep period sync.gb
+external/gb-test-roms/dmg_sound/rom_singles/09-wave read while on.gb
+external/gb-test-roms/dmg_sound/rom_singles/10-wave trigger while on.gb
+external/gb-test-roms/dmg_sound/rom_singles/12-wave write while on.gb
+
+# ---------------------------------------------------------------------------
+# blargg: OAM bug
+#
+# The DMG OAM corruption bug is not modelled at all.
+# ---------------------------------------------------------------------------
+external/gb-test-roms/oam_bug/rom_singles/1-lcd_sync.gb
+external/gb-test-roms/oam_bug/rom_singles/2-causes.gb
+external/gb-test-roms/oam_bug/rom_singles/4-scanline_timing.gb
+external/gb-test-roms/oam_bug/rom_singles/5-timing_bug.gb
+external/gb-test-roms/oam_bug/rom_singles/7-timing_effect.gb
+external/gb-test-roms/oam_bug/rom_singles/8-instr_effect.gb

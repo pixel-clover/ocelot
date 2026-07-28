@@ -98,6 +98,19 @@ Two leads that were not followed up:
 Instruction-granular sampling is still the remaining limit: the callback fires at instruction starts, so a boundary that falls *inside* an
 instruction is only bracketed, not pinpointed. The bracketing above is the way around it.
 
+### Start With `trace-pc` When a ROM Times Out
+
+A ROM that reports no verdict at all is usually not an accuracy gap; it is a crash. `trace-pc` answers that in one run, and it is much cheaper than a
+differential trace. `PC=0x38` at 100% of samples means the CPU is executing `0xFF` and looping on `RST 38h`.
+
+That is how the nine mooneye instruction-timing ROMs were diagnosed. All nine timed out, all nine sat at `PC=0x38`, and the differential trace then
+pinned the exact instruction: both emulators reached `pc=FDFE` (echo RAM) at the same `cyc`, where SameBoy read opcode `0xCD` (`CALL`, 24 T-cycles) and
+Ocelot read `0xFF` (`RST 38`, 16 T-cycles). The cause was `Bus.addrInDmaUse` locking the CPU off every address below `0xFF00` during OAM DMA, where
+hardware only occupies one internal bus. Fixing that passed all nine. None of them was an instruction-timing bug.
+
+Two lessons worth keeping: classify by failure *mode* before reading anything into a failure count, and remember that a register-only trace cannot see
+a memory divergence until it corrupts a register. A per-access trace mode would have found this directly.
+
 This tooling is manual. Nothing in `test/` runs it.
 
 ### Benchmarking

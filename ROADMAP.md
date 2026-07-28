@@ -32,8 +32,10 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 
 - [x] DMG memory map: ROM banks, VRAM, ERAM, WRAM, OAM, IO, HRAM, IE
 - [x] Echo RAM mirroring (`0xE000-0xFDFF` -> `0xC000-0xDDFF`)
-- [x] OAM DMA (`0xFF46`) stepped one byte per M-cycle for 160 M-cycles, with non-HRAM CPU bus lockout while the transfer is active and a 1-cycle
-  startup delay matching real hardware
+- [x] OAM DMA (`0xFF46`) stepped one byte per M-cycle for 160 M-cycles, with a 1-cycle startup delay matching real hardware and a per-bus CPU lockout
+  while the transfer is active: the DMA occupies one internal bus (main, VRAM, or CGB WRAM), so a VRAM-sourced transfer leaves the main bus readable,
+  and the DMA's own source address and its echo alias read back normally. Passes the nine mooneye instruction-timing ROMs, which a blanket
+  lockout on everything below `0xFF00` had been crashing into `RST 38h`
 - [x] CGB WRAM banking (`SVBK`/`WBK` at `0xFF70`, banks 1-7, bank 0 treated as bank 1)
 - [x] CGB VRAM banking (`VBK` at `0xFF4F`, two 8 KiB banks)
 - [x] CGB HDMA: general-purpose (copied in one go, but charging the CPU stall and advancing peripherals for the block; see below) and

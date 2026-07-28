@@ -21,9 +21,10 @@ import Data.Bits (xor)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
+import Data.Char (isSpace)
 import Data.IORef (readIORef)
-import Data.List (isInfixOf, sort)
-import Data.Maybe (fromMaybe)
+import Data.List (dropWhileEnd, isInfixOf, sort)
+import Data.Maybe (fromMaybe, mapMaybe)
 import qualified Data.Vector.Unboxed as V
 import Data.Word (Word16, Word64, Word8)
 import Numeric (showHex)
@@ -39,6 +40,67 @@ import System.Directory (doesDirectoryExist, listDirectory)
 import System.Environment (lookupEnv)
 import System.FilePath ((</>))
 import Test.Hspec
+
+----------------------------------------------------------------------
+-- Known-failure ratchet
+----------------------------------------------------------------------
+
+{- | Manifest of ROMs Ocelot is currently known to fail.
+
+Accuracy gaps are reported as 'pendingWith' so the suite stays green and the gap list stays visible.
+On its own that leaves a ROM sliding from pass to fail visible only as a changed pending entry that
+somebody has to notice in a diff. This manifest makes it a ratchet in both directions; see
+'ratchetOutcome'.
+-}
+knownFailuresPath :: FilePath
+knownFailuresPath = "test/golden-known-failures.txt"
+
+{- | Read the repo-relative ROM paths listed in 'knownFailuresPath'.
+
+A missing manifest yields no entries, which makes every currently-failing ROM report as a regression
+naming the manifest. That is a deliberately loud way to notice the file went away.
+-}
+readKnownFailures :: IO [FilePath]
+readKnownFailures = do
+    mb <- tryReadFile knownFailuresPath
+    pure $ case mb of
+        Nothing -> []
+        Just bs -> mapMaybe entry (lines (BSC.unpack bs))
+  where
+    entry raw =
+        let s = dropWhileEnd isSpace (dropWhile isSpace raw)
+         in if null s || take 1 s == "#" then Nothing else Just s
+
+{- | Compare one ROM's outcome against the manifest.
+
+@Nothing@ means the ROM passed; @Just why@ carries a human-readable failure reason. An expected
+failure reports as pending, keeping the gap visible without reddening the run. Anything else fails
+the suite, including a listed ROM that has started passing: leaving it listed would let the fix
+regress again silently.
+-}
+ratchetOutcome :: [FilePath] -> FilePath -> Maybe String -> Expectation
+ratchetOutcome known path outcome =
+    case (outcome, path `elem` known) of
+        (Nothing, False) -> pure ()
+        (Nothing, True) ->
+            expectationFailure
+                ( "FIXED: "
+                    <> path
+                    <> " now passes. Delete its line from "
+                    <> knownFailuresPath
+                    <> " so the fix cannot silently regress."
+                )
+        (Just why, True) -> pendingWith ("known failure: " <> why)
+        (Just why, False) ->
+            expectationFailure
+                ( "REGRESSION: "
+                    <> path
+                    <> " is expected to pass but failed: "
+                    <> why
+                    <> "\nIf this is an understood and accepted trade-off, add the path to "
+                    <> knownFailuresPath
+                    <> "."
+                )
 
 {- | Maximum CPU M-cycles to run a blargg ROM before giving up on finding a Passed/Failed verdict.
 Tuned so each test finishes in a few seconds on a modern host.
@@ -65,6 +127,10 @@ skipUnlessGolden act = do
 
 spec :: Spec
 spec = do
+    -- Read once at spec-construction time and thread into the aspirational cases. The cpu_instrs and
+    -- instr_timing suites are not threaded: they already assert a pass outright.
+    known <- runIO readKnownFailures
+
     describe "blargg cpu_instrs (individual)" $
         mapM_
             blarggCase
@@ -91,7 +157,7 @@ spec = do
 
     describe "blargg mem_timing (individual)" $
         mapM_
-            (blarggSubRomAspirational "external/gb-test-roms/mem_timing/individual")
+            (blarggSubRomAspirational known "external/gb-test-roms/mem_timing/individual")
             [ "01-read_timing"
             , "02-write_timing"
             , "03-modify_timing"
@@ -99,7 +165,7 @@ spec = do
 
     describe "blargg mem_timing-2 (individual)" $
         mapM_
-            (blarggSubRomAspirational "external/gb-test-roms/mem_timing-2/rom_singles")
+            (blarggSubRomAspirational known "external/gb-test-roms/mem_timing-2/rom_singles")
             [ "01-read_timing"
             , "02-write_timing"
             , "03-modify_timing"
@@ -107,17 +173,17 @@ spec = do
 
     describe "blargg dmg_sound (individual)" $
         mapM_
-            (blarggSubRomAspirational "external/gb-test-roms/dmg_sound/rom_singles")
+            (blarggSubRomAspirational known "external/gb-test-roms/dmg_sound/rom_singles")
             dmgSoundCases
 
     describe "blargg cgb_sound (individual)" $
         mapM_
-            (blarggSubRomAspirational "external/gb-test-roms/cgb_sound/rom_singles")
+            (blarggSubRomAspirational known "external/gb-test-roms/cgb_sound/rom_singles")
             cgbSoundCases
 
     describe "blargg oam_bug (individual)" $
         mapM_
-            (blarggSubRomAspirationalOn ForceDmg "external/gb-test-roms/oam_bug/rom_singles")
+            (blarggSubRomAspirationalOn ForceDmg known "external/gb-test-roms/oam_bug/rom_singles")
             oamBugCases
 
     describe "blargg halt_bug" $
@@ -126,7 +192,9 @@ spec = do
                 mb <- tryReadFile "external/gb-test-roms/halt_bug.gb"
                 case mb of
                     Nothing -> pendingWith "external/gb-test-roms submodule not initialized"
-                    Just bytes -> runBlarggMemAspirationalOn ForceDmg bytes
+                    Just bytes ->
+                        runBlarggMemAspirationalOn ForceDmg bytes
+                            >>= ratchetOutcome known "external/gb-test-roms/halt_bug.gb"
 
     describe "blargg interrupt_time" $
         it "reports Passed via 0xA000" $
@@ -134,7 +202,11 @@ spec = do
                 mb <- tryReadFile "external/gb-test-roms/interrupt_time/interrupt_time.gb"
                 case mb of
                     Nothing -> pendingWith "external/gb-test-roms submodule not initialized"
-                    Just bytes -> runBlarggMemAspirational bytes
+                    Just bytes ->
+                        runBlarggMemAspirational bytes
+                            >>= ratchetOutcome
+                                known
+                                "external/gb-test-roms/interrupt_time/interrupt_time.gb"
 
     mooneyeRoms <- runIO discoverMooneyeAcceptanceRoms
     describe "mooneye-test-suite (acceptance)" $ do
@@ -144,17 +216,17 @@ spec = do
                     ( "test/testroms/mooneye/ not found or empty. "
                         <> "Run 'make mooneye-roms' to fetch the prebuilt ZIP."
                     )
-            else mapM_ mooneyeCase mooneyeRoms
+            else mapM_ (mooneyeCase known) mooneyeRoms
 
     mooneyeEmuRoms <- runIO (discoverMooneyeSubsetRoms "emulator-only")
     describe "mooneye-test-suite (emulator-only)" $
         unless (null mooneyeEmuRoms) $
-            mapM_ mooneyeCase mooneyeEmuRoms
+            mapM_ (mooneyeCase known) mooneyeEmuRoms
 
     mooneyeMiscRoms <- runIO (discoverMooneyeSubsetRoms "misc")
     describe "mooneye-test-suite (misc)" $
         unless (null mooneyeMiscRoms) $
-            mapM_ mooneyeCase mooneyeMiscRoms
+            mapM_ (mooneyeCase known) mooneyeMiscRoms
 
     describe "dmg-acid2" $
         it "palette-index framebuffer hash matches the reference" $
@@ -198,17 +270,19 @@ These ROMs do not print to the serial port; they write the final result code to 
 cart RAM (per blargg's shell.s). We poll that address: @0x80@ is "still running", @0x00@ is
 "Passed", any other value is the failure error code.
 -}
-blarggSubRomAspirational :: FilePath -> String -> Spec
+blarggSubRomAspirational :: [FilePath] -> FilePath -> String -> Spec
 blarggSubRomAspirational = blarggSubRomAspirationalOn HeaderDefault
 
-blarggSubRomAspirationalOn :: MooneyeHost -> FilePath -> String -> Spec
-blarggSubRomAspirationalOn hostMode dir name =
+blarggSubRomAspirationalOn :: MooneyeHost -> [FilePath] -> FilePath -> String -> Spec
+blarggSubRomAspirationalOn hostMode known dir name =
     it (name <> " reports Passed via 0xA000") $ skipUnlessGolden $ do
         let path = dir <> "/" <> name <> ".gb"
         mb <- tryReadFile path
         case mb of
             Nothing -> pendingWith ("not found: " <> path)
-            Just bytes -> runBlarggMemAspirationalOn hostMode bytes
+            Just bytes ->
+                runBlarggMemAspirationalOn hostMode bytes
+                    >>= ratchetOutcome known path
 
 {- | Aspirational blargg runner that reads a verdict from EITHER cart RAM at @0xA000@ OR the
 serial port (whichever the ROM uses). Some blargg ROMs (mem_timing-2, dmg_sound, oam_bug) report
@@ -221,14 +295,17 @@ The @forceDmg@ flag picks DMG hardware regardless of the cart's CGB flag. blargg
 CGB-specific code path (typically LCD-only output, no serial). On emulators that don't fully
 implement that path the ROM hangs silently. Forcing DMG keeps the serial-based verdict path live.
 -}
-runBlarggMemAspirational :: ByteString -> Expectation
+runBlarggMemAspirational :: ByteString -> IO (Maybe String)
 runBlarggMemAspirational = runBlarggMemAspirationalOn HeaderDefault
 
-runBlarggMemAspirationalOn :: MooneyeHost -> ByteString -> Expectation
+runBlarggMemAspirationalOn :: MooneyeHost -> ByteString -> IO (Maybe String)
 runBlarggMemAspirationalOn hostMode bytes = do
     r <- Cartridge.loadRom bytes
     case r of
-        Left e -> expectationFailure ("loadRom: " <> show e)
+        -- A loader failure is a harness fault, not a ROM verdict, so it must not be routable
+        -- through the ratchet: a manifest entry would report it as an accepted accuracy gap.
+        -- 'expectationFailure' throws, so the 'pure' below is unreachable.
+        Left e -> expectationFailure ("loadRom: " <> show e) >> pure Nothing
         Right cart -> do
             m <- case hostMode of
                 ForceCgb -> Machine.machineFromCartridgeForcedCgb cart
@@ -238,16 +315,12 @@ runBlarggMemAspirationalOn hostMode bytes = do
                 AsVariantWithDiv _ _ -> machineFromCartridge cart
                 AsBootHwio{} -> machineFromCartridge cart
             verdict <- runUntilMemOrSerialVerdict blarggCap m
-            case verdict of
-                MemPassed -> pure ()
+            pure $ case verdict of
+                MemPassed -> Nothing
                 MemFailed code reason ->
-                    pendingWith
-                        ( "ROM reported error code 0x"
-                            <> showHex code ""
-                            <> reason
-                        )
+                    Just ("ROM reported error code 0x" <> showHex code "" <> reason)
                 MemTimeout lastValue serial ->
-                    pendingWith
+                    Just
                         ( "no verdict in "
                             <> show blarggCap
                             <> " instructions; last 0xA000 value: 0x"
@@ -444,13 +517,16 @@ the failing-ROM list is visible as pending entries instead of red marks. A regre
 previously-passing ROM to failing will show up as a new pending entry in the diff,
 which is exactly what we want.
 -}
-mooneyeCase :: FilePath -> Spec
-mooneyeCase path =
+mooneyeCase :: [FilePath] -> FilePath -> Spec
+mooneyeCase known path =
     it caseName $ skipUnlessGolden $ do
         mb <- tryReadFile path
         case mb of
+            -- A ROM that was never fetched is not a regression.
             Nothing -> pendingWith ("not found: " <> path)
-            Just bytes -> runMooneyeAspirational (mooneyeHost path) bytes
+            Just bytes ->
+                runMooneyeAspirational (mooneyeHost path) bytes
+                    >>= ratchetOutcome known path
   where
     -- Strip the build/ prefix for readable test names.
     caseName = fromMaybe path (stripPrefix (mooneyeRoot ++ "/") path)
@@ -562,11 +638,14 @@ data MooneyeHost
 {- | Like 'runMooneye' but treats failures as 'pendingWith' instead of 'expectationFailure',
 so the suite stays green while accuracy gaps are still surfaced.
 -}
-runMooneyeAspirational :: MooneyeHost -> ByteString -> Expectation
+runMooneyeAspirational :: MooneyeHost -> ByteString -> IO (Maybe String)
 runMooneyeAspirational hostMode bytes = do
     r <- Cartridge.loadRom bytes
     case r of
-        Left e -> expectationFailure ("loadRom: " <> show e)
+        -- A loader failure is a harness fault, not a ROM verdict, so it must not be routable
+        -- through the ratchet: a manifest entry would report it as an accepted accuracy gap.
+        -- 'expectationFailure' throws, so the 'pure' below is unreachable.
+        Left e -> expectationFailure ("loadRom: " <> show e) >> pure Nothing
         Right cart -> do
             m <- case hostMode of
                 ForceCgb -> Machine.machineFromCartridgeForcedCgb cart
@@ -578,16 +657,12 @@ runMooneyeAspirational hostMode bytes = do
                     Machine.machineFromCartridgeForBootHwio v counter ly0 dot0 cart
                 HeaderDefault -> machineFromCartridge cart
             verdict <- stepUntilMagic mooneyeCap m
-            case verdict of
-                MoonPassed -> pure ()
+            pure $ case verdict of
+                MoonPassed -> Nothing
                 MoonFailed regs ->
-                    pendingWith
-                        ( "ROM reported failure (regs at magic breakpoint): " <> show regs
-                        )
+                    Just ("ROM reported failure (regs at magic breakpoint): " <> show regs)
                 MoonTimeout ->
-                    pendingWith
-                        ( "no magic breakpoint hit in " <> show mooneyeCap <> " instructions"
-                        )
+                    Just ("no magic breakpoint hit in " <> show mooneyeCap <> " instructions")
 
 stripPrefix :: String -> String -> Maybe String
 stripPrefix [] s = Just s

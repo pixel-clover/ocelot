@@ -110,6 +110,9 @@ Do not invent modules that do not yet exist when answering questions, but do pla
   lower-level control, add a deliberate testing facade in `src/Ocelot/Testing.hs` rather than re-exporting raw state.
 - ROM-dependent tests belong in `test/Ocelot/GoldenSpec.hs` and must skip cleanly when the ROM file is absent (so a fresh checkout without
   `git submodule update --init` still passes), and must additionally pend with a clear hint when `OCELOT_GOLDEN` is not set.
+- `test/golden-known-failures.txt` is the ratchet for ROM results. A ROM not listed there must pass, and a listed ROM that starts passing also fails
+  the run so its line gets deleted. When a change moves a ROM, update that file in the same patch; do not silence a regression by adding an entry
+  without saying why in the file.
 - Blargg ROM-backed checks read from `external/gb-test-roms/`. Mooneye, acid2, and any other downloaded or custom test ROMs
   live under `test/testroms/`.
 - If you move code across modules, move or rewrite the unit tests with it.

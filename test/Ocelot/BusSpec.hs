@@ -293,13 +293,96 @@ spec = do
             v42 <- Ppu.read8 0xFE42 (Bus.busPpu b)
             v42 `shouldBe` 0xCD
 
+        {- OAM DMA occupies one internal bus, not the whole address space. A DMA sourced from VRAM
+        leaves the main bus (ROM, SRAM, WRAM, echo) readable, and vice versa. Ocelot used to lock the
+        CPU out of everything below 0xFF00 for the duration, which made an instruction fetch from
+        WRAM or echo RAM return 0xFF; the CPU then decoded that as RST 38h and wedged at PC=0x38.
+        That is the single cause behind all nine mooneye instruction-timing ROMs timing out.
+        Mirrors SameBoy's @is_addr_in_dma_use@.
+        -}
+        -- 'advance 1' consumes the startup delay; copying only begins on the next call, so every
+        -- case below advances twice when it wants the transfer genuinely under way. A single
+        -- 'advance n' straight after the FF46 write copies nothing and leaves the index at 0.
+        it "a VRAM-sourced DMA leaves the main bus readable" $ do
+            b <- emptyBus
+            write8 0xFF40 0x00 b -- LCD off: VRAM freely writable and the PPU frozen
+            write8 0x8000 0x11 b -- byte the DMA will be reading
+            write8 0xC000 0xAA b -- byte the CPU wants while the DMA runs
+            write8 0xFF46 0x80 b -- DMA source = 0x8000, the VRAM bus
+            advance 1 b
+            advance 4 b -- 4 bytes copied: genuinely partway through
+            wram <- read8 0xC000 b
+            wram `shouldBe` 0xAA
+
+        it "a VRAM-sourced DMA leaves echo RAM readable" $ do
+            -- The echo window is where the crash actually bit: mooneye runs test code at 0xFDFE.
+            b <- emptyBus
+            write8 0xFF40 0x00 b
+            write8 0xDDFE 0xCD b -- echo 0xFDFE mirrors 0xDDFE
+            write8 0xFF46 0x80 b
+            advance 1 b
+            advance 4 b
+            echo <- read8 0xFDFE b
+            echo `shouldBe` 0xCD
+
+        it "lets the CPU read back the address the DMA is currently sourcing" $ do
+            -- SameBoy exempts this explicitly ("Shortcut for DMA access flow"): the byte is on the
+            -- bus, so the CPU sees it rather than 0xFF.
+            b <- emptyBus
+            write8 0xC000 0x3C b
+            write8 0xFF46 0xC0 b
+            advance 1 b -- startup delay consumed; the DMA is about to source 0xC000
+            v <- read8 0xC000 b
+            v `shouldBe` 0x3C
+
+        it "moves the exempt address along with the transfer" $ do
+            -- Pins the index term in @cur = src + idx@. A page-aligned 160-byte transfer can never
+            -- cross a bus boundary, so the index cannot change the bus classification; what it does
+            -- change is which address the source exemption applies to. Drop the term and the
+            -- exemption would stay stuck on 0xC000 for the whole transfer.
+            b <- emptyBus
+            write8 0xC000 0x11 b
+            write8 0xC005 0x22 b
+            write8 0xFF46 0xC0 b
+            advance 1 b -- startup delay consumed
+            advance 5 b -- 5 bytes copied, so the DMA is now sourcing 0xC005
+            atCursor <- read8 0xC005 b
+            behindCursor <- read8 0xC000 b
+            atCursor `shouldBe` 0x22 -- exempt: the byte is on the bus
+            behindCursor `shouldBe` 0xFF -- same bus, not the current source
+        it "a RAM-bus-sourced DMA leaves VRAM readable on CGB" $ do
+            b <- cgbBus
+            write8 0xFF40 0x00 b
+            write8 0x8000 0x77 b
+            write8 0xFF46 0xC0 b -- DMA source = 0xC000, which is its own bus on CGB
+            advance 1 b
+            advance 4 b
+            vram <- read8 0x8000 b
+            vram `shouldBe` 0x77 -- RAM bus and VRAM bus are distinct on CGB
+        it "a ROM-sourced DMA still blocks WRAM on CGB" $ do
+            -- The converse, and the only cover for the @cgb && addr >= 0xC000@ guard: CGB giving WRAM
+            -- its own bus does not make it readable while the DMA is on the main bus.
+            b <- cgbBus
+            write8 0xFF40 0x00 b
+            write8 0xC800 0x99 b
+            write8 0xFF46 0x00 b -- DMA source = 0x0000, the main bus
+            advance 1 b
+            advance 4 b
+            wram <- read8 0xC800 b
+            wram `shouldBe` 0xFF
+
         it "blocks main-bus reads but lets I/O regs and HRAM through" $ do
             b <- emptyBus
             mapM_ (\i -> write8 (0xC000 + fromIntegral i) 0xAA b) [0 .. 0x9F :: Int]
+            write8 0xD000 0xAA b
             write8 0xFF80 0x55 b -- HRAM stays accessible
             write8 0xFF46 0xC0 b
             advance 4 b -- Partway through
-            wramR <- read8 0xC000 b
+            -- Probe 0xD000 rather than 0xC000: on DMG both are the main bus, but 0xC000 is the
+            -- address this DMA is currently sourcing, and hardware lets the CPU read that one back
+            -- off the bus (see the source-address exemption test below). Probing it conflated
+            -- "the main bus is busy" with "the DMA's own source is unreadable".
+            wramR <- read8 0xD000 b
             hramR <- read8 0xFF80 b
             -- FF46 lives in the I/O register page, so it stays readable during DMA and reflects the
             -- last-written source byte.

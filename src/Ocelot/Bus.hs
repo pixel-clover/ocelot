@@ -20,8 +20,8 @@ Special handling on writes:
   point @SB@ reads @0xFF@ (the line idles high with no peer) and @IF@ bit 3 is
   raised. See 'stepSerial'.
 * Writes to @0xFF46@ start an OAM DMA, which then copies one byte per CPU
-  M-cycle for 160 M-cycles. While it runs the CPU is locked off everything
-  below @0xFF00@. See 'stepOamDma'.
+  M-cycle for 160 M-cycles. While it runs the CPU is locked off OAM and off the
+  one internal bus the transfer is using; see 'addrInDmaUse' and 'stepOamDma'.
 * The unusable region @0xFEA0-0xFEFF@ ignores writes; reads return @0xFF@.
 * @0xFF00@ (joypad) is routed to 'Ocelot.Joypad', which drives the active-low
   button matrix and latches the joypad interrupt edge.
@@ -387,27 +387,111 @@ fromCartridgeOnHost host bootMode c = do
             , busStallCycles = stallCycles
             }
 
-{- | CPU-side bus read. While an OAM DMA is in progress, only HRAM
-(@0xFF80-0xFFFE@) and the IE register are accessible to the CPU; all
-other addresses return @0xFF@. The DMA itself reads through
-'readDmaSource' to bypass this gate.
+{- | CPU-side bus read. An in-flight OAM DMA holds the CPU off OAM and off the one
+internal bus it is using, per 'addrInDmaUse'; blocked reads return @0xFF@. The DMA
+itself reads through 'readDmaSource' to bypass this gate.
 -}
 read8 :: Word16 -> Bus -> IO Word8
 read8 addr b = do
-    blocked <- readIORef (busOamDmaActive b)
-    if blocked && not (addrAccessibleDuringDma addr)
+    inDmaUse <- addrInDmaUse addr b
+    if inDmaUse
         then pure 0xFF
         else read8Raw addr b
 
-{- | True if the CPU can still read this address while OAM DMA is active.
-The CPU is locked off the main memory bus (ROM, VRAM, WRAM, echo, OAM,
-unusable region) but can still poke at the I/O register file
-(@0xFF00-0xFF7F@), HRAM (@0xFF80-0xFFFE@), and the IE register
-(@0xFFFF@) since those sit on a different bus internally.
+{- | Which internal bus an address sits on.
+
+OAM DMA occupies exactly one of these at a time. That is why it does not lock the
+CPU out of the whole address space: a DMA reading VRAM leaves the main bus usable,
+and a DMA reading anywhere else leaves VRAM usable. Mirrors SameBoy's
+@bus_for_addr@.
+
+Note that CGB splitting WRAM onto 'BusRam' does not by itself make WRAM readable
+during a main-bus DMA: 'conflictsWithDma' still blocks @0xC000@ and up unless the
+DMA is sourcing VRAM.
 -}
-addrAccessibleDuringDma :: Word16 -> Bool
-{-# INLINE addrAccessibleDuringDma #-}
-addrAccessibleDuringDma addr = addr >= 0xFF00
+data MemBus
+    = -- | ROM, cart RAM, and (on DMG) WRAM plus its echo.
+      BusMain
+    | -- | VRAM at @0x8000-0x9FFF@.
+      BusVram
+    | -- | WRAM and echo, on CGB only.
+      BusRam
+    deriving (Eq)
+
+busForAddr :: Bool -> Word16 -> MemBus
+{-# INLINE busForAddr #-}
+busForAddr cgb addr
+    | addr < 0x8000 = BusMain
+    | addr < 0xA000 = BusVram
+    | addr < 0xC000 = BusMain
+    | otherwise = if cgb then BusRam else BusMain
+
+{- | Whether an in-flight OAM DMA is occupying the bus that @addr@ sits on, given
+the address the DMA is currently sourcing from.
+
+Mirrors SameBoy's @is_addr_in_dma_use@ (@Core\/memory.c@). Two exemptions look
+odd but are load-bearing: the DMA's own source address reads back normally, and
+so does its echo alias, because a source at @0xE000@ and up is fetched through
+@src .&. 0xDFFF@.
+
+Getting this wrong in the permissive direction is invisible; getting it wrong in
+the restrictive direction is not. A blanket lock on everything below @0xFF00@
+made an instruction fetch from WRAM or echo RAM return @0xFF@, which the CPU
+decoded as @RST 38h@, and all nine mooneye instruction-timing ROMs wedged at
+@PC=0x38@ instead of reporting a verdict.
+-}
+conflictsWithDma :: Bool -> Word16 -> Word16 -> Bool
+{-# INLINE conflictsWithDma #-}
+conflictsWithDma cgb cur addr
+    | cur == addr = False
+    | cur >= 0xE000 && (cur .&. 0xDFFF) == addr = False
+    | cgb && addr >= 0xC000 = busForAddr cgb cur /= BusVram
+    | cgb && cur >= 0xE000 = busForAddr cgb addr /= BusVram
+    | otherwise = busForAddr cgb addr == busForAddr cgb cur
+
+{- | Whether an active OAM DMA makes @addr@ unreadable by the CPU.
+
+Above @0xFE00@ this keeps the blanket lock: the I\/O page, HRAM, and IE
+(@0xFF00@ and up) are on a separate bus and stay accessible, while OAM itself is
+held off for the whole transfer. SameBoy gates OAM through a separate rule in its
+read path rather than through @is_addr_in_dma_use@; the two agree except on the
+M-cycle before the first byte lands, where SameBoy still allows the access.
+Below @0xFE00@ the per-bus check in 'conflictsWithDma' decides.
+-}
+addrInDmaUse :: Word16 -> Bus -> IO Bool
+{-# INLINE addrInDmaUse #-}
+addrInDmaUse addr b
+    | addr >= 0xFF00 = pure False
+    | otherwise = do
+        active <- readIORef (busOamDmaActive b)
+        if not active
+            then pure False
+            else
+                if addr >= 0xFE00
+                    then pure True
+                    else do
+                        -- 'busOamDmaStarting' is Ocelot's startup delay: the DMA has been requested
+                        -- but has not taken the bus yet, which is SameBoy's warm-up.
+                        --
+                        -- SameBoy also exempts an in-progress HDMA, but that flag of its own
+                        -- ('hdma_in_progress') is set and cleared inside a single 'GB_hdma_run', so it
+                        -- covers one 16-byte chunk. Ocelot's 'busHdmaActive' is a latch held for the
+                        -- whole transfer, so testing it here would switch the OAM DMA lockout off for
+                        -- 128 HBlanks on a 0x800-byte HBlank transfer, and it would still never fire
+                        -- for general-mode HDMA, which clears the latch before copying. There is no
+                        -- equivalent flag to test, so this deliberately has no HDMA exemption.
+                        starting <- readIORef (busOamDmaStarting b)
+                        if starting
+                            then pure False
+                            else do
+                                src <- readIORef (busOamDmaSrc b)
+                                idx <- readIORef (busOamDmaIndex b)
+                                -- 'stepOamDma' copies the byte at @src + idx@ and then bumps idx, so
+                                -- this is the address the DMA is about to occupy the bus for. On the
+                                -- deferred-clear M-cycle idx has already reached 160, an address the
+                                -- DMA never reads, so hold the last real one instead.
+                                let !cur = src + fromIntegral (min idx 159)
+                                pure (conflictsWithDma (busCgb b) cur addr)
 
 ppuCpuCanAccessVram :: Bus -> IO Bool
 ppuCpuCanAccessVram b = do
@@ -530,8 +614,8 @@ restart an in-flight DMA per mooneye 'oam_dma_restart'.
 -}
 write8 :: Word16 -> Word8 -> Bus -> IO ()
 write8 addr !v b = do
-    blocked <- readIORef (busOamDmaActive b)
-    if blocked && not (addrAccessibleDuringDma addr)
+    inDmaUse <- addrInDmaUse addr b
+    if inDmaUse
         then pure ()
         else do
             write8Raw addr v b
