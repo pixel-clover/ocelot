@@ -28,13 +28,24 @@ emulators first disagree. This is the fastest way to chase an accuracy bug that 
 pc=XXXX af=XXXX bc=XXXX de=XXXX hl=XXXX sp=XXXX if=XX ie=XX ly=XXX lcdc=XX cyc=XXXXXXXXXX
 ```
 
+`stat` is the STAT register (`0xFF41`) as the CPU would read it. It was added because the PPU cluster is almost entirely STAT timing and the register was
+invisible in the trace: adding it dropped the first divergence on `mem_timing.gb` from line 8147 to line **32**, which is where the 4-dot STAT mode-bit
+delay was found. When chasing a PPU failure, diff this column first.
+
 `cyc` is CPU-relative T-cycles since the cart entry point, sampled at the start of the instruction on the line. Both sides zero it at hand-off, so
 boot-stub accounting cannot offset the column. It is CPU-relative rather than wall-clock on both sides (Ocelot's `cpuCycles`, SameBoy's
 `debugger_ticks`), so it keeps ticking at the CPU rate in CGB double-speed mode instead of halving. That pairing holds by construction on both sides
 (Ocelot scales only peripherals, in `Bus.advance`; SameBoy increments `debugger_ticks` before its own double-speed shift), but no ROM currently
 available under `external/` or `test/testroms/` enters double speed, so it is unverified by measurement.
 
-Both start at the cart entry point (`PC=0x100`, post-boot CGB register state).
+Both start at the cart entry point (`PC=0x100`, post-boot register state) and both pick their hardware model from the cart's CGB flag at header byte
+`0x143`, so the two halves always run the same machine.
+
+**Check the model line before trusting a diff.** `sameboy-trace` prints `model=DMG_B` or `model=CGB_E` to stderr. It used to hardcode `CGB_E` while
+`Ocelot.Machine.machineFromCartridgeWithBoot` followed the header, and because every mooneye ROM ships with CGB flag `0x00` (their test code needs no
+CGB opcodes), every mooneye trace silently compared DMG-Ocelot against CGB-SameBoy. That is not a small effect: fixing it moved the first divergence on
+`acceptance/ppu/stat_lyc_onoff` from line 70 to line 6141, and a PPU change derived from the mismatched evidence turned out to be wrong. If you force a
+model on one side, force it on both.
 
 ```
 git submodule update --init --recursive     # populates external/SameBoy
@@ -110,6 +121,21 @@ hardware only occupies one internal bus. Fixing that passed all nine. None of th
 
 Two lessons worth keeping: classify by failure *mode* before reading anything into a failure count, and remember that a register-only trace cannot see
 a memory divergence until it corrupts a register. A per-access trace mode would have found this directly.
+
+### Resolved: LY Boundaries on `mem_timing.gb`
+
+Kept as a worked example of the metric that found it. `mem_timing.gb` used to disagree on `ly` at **81 of the first 8146 sampled instructions** while
+matching on every other field, with identical `pc` and `cyc` throughout. Identical cycles mean identical PPU tick counts, so some line boundaries
+genuinely landed at different dots while others matched exactly, and a fixed 456-dot line cannot produce an intermittent offset. The suspect was the LCD
+being toggled off and on during the test, each re-enable restarting the short first line.
+
+That was right. The enable line's pre-drawing window was 76 dots where hardware uses 78 (79 on DMG), and the line was 448 where DMG uses 449. Correcting
+both took the count to **0 of 8146**, and fixed blargg `oam_bug/1-lcd_sync`.
+
+Two notes on method. Count `ly` mismatches against a matched-model trace; do **not** use the phase-bracket figure quoted earlier as a regression
+detector, because which dot a boundary is bracketed to depends on where instruction boundaries happen to fall, and it moved by 4 dots during this work
+purely from sampling. And strip `ly` when hunting the first divergence, then check `ly` separately: a trace whose *only* disagreement is `ly` reports no
+divergence at all under the stripped diff.
 
 This tooling is manual. Nothing in `test/` runs it.
 

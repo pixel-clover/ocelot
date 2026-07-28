@@ -19,10 +19,15 @@ Mode 3 is variable-length: 'mode3Length' adds the @SCX mod 8@ fine-scroll
 discard and the 6-dot window-activation restart to the 172-dot base, and mode
 0 absorbs the difference.
 
-One scanline is not 456 dots: the first one after LCDC bit 7 goes @0 -> 1@ runs
-a 76-dot mode 2 and 448 dots overall. 'ppuLcdOnFirstLine' tracks it. Running
-that line at the full 456 leaves every later @LY@ edge, and the VBlank
-interrupt with it, 8 T-cycles late for as long as the LCD stays on.
+One scanline is not 456 dots, and it has no mode 2. The first line after LCDC bit
+7 goes @0 -> 1@ reports mode 0 until drawing starts at dot 78, and runs 448 dots
+overall; on DMG both figures gain one dot. 'ppuLcdOnFirstLine' tracks it. Running
+that line at the full 456 leaves every later @LY@ edge, and the VBlank interrupt
+with it, 8 T-cycles late for as long as the LCD stays on.
+
+The mode the CPU reads back from STAT is not the mode the PPU is in: the register
+bits lag by 'statModeDelay' dots. 'visibleModeBits' applies that to reads only,
+while 'computeStatLine' drives the interrupt from the real mode.
 
 State is held in 'IORef's and 'IOVector's so reads and writes are O(1) and
 the rendered framebuffer is updated in place.
@@ -436,11 +441,11 @@ read8 addr ps
     | addr == 0xFF40 = readIORef (ppuLcdc ps)
     | addr == 0xFF41 = do
         stat <- readIORef (ppuStat ps)
-        mode <- readIORef (ppuMode ps)
+        bits <- visibleModeBits ps
         ly <- readIORef (ppuLy ps)
         lyc <- readIORef (ppuLyc ps)
         let lyMatch = if ly == lyc then 0x04 else 0
-        pure ((stat .&. 0x78) .|. modeBits mode .|. lyMatch .|. 0x80)
+        pure ((stat .&. 0x78) .|. bits .|. lyMatch .|. 0x80)
     | addr == 0xFF42 = readIORef (ppuScy ps)
     | addr == 0xFF43 = readIORef (ppuScx ps)
     | addr == 0xFF44 = readIORef (ppuLy ps)
@@ -574,6 +579,60 @@ seedLcdc v ps = do
     writeIORef (ppuLcdc ps) v
     sampleStatLine ps
 
+{- | Dots by which the STAT mode bits lag the PPU's actual mode.
+
+SameBoy carries this as a standing note in @display.c@: \"It seems that the STAT
+register's mode bits are always late by 4 T-cycles.\" A differential trace agrees:
+at the dot-80 mode 2 -> 3 boundary Ocelot reported mode 3 while SameBoy still read
+mode 2, switching a few dots later.
+-}
+statModeDelay :: Int
+statModeDelay = 4
+
+{- | The mode bits as the CPU sees them in STAT, which lag 'ppuMode' by
+'statModeDelay' dots.
+
+Only this register view is delayed. 'computeStatLine' keeps using the real mode,
+mirroring SameBoy's separate @mode_for_interrupt@, so interrupt timing is
+untouched.
+
+Rather than storing the previous mode, this reconstructs it from the dot at which
+the current mode began, which the state machine already determines. Two cases have
+no predecessor to fall back to and so report straight through: the LCD being off,
+and the mode-0 window opening the first line after an enable.
+-}
+visibleModeBits :: PpuState -> IO Word8
+visibleModeBits ps = do
+    lcdc <- readIORef (ppuLcdc ps)
+    mode <- readIORef (ppuMode ps)
+    if not (testBit lcdc 7)
+        then pure (modeBits mode)
+        else do
+            dot <- readIORef (ppuDot ps)
+            case mode of
+                ModeOamScan -> do
+                    -- Line 0 follows VBlank; every other OAM scan follows an HBlank.
+                    ly <- readIORef (ppuLy ps)
+                    let prev = if ly == 0 then ModeVBlank else ModeHBlank
+                    pure (modeBits (if dot < statModeDelay then prev else mode))
+                ModeDrawing -> do
+                    start <- oamScanDotsFor ps
+                    firstLine <- readIORef (ppuLcdOnFirstLine ps)
+                    -- The enable line reaches mode 3 from its mode-0 window, not from a mode 2.
+                    let prev = if firstLine then ModeHBlank else ModeOamScan
+                    pure (modeBits (if dot - start < statModeDelay then prev else mode))
+                ModeHBlank -> do
+                    preDraw <- inLcdOnPreDrawWindow ps
+                    if preDraw
+                        then pure (modeBits mode)
+                        else do
+                            end <- readIORef (ppuMode3End ps)
+                            pure (modeBits (if dot - end < statModeDelay then ModeDrawing else mode))
+                ModeVBlank -> do
+                    ly <- readIORef (ppuLy ps)
+                    let entering = ly == 144 && dot < statModeDelay
+                    pure (modeBits (if entering then ModeHBlank else mode))
+
 modeBits :: PpuMode -> Word8
 modeBits ModeHBlank = 0
 modeBits ModeVBlank = 1
@@ -619,12 +678,36 @@ oamScanDots = 80
 scanlineDots :: Int
 scanlineDots = 456
 
-{- | Dots the first scanline after the LCD is enabled gives up relative to a
-normal line: 4 out of mode 2, and 4 more out of mode 0.
+{- | Dots after an LCD enable at which mode 3 starts on that first scanline.
+
+Hardware runs no mode 2 there at all. SameBoy holds the STAT mode bits at 0 for
+@MODE2_LENGTH - 4@ (76) dots, sleeps 2 more, and only then sets mode 3, so drawing
+begins at dot 78. Using 76 here reported mode 3 three dots early on DMG, which is
+what mooneye @acceptance\/ppu\/lcdon_timing-GS@ measures.
 -}
-lcdOnOamScanSaving, lcdOnLineSaving :: Int
-lcdOnOamScanSaving = 4
-lcdOnLineSaving = 8
+lcdOnPreDrawDots :: Int
+lcdOnPreDrawDots = 78
+
+{- | Total dots of the first scanline after an LCD enable, before the DMG extra.
+Eight short of a normal line, which is the accounted-but-never-slept @+= 8@ in
+SameBoy's first-line path.
+-}
+lcdOnLineDots :: Int
+lcdOnLineDots = 448
+
+{- | DMG spends one further dot before the post-enable scanline starts at all
+(SameBoy's @if (!GB_is_cgb(gb)) GB_SLEEP(display, 23, 1)@). It sits outside that
+line's own accounting, so it pushes out both the mode 3 start and the line end.
+-}
+lcdOnDmgExtraDots :: Int
+lcdOnDmgExtraDots = 1
+
+-- | The DMG-only extra dot, or zero on CGB.
+lcdOnExtraDots :: PpuState -> IO Int
+{-# INLINE lcdOnExtraDots #-}
+lcdOnExtraDots ps = do
+    cgb <- readIORef (ppuCgbMode ps)
+    pure (if cgb then 0 else lcdOnDmgExtraDots)
 
 {- | Dots of OAM scan on the line currently being scanned. Hardware runs a
 76-dot mode 2 on the first line after the LCD is enabled.
@@ -633,7 +716,11 @@ oamScanDotsFor :: PpuState -> IO Int
 {-# INLINE oamScanDotsFor #-}
 oamScanDotsFor ps = do
     short <- readIORef (ppuLcdOnFirstLine ps)
-    pure (if short then oamScanDots - lcdOnOamScanSaving else oamScanDots)
+    if not short
+        then pure oamScanDots
+        else do
+            extra <- lcdOnExtraDots ps
+            pure (lcdOnPreDrawDots + extra)
 
 {- | Total dots on the line currently being scanned. The first line after the
 LCD is enabled runs 448 dots; every other line runs the full 456.
@@ -642,7 +729,11 @@ scanlineDotsFor :: PpuState -> IO Int
 {-# INLINE scanlineDotsFor #-}
 scanlineDotsFor ps = do
     short <- readIORef (ppuLcdOnFirstLine ps)
-    pure (if short then scanlineDots - lcdOnLineSaving else scanlineDots)
+    if not short
+        then pure scanlineDots
+        else do
+            extra <- lcdOnExtraDots ps
+            pure (lcdOnLineDots + extra)
 
 {- | Mode 3 with no penalties: 12 dots of initial fetch plus 160 pixels.
 Everything that stalls the fetcher is added on top by 'mode3Length'.

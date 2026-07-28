@@ -6,7 +6,7 @@
 // Output line format (whitespace-separated, fixed-width fields; one output line,
 // wrapped here only to fit the comment):
 //   pc=XXXX af=XXXX bc=XXXX de=XXXX hl=XXXX sp=XXXX if=XX ie=XX ly=XXX \
-//   lcdc=XX cyc=XXXXXXXXXX
+//   lcdc=XX stat=XX cyc=XXXXXXXXXX
 //
 // `cyc` is CPU-relative T-cycles elapsed since the cart entry point, sampled at
 // the start of the instruction on the same line. It is CPU-relative (not
@@ -142,6 +142,21 @@ static void on_log(GB_gameboy_t *unused, const char *msg,
   (void)attrs;
 }
 
+// Read the cart's CGB flag (header byte 0x143) straight off disk, before GB_init
+// needs to know which model to build. 0x80 (DMG-and-CGB) and 0xC0 (CGB-only)
+// both mean CGB-aware; anything else is DMG-only. Matches Ocelot's
+// 'Header.hdrCgbFlag' dispatch.
+static bool cart_is_cgb_aware(const char *path) {
+  FILE *f = fopen(path, "rb");
+  if (!f) {
+    return false;
+  }
+  uint8_t flag = 0;
+  bool ok = fseek(f, 0x143, SEEK_SET) == 0 && fread(&flag, 1, 1, f) == 1;
+  fclose(f);
+  return ok && (flag == 0x80 || flag == 0xC0);
+}
+
 static void on_instruction(GB_gameboy_t *gb, uint16_t pc, uint8_t opcode) {
   (void)opcode;
   if (instructions_remaining == 0)
@@ -161,11 +176,12 @@ static void on_instruction(GB_gameboy_t *gb, uint16_t pc, uint8_t opcode) {
   uint8_t ie = GB_read_memory(gb, 0xFFFF);
   uint8_t ly = GB_read_memory(gb, 0xFF44);
   uint8_t lcdc = GB_read_memory(gb, 0xFF40);
+  uint8_t stat = GB_read_memory(gb, 0xFF41);
   uint64_t cyc = gb->debugger_ticks - cart_entry_ticks;
   fprintf(trace_out,
           "pc=%04X af=%04X bc=%04X de=%04X hl=%04X sp=%04X if=%02X ie=%02X "
-          "ly=%03d lcdc=%02X cyc=%010llu\n",
-          pc, r->af, r->bc, r->de, r->hl, r->sp, iflag, ie, ly, lcdc,
+          "ly=%03d lcdc=%02X stat=%02X cyc=%010llu\n",
+          pc, r->af, r->bc, r->de, r->hl, r->sp, iflag, ie, ly, lcdc, stat,
           (unsigned long long)cyc);
 }
 
@@ -183,9 +199,15 @@ int main(int argc, char **argv) {
   instructions_remaining = target;
   trace_out = stdout;
 
-  // CGB model. Real games we care about are CGB-only; running them in
-  // DMG mode would diverge from Ocelot trivially.
-  GB_init(&gb, GB_MODEL_CGB_E);
+  // Pick the model the same way Ocelot's 'machineFromCartridgeWithBoot' does:
+  // from the cart's CGB flag at 0x143. Hardcoding CGB here was a real trap.
+  // Mooneye ROMs all ship with CGB flag 0x00 because their test code needs no
+  // CGB opcodes, so Ocelot ran them on DMG while this side ran them on CGB, and
+  // every mooneye trace silently compared two different machines.
+  GB_model_t model = cart_is_cgb_aware(rom_path) ? GB_MODEL_CGB_E : GB_MODEL_DMG_B;
+  fprintf(stderr, "sameboy-trace: model=%s\n",
+          model == GB_MODEL_CGB_E ? "CGB_E" : "DMG_B");
+  GB_init(&gb, model);
   GB_set_async_input_callback(&gb, async_input_callback);
   GB_set_rgb_encode_callback(&gb, rgb_encode);
   GB_set_vblank_callback(&gb, on_vblank);

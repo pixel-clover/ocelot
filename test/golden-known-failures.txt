@@ -27,9 +27,7 @@
 # with sprites report their sprite-free mode 3 length. stat_lyc_onoff most likely wants the delayed
 # LY-to-LYC comparison that SameBoy models with ly_for_comparison.
 # ---------------------------------------------------------------------------
-test/testroms/mooneye/acceptance/ppu/intr_2_mode0_timing.gb
 test/testroms/mooneye/acceptance/ppu/intr_2_mode0_timing_sprites.gb
-test/testroms/mooneye/acceptance/ppu/intr_2_mode3_timing.gb
 test/testroms/mooneye/acceptance/ppu/intr_2_oam_ok_timing.gb
 test/testroms/mooneye/acceptance/ppu/lcdon_timing-GS.gb
 test/testroms/mooneye/acceptance/ppu/lcdon_write_timing-GS.gb
@@ -59,7 +57,6 @@ external/gb-test-roms/dmg_sound/rom_singles/12-wave write while on.gb
 #
 # The DMG OAM corruption bug is not modelled at all.
 # ---------------------------------------------------------------------------
-external/gb-test-roms/oam_bug/rom_singles/1-lcd_sync.gb
 external/gb-test-roms/oam_bug/rom_singles/2-causes.gb
 external/gb-test-roms/oam_bug/rom_singles/4-scanline_timing.gb
 external/gb-test-roms/oam_bug/rom_singles/5-timing_bug.gb

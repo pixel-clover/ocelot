@@ -10,7 +10,7 @@ instruction at which Ocelot and SameBoy diverge on a given ROM:
 
 Output line format (matches sameboy-trace.c):
 
-> pc=XXXX af=XXXX bc=XXXX de=XXXX hl=XXXX sp=XXXX if=XX ie=XX ly=XXX lcdc=XX cyc=XXXXXXXXXX
+> pc=XXXX af=XXXX bc=XXXX de=XXXX hl=XXXX sp=XXXX if=XX ie=XX ly=XXX lcdc=XX stat=XX cyc=XXXXXXXXXX
 
 One line per CPU instruction. Trace starts at the cart entry point (PC=0x100, post-boot CGB register state)
 and emits the requested number of lines.
@@ -105,8 +105,9 @@ emit base m = do
     ie <- Bus.read8 0xFFFF (machineBus m)
     ly <- Bus.read8 0xFF44 (machineBus m)
     lcdc <- Bus.read8 0xFF40 (machineBus m)
+    stat <- Bus.read8 0xFF41 (machineBus m)
     printf
-        "pc=%04X af=%04X bc=%04X de=%04X hl=%04X sp=%04X if=%02X ie=%02X ly=%03d lcdc=%02X cyc=%010d\n"
+        "pc=%04X af=%04X bc=%04X de=%04X hl=%04X sp=%04X if=%02X ie=%02X ly=%03d lcdc=%02X stat=%02X cyc=%010d\n"
         (regPC r)
         af
         bc
@@ -117,6 +118,7 @@ emit base m = do
         ie
         ly
         lcdc
+        stat
         cyc
 
 w16 :: Word8 -> Word8 -> Word16

@@ -69,11 +69,39 @@ spec = do
             m `shouldBe` ModeHBlank
             d `shouldBe` 252
 
-        -- The first scanline after LCDC bit 7 goes 0 -> 1 is short on hardware:
-        -- mode 2 runs 76 dots instead of 80, and the line as a whole runs 448
-        -- dots instead of 456. Without this the PPU line phase sits 8 T-cycles
-        -- late against SameBoy forever after (every LY edge and the VBlank IRQ
-        -- with it), which is what mooneye's ppu/lcdon_timing-GS trips over.
+        {- The STAT mode bits lag the PPU's actual mode by 4 dots. SameBoy carries this as a standing
+        note ("the STAT register's mode bits are always late by 4 T-cycles"), and the trace confirms
+        it: at the dot-80 mode 2 -> 3 boundary Ocelot reported mode 3 where SameBoy still read mode 2.
+
+        Only the register view is delayed. The STAT interrupt line keeps using the real mode, matching
+        SameBoy's separate @mode_for_interrupt@, which is what keeps the interrupt-timing ROMs
+        (@intr_1_2_timing-GS@, @intr_2_0_timing@, @stat_irq_blocking@, blargg @interrupt_time@) intact.
+        -}
+        describe "STAT mode-bit delay" $ do
+            it "still reports mode 2 at the dot-80 start of drawing" $ do
+                ps <- freshOn
+                _ <- advance 20 ps -- dot 80: mode 3 has begun internally
+                atBoundary <- read8 0xFF41 ps
+                _ <- advance 1 ps -- dot 84, past the delay
+                afterDelay <- read8 0xFF41 ps
+                (atBoundary .&. 0x03, afterDelay .&. 0x03) `shouldBe` (2, 3)
+
+            it "leaves the internal mode undelayed" $ do
+                ps <- freshOn
+                _ <- advance 20 ps
+                m <- readMode ps
+                m `shouldBe` ModeDrawing
+
+            it "reports mode 0 immediately when the LCD is off" $ do
+                ps <- freshOn
+                write8 0xFF40 0x00 ps
+                v <- read8 0xFF41 ps
+                (v .&. 0x03) `shouldBe` 0
+
+        -- The first scanline after LCDC bit 7 goes 0 -> 1 is special on hardware: it has no mode 2 at
+        -- all, drawing starts at dot 78, and the line runs 448 dots, each figure gaining one dot on
+        -- DMG. Without this the PPU line phase sits 8 T-cycles late against SameBoy forever after
+        -- (every LY edge and the VBlank IRQ with it).
         describe "first scanline after the LCD is enabled" $ do
             let turnOn = do
                     ps <- initialPpu
@@ -81,11 +109,16 @@ spec = do
                     write8 0xFF40 0x91 ps -- LCD on: starts the short line
                     pure ps
 
-            it "ends the pre-drawing window at dot 76 rather than 80" $ do
+            -- 'initialPpu' is DMG, so these expect the DMG figures: mode 3 starts at dot 79 and the
+            -- line runs 449 dots. On CGB both drop by one (78 and 448); SameBoy spends one extra dot
+            -- before the post-enable line begins on DMG only.
+            it "stays out of drawing until dot 79" $ do
                 ps <- turnOn
-                _ <- advance 19 ps -- 76 T-cycles
-                m <- readMode ps
-                m `shouldBe` ModeDrawing
+                _ <- advance 19 ps -- 76 T-cycles: still short of the mode 3 start
+                m76 <- readMode ps
+                _ <- advance 1 ps -- 80 T-cycles: past it
+                m80 <- readMode ps
+                (m76, m80) `shouldBe` (ModeHBlank, ModeDrawing)
 
             {- Hardware runs no mode 2 at all on this line: SameBoy clears the
             STAT mode bits to 0 and leaves OAM and VRAM unblocked for the whole
@@ -102,28 +135,32 @@ spec = do
                 stat1 <- read8 0xFF41 ps
                 (stat1 .&. 0x03) `shouldBe` 0
 
-            it "reports STAT mode 3 once drawing starts at dot 76" $ do
+            it "reports STAT mode 3 once drawing starts" $ do
                 ps <- turnOn
-                _ <- advance 19 ps -- 76 T-cycles
+                -- Drawing starts at dot 79 on DMG, and the mode bits lag it by 4, so 84 dots in.
+                _ <- advance 21 ps
                 stat <- read8 0xFF41 ps
                 (stat .&. 0x03) `shouldBe` 3
 
-            it "runs 448 dots, so LY increments 8 T-cycles earlier" $ do
+            it "runs short, so LY increments earlier than a full line" $ do
                 ps <- turnOn
-                _ <- advance 111 ps -- 444 T-cycles: still on line 0
+                _ <- advance 112 ps -- 448 T-cycles: DMG's line 0 runs 449, so still on it
                 before <- readLy ps
-                _ <- advance 1 ps -- 448 T-cycles: line 0 ends
+                _ <- advance 1 ps -- 452 T-cycles: past 449, line 0 has ended
                 after <- readLy ps
                 (before, after) `shouldBe` (0, 1)
 
             it "returns to full 456-dot lines after the first one" $ do
                 ps <- turnOn
-                _ <- advance 112 ps -- through the short line 0
-                _ <- advance 113 ps -- 452 T-cycles into line 1
+                _ <- advance 113 ps -- through the short line 0 (449 dots)
+                lineOneStart <- readLy ps
+                -- Line 1 then runs the full 456 from dot 0. 449 + 456 = 905, so 904 T-cycles in
+                -- total is still line 1 and 908 has ended it.
+                _ <- advance 113 ps -- 904 T-cycles
                 before <- readLy ps
-                _ <- advance 1 ps -- 456 T-cycles: line 1 ends
+                _ <- advance 1 ps -- 908 T-cycles
                 after <- readLy ps
-                (before, after) `shouldBe` (1, 2)
+                (lineOneStart, before, after) `shouldBe` (1, 1, 2)
 
         -- Mode 3 is not a fixed 172 dots on hardware: the fetcher discards
         -- SCX mod 8 pixels at the left edge, and activating the window costs a
@@ -284,6 +321,9 @@ spec = do
     describe "register I/O" $ do
         it "STAT read returns mode bits 0..1 from the current mode" $ do
             ps <- freshOn
+            -- Step past the 4-dot STAT mode-bit delay; at dot 0 the register still shows the mode
+            -- the PPU was in before this one. See "STAT mode-bit delay".
+            _ <- advance 1 ps
             v <- read8 0xFF41 ps
             v `shouldBe` 0x86
 
