@@ -54,7 +54,12 @@ static bool reached_cart;
 // cannot offset the whole column.
 static uint64_t cart_entry_ticks;
 
-// Minimal CGB boot stub. We write the I/O register values that the real
+// Minimal boot stub, byte-identical to 'bootStub' in tools/ocelot-trace.hs. It
+// leaves the CGB post-boot register set even when the model selected above is
+// DMG: both halves run the same stub, so a differential diff stays valid, but a
+// ROM that model-detects by reading A will see 0x11 on DMG hardware.
+//
+// We write the I/O register values that the real
 // CGB boot ROM leaves behind (LCDC=0x91, BGP=0xFC, OBP0/1=0xFF, NR50/51/52)
 // then load the post-boot CPU register pair values, then unmap. The
 // final byte sequence at 0xFE-0xFF is `E0 50` (LDH (FF50), A) so PC

@@ -98,6 +98,23 @@ spec = do
                 v <- read8 0xFF41 ps
                 (v .&. 0x03) `shouldBe` 0
 
+            it "reports mode 0 at power-on, when the LCD is off but the mode is not HBlank" $ do
+                -- 'initialPpu' powers on with the LCD off and 'ppuMode' at ModeOamScan, which every
+                -- boot-ROM machine passes through. Reporting the internal mode here gave mode 2.
+                ps <- initialPpu
+                v <- read8 0xFF41 ps
+                (v .&. 0x03) `shouldBe` 0
+
+            it "holds mode 0 for 5 dots on entry to VBlank, not 4" $ do
+                -- SameBoy's line-144 path sleeps 2 + 2 + 1 before setting mode 1.
+                ps <- freshOn
+                _ <- advance (144 * 114) ps -- exactly the start of line 144
+                writeIORef (ppuDot ps) 4 -- dot 4: still inside the 5-dot window
+                at4 <- read8 0xFF41 ps
+                writeIORef (ppuDot ps) 5 -- dot 5: mode 1 becomes visible
+                at5 <- read8 0xFF41 ps
+                (at4 .&. 0x03, at5 .&. 0x03) `shouldBe` (0, 1)
+
         -- The first scanline after LCDC bit 7 goes 0 -> 1 is special on hardware: it has no mode 2 at
         -- all, drawing starts at dot 78, and the line runs 448 dots, each figure gaining one dot on
         -- DMG. Without this the PPU line phase sits 8 T-cycles late against SameBoy forever after
@@ -112,17 +129,52 @@ spec = do
             -- 'initialPpu' is DMG, so these expect the DMG figures: mode 3 starts at dot 79 and the
             -- line runs 449 dots. On CGB both drop by one (78 and 448); SameBoy spends one extra dot
             -- before the post-enable line begins on DMG only.
-            it "stays out of drawing until dot 79" $ do
+            -- 'advance' moves 4 dots at a time, so stepping alone brackets the boundary only to
+            -- 77..80. Drive the dot counter directly to pin the exact figure, otherwise 77, 79, and
+            -- 80 are all indistinguishable.
+            it "starts drawing at exactly dot 79 on DMG" $ do
                 ps <- turnOn
-                _ <- advance 19 ps -- 76 T-cycles: still short of the mode 3 start
-                m76 <- readMode ps
-                _ <- advance 1 ps -- 80 T-cycles: past it
-                m80 <- readMode ps
-                (m76, m80) `shouldBe` (ModeHBlank, ModeDrawing)
+                writeIORef (ppuDot ps) 78
+                _ <- advance 0 ps
+                m78 <- readMode ps
+                ps2 <- turnOn
+                writeIORef (ppuDot ps2) 78
+                _ <- advance 1 ps2 -- 78 -> 79 crosses the boundary
+                m79 <- readMode ps2
+                (m78, m79) `shouldBe` (ModeHBlank, ModeDrawing)
+
+            it "starts drawing one dot earlier on CGB" $ do
+                -- The DMG-only extra dot; without it this and the DMG case would agree.
+                ps <- initialPpu
+                setCgbMode True ps
+                write8 0xFF40 0x11 ps
+                write8 0xFF40 0x91 ps
+                writeIORef (ppuDot ps) 77
+                _ <- advance 1 ps -- 77 -> 78 crosses the CGB boundary
+                m <- readMode ps
+                m `shouldBe` ModeDrawing
+
+            it "runs one dot longer on DMG than on CGB" $ do
+                let lineEndOn cgb = do
+                        ps <- initialPpu
+                        setCgbMode cgb ps
+                        write8 0xFF40 0x11 ps
+                        write8 0xFF40 0x91 ps
+                        writeIORef (ppuDot ps) 440
+                        let go !n
+                                | n > 20 = pure (-1)
+                                | otherwise = do
+                                    ly <- readLy ps
+                                    if ly == 1 then pure n else advance 1 ps >> go (n + 1)
+                        go 0
+                dmg <- lineEndOn False
+                cgb <- lineEndOn True
+                -- One extra M-cycle of stepping on DMG, i.e. 449 dots against 448.
+                (dmg - cgb) `shouldBe` 1
 
             {- Hardware runs no mode 2 at all on this line: SameBoy clears the
             STAT mode bits to 0 and leaves OAM and VRAM unblocked for the whole
-            76-dot window (display.c, "Handle mode 2 on the very first line 0"),
+            pre-drawing window (display.c, "Handle mode 2 on the very first line 0"),
             then goes straight to mode 3. Reporting mode 2 here fabricates an
             OAM-source STAT interrupt hardware never raises and blocks OAM reads
             hardware allows.

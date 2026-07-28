@@ -38,8 +38,13 @@ boot-stub accounting cannot offset the column. It is CPU-relative rather than wa
 (Ocelot scales only peripherals, in `Bus.advance`; SameBoy increments `debugger_ticks` before its own double-speed shift), but no ROM currently
 available under `external/` or `test/testroms/` enters double speed, so it is unverified by measurement.
 
-Both start at the cart entry point (`PC=0x100`, post-boot register state) and both pick their hardware model from the cart's CGB flag at header byte
-`0x143`, so the two halves always run the same machine.
+Both start at the cart entry point (`PC=0x100`) and both pick their hardware model from the cart's CGB flag at header byte `0x143`, so the two halves
+run the same hardware model.
+
+The *register* hand-off is not aligned with that model: both sides execute the same boot stub, which leaves the CGB post-boot register set (notably
+`A=0x11`) even when the model is DMG. That keeps the two halves identical to each other, which is all a differential diff needs, but it means a ROM
+that model-detects by reading `A` will take its CGB path on DMG hardware. Aligning the stub per model would need DMG post-boot register values on both
+sides.
 
 **Check the model line before trusting a diff.** `sameboy-trace` prints `model=DMG_B` or `model=CGB_E` to stderr. It used to hardcode `CGB_E` while
 `Ocelot.Machine.machineFromCartridgeWithBoot` followed the header, and because every mooneye ROM ships with CGB flag `0x00` (their test code needs no
@@ -124,7 +129,8 @@ a memory divergence until it corrupts a register. A per-access trace mode would 
 
 ### Resolved: LY Boundaries on `mem_timing.gb`
 
-Kept as a worked example of the metric that found it. `mem_timing.gb` used to disagree on `ly` at **81 of the first 8146 sampled instructions** while
+Kept as a worked example of the metric that found it. `mem_timing.gb` used to disagree on `ly` at **81 of the first 8146 sampled instructions** (lines 1
+through 8146, the region before the then-first divergence at line 8147) while
 matching on every other field, with identical `pc` and `cyc` throughout. Identical cycles mean identical PPU tick counts, so some line boundaries
 genuinely landed at different dots while others matched exactly, and a fixed 456-dot line cannot produce an intermittent offset. The suspect was the LCD
 being toggled off and on during the test, each re-enable restarting the short first line.
