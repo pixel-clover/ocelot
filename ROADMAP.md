@@ -83,7 +83,9 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] CGB BG attribute byte (priority, V/H flip, VRAM bank, palette)
 - [x] CGB sprite priority resolution (master priority bit, BG-to-OAM, OAM-order)
 - [x] RGB framebuffer alongside the palette-index framebuffer (DMG via fixed shade palette, CGB via BG/OBJ palette RAM with RGB555 decoding)
-- [ ] LCD on/off transitions and STAT/LY behavior on reset (LCD-off freeze is implemented; full reset semantics not audited)
+- [ ] LCD on/off transitions and STAT/LY behavior on reset (LCD-off freeze is implemented, and the first scanline after the LCD is enabled runs short
+  at 76-dot mode 2 / 448-dot line so the line phase matches SameBoy; the rest of the enable sequence is not audited, and mooneye
+  `acceptance/ppu/lcdon_timing-GS` and `lcdon_write_timing-GS` still fail)
 - [x] Validation: dmg-acid2 golden frame hash (FNV-1a baseline locked; cross-check vs reference image at https://github.com/mattcurrie/dmg-acid2 to
   claim conformance)
 - [x] Validation: cgb-acid2 golden frame hash (same caveat; baseline locked from current PPU output)
@@ -143,7 +145,7 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Bus WRAM, HRAM, IO, IE, WBK, KEY1
 - [x] Bus HDMA src/dst/len/active and double-speed bits (v3 additions)
 - [x] PPU registers, mode, dot, VRAM, OAM, palette-index framebuffer, VBK, BCPS, OCPS, BG palette RAM, OBJ palette RAM, window line, STAT edge state,
-  and OPRI
+  OPRI, and the short-first-line-after-LCD-on latch (v9 addition)
 - [x] APU full internal state (channels, frame sequencer, sample accumulator, wave RAM); sample queue is intentionally not snapshotted
 - [x] Timer DIV, TIMA accumulator, TIMA, TMA, TAC
 - [x] Joypad row-select, button bitmask, IRQ-pending latch

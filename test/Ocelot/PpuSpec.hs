@@ -69,6 +69,62 @@ spec = do
             m `shouldBe` ModeHBlank
             d `shouldBe` 252
 
+        -- The first scanline after LCDC bit 7 goes 0 -> 1 is short on hardware:
+        -- mode 2 runs 76 dots instead of 80, and the line as a whole runs 448
+        -- dots instead of 456. Without this the PPU line phase sits 8 T-cycles
+        -- late against SameBoy forever after (every LY edge and the VBlank IRQ
+        -- with it), which is what mooneye's ppu/lcdon_timing-GS trips over.
+        describe "first scanline after the LCD is enabled" $ do
+            let turnOn = do
+                    ps <- initialPpu
+                    write8 0xFF40 0x11 ps -- LCD off
+                    write8 0xFF40 0x91 ps -- LCD on: starts the short line
+                    pure ps
+
+            it "ends the pre-drawing window at dot 76 rather than 80" $ do
+                ps <- turnOn
+                _ <- advance 19 ps -- 76 T-cycles
+                m <- readMode ps
+                m `shouldBe` ModeDrawing
+
+            {- Hardware runs no mode 2 at all on this line: SameBoy clears the
+            STAT mode bits to 0 and leaves OAM and VRAM unblocked for the whole
+            76-dot window (display.c, "Handle mode 2 on the very first line 0"),
+            then goes straight to mode 3. Reporting mode 2 here fabricates an
+            OAM-source STAT interrupt hardware never raises and blocks OAM reads
+            hardware allows.
+            -}
+            it "reports STAT mode 0, not mode 2, before drawing starts" $ do
+                ps <- turnOn
+                stat0 <- read8 0xFF41 ps
+                (stat0 .&. 0x03) `shouldBe` 0
+                _ <- advance 18 ps -- 72 T-cycles, still short of dot 76
+                stat1 <- read8 0xFF41 ps
+                (stat1 .&. 0x03) `shouldBe` 0
+
+            it "reports STAT mode 3 once drawing starts at dot 76" $ do
+                ps <- turnOn
+                _ <- advance 19 ps -- 76 T-cycles
+                stat <- read8 0xFF41 ps
+                (stat .&. 0x03) `shouldBe` 3
+
+            it "runs 448 dots, so LY increments 8 T-cycles earlier" $ do
+                ps <- turnOn
+                _ <- advance 111 ps -- 444 T-cycles: still on line 0
+                before <- readLy ps
+                _ <- advance 1 ps -- 448 T-cycles: line 0 ends
+                after <- readLy ps
+                (before, after) `shouldBe` (0, 1)
+
+            it "returns to full 456-dot lines after the first one" $ do
+                ps <- turnOn
+                _ <- advance 112 ps -- through the short line 0
+                _ <- advance 113 ps -- 452 T-cycles into line 1
+                before <- readLy ps
+                _ <- advance 1 ps -- 456 T-cycles: line 1 ends
+                after <- readLy ps
+                (before, after) `shouldBe` (1, 2)
+
         -- Mode 3 is not a fixed 172 dots on hardware: the fetcher discards
         -- SCX mod 8 pixels at the left edge, and activating the window costs a
         -- fetcher restart. Whatever mode 3 takes, mode 0 gives back, so the

@@ -46,6 +46,14 @@ Quick examples:
 - Use noun phrases for checklist items, not imperative verbs. Write "opcode timing table" not "build the opcode timing table".
 - Headings in Markdown files must be in title case: "Build from Source" not "Build from source". Minor words (a, an, the, and, but, or, for, in, on,
   at, to, by, of) stay lowercase unless they are the first word.
+- Write correct and complete sentences.
+- Avoid made-up words.
+- Do not use a colon in place of a verb. Three uses are fine: joining two clauses inside a complete sentence (the replacement the em-dash rule above
+  calls for), introducing the gloss of a list item, and introducing an enumeration, whether as a list or inline ("Methods: `add_node`, `add_nodes`,
+  ..."). What a colon must not do is turn a sentence into a label and a definition: write "Merges vector search seeds with text search seeds, then
+  expands via BFS" rather than "Hybrid retrieval: merges vector search seeds with text search seeds". That shape belongs to a list item, and carrying it
+  into prose (a doc comment summary, a paragraph) leaves a fragment where a sentence was required.
+- Use participial phrases and abbreviations scarcely.
 
 ## Repository Layout
 
@@ -161,7 +169,8 @@ the bus, so its only observation channels are its own register window (`0xFF10-0
 event; `Ocelot.ApuSpec`'s "advance batching equivalence" tests pin that invariant down. `apuDebtHorizon` caps the backlog so a game that never
 touches an APU register cannot grow the debt or the sample queue without bound.
 
-**If you add a new way to observe APU state, flush first.** Reaching `busApu` directly without a `flushApu` reads a stale APU.
+**If you add a new way to observe APU state, flush first.**
+Reaching `busApu` directly without a `flushApu` reads a stale APU.
 
 Bus is the only place that knows the full address map: it dispatches `0x0000-0x7FFF` and `0xA000-0xBFFF` to the cartridge, the VRAM/OAM windows
 to the PPU, the audio register windows to the APU, IO/HRAM/IE to its own buffers, and the CGB extension registers (VBK, BCPS/BCPD, OCPS/OCPD,
@@ -202,6 +211,8 @@ Reading or writing CPU registers from outside `Ocelot.Cpu` is allowed only for t
   movable GHC-heap unboxed `IOVector` used by all other
   framebuffers. This is what makes `framebufferRgbaPtr` safe to call without a copy: the memory never moves. Do not change this to an unboxed vector.
 - STAT write-edge hookup: `takePendingStatIrq :: PpuState -> IO Bool` (called by the bus after PPU register writes that can raise STAT)
+- Post-boot LCDC seed: `seedLcdc :: Word8 -> PpuState -> IO ()` (called by the bus for the no-boot-ROM handoff instead of `write8`, because that
+  handoff is not a guest-visible LCD enable and must not start the short first scanline)
 
 `PpuState` exports its field record so `Bus` can route memory accesses and so `Snapshot` can serialize the IORefs and IOVectors directly. Treat
 the surface listed above as the contract; do not call other PpuState fields from outside `Ocelot.Ppu` outside Snapshot.

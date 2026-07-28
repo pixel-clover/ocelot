@@ -3,8 +3,15 @@
 // in the same format as Ocelot's tools/ocelot-trace tool. Pipe both into diff
 // to find the first divergence.
 //
-// Output line format (whitespace-separated, fixed-width fields):
-//   pc=XXXX af=XXXX bc=XXXX de=XXXX hl=XXXX sp=XXXX if=XX ie=XX ly=XXX lcdc=XX
+// Output line format (whitespace-separated, fixed-width fields; one output line,
+// wrapped here only to fit the comment):
+//   pc=XXXX af=XXXX bc=XXXX de=XXXX hl=XXXX sp=XXXX if=XX ie=XX ly=XXX \
+//   lcdc=XX cyc=XXXXXXXXXX
+//
+// `cyc` is CPU-relative T-cycles elapsed since the cart entry point, sampled at
+// the start of the instruction on the same line. It is CPU-relative (not
+// wall-clock) on both sides, so in CGB double-speed mode it keeps ticking at the
+// CPU rate rather than halving.
 //
 // Usage:
 //   sameboy-trace <rom> <instruction-count>
@@ -23,10 +30,29 @@
 #include <stdlib.h>
 #include <string.h>
 
+// The `cyc` column reads gb->debugger_ticks, which exists only when the SameBoy
+// core is built with its debugger (Core/gb.h wraps the field in
+// `#ifndef GB_DISABLE_DEBUGGER`, and Core/timing.c only increments it there).
+// Ocelot's Makefile never passes that define, so the guard below catches nothing
+// on its own and is not what protects this file: the hazard is building the core
+// with `DISABLE_DEBUGGER=1` while this translation unit is compiled without it,
+// which makes the two disagree on the layout of GB_gameboy_t and turns
+// `gb->debugger_ticks` into a read at the wrong offset. That produces garbage
+// `cyc` values rather than a build error, and no preprocessor check here can see
+// it. If the column ever looks implausible, check how the core objects in
+// external/SameBoy/build/obj/Core were built before suspecting Ocelot.
+#ifdef GB_DISABLE_DEBUGGER
+#error "sameboy-trace needs gb->debugger_ticks, which GB_DISABLE_DEBUGGER removes"
+#endif
+
 static GB_gameboy_t gb;
 static uint64_t instructions_remaining;
 static FILE *trace_out;
 static bool reached_cart;
+// debugger_ticks at the cart entry point. Both tracers report T-cycles relative
+// to hand-off, so a difference in how the two boot stubs are accounted for
+// cannot offset the whole column.
+static uint64_t cart_entry_ticks;
 
 // Minimal CGB boot stub. We write the I/O register values that the real
 // CGB boot ROM leaves behind (LCDC=0x91, BGP=0xFC, OBP0/1=0xFF, NR50/51/52)
@@ -127,6 +153,7 @@ static void on_instruction(GB_gameboy_t *gb, uint16_t pc, uint8_t opcode) {
     if (pc != 0x0100)
       return;
     reached_cart = true;
+    cart_entry_ticks = gb->debugger_ticks;
   }
   instructions_remaining--;
   GB_registers_t *r = GB_get_registers(gb);
@@ -134,10 +161,12 @@ static void on_instruction(GB_gameboy_t *gb, uint16_t pc, uint8_t opcode) {
   uint8_t ie = GB_read_memory(gb, 0xFFFF);
   uint8_t ly = GB_read_memory(gb, 0xFF44);
   uint8_t lcdc = GB_read_memory(gb, 0xFF40);
+  uint64_t cyc = gb->debugger_ticks - cart_entry_ticks;
   fprintf(trace_out,
           "pc=%04X af=%04X bc=%04X de=%04X hl=%04X sp=%04X if=%02X ie=%02X "
-          "ly=%03d lcdc=%02X\n",
-          pc, r->af, r->bc, r->de, r->hl, r->sp, iflag, ie, ly, lcdc);
+          "ly=%03d lcdc=%02X cyc=%010llu\n",
+          pc, r->af, r->bc, r->de, r->hl, r->sp, iflag, ie, ly, lcdc,
+          (unsigned long long)cyc);
 }
 
 int main(int argc, char **argv) {

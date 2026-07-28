@@ -25,8 +25,14 @@ use, so any state divergence they surface is the same divergence production code
 emulators first disagree. This is the fastest way to chase an accuracy bug that a test ROM reports only as a final pass/fail.
 
 ```
-pc=XXXX af=XXXX bc=XXXX de=XXXX hl=XXXX sp=XXXX if=XX ie=XX ly=XXX lcdc=XX
+pc=XXXX af=XXXX bc=XXXX de=XXXX hl=XXXX sp=XXXX if=XX ie=XX ly=XXX lcdc=XX cyc=XXXXXXXXXX
 ```
+
+`cyc` is CPU-relative T-cycles since the cart entry point, sampled at the start of the instruction on the line. Both sides zero it at hand-off, so
+boot-stub accounting cannot offset the column. It is CPU-relative rather than wall-clock on both sides (Ocelot's `cpuCycles`, SameBoy's
+`debugger_ticks`), so it keeps ticking at the CPU rate in CGB double-speed mode instead of halving. That pairing holds by construction on both sides
+(Ocelot scales only peripherals, in `Bus.advance`; SameBoy increments `debugger_ticks` before its own double-speed shift), but no ROM currently
+available under `external/` or `test/testroms/` enters double speed, so it is unverified by measurement.
 
 Both start at the cart entry point (`PC=0x100`, post-boot CGB register state).
 
@@ -38,9 +44,59 @@ bin/tools/sameboy-trace rom.gb 200000 > /tmp/sameboy.trace
 diff -u /tmp/sameboy.trace /tmp/ocelot.trace | head
 ```
 
-The trace carries `ly` and `lcdc`, so PPU timing drift shows up as well as CPU divergence. It does **not** carry a cycle count, so a
-disagreement about *when within an instruction* a bus access lands only surfaces once it has changed an architectural register. That limits
-its usefulness for the mooneye `*_timing` ROMs; adding a cycle column would fix that.
+The trace carries `ly` and `lcdc`, so PPU timing drift shows up as well as CPU divergence. The `cyc` column separates the two failure modes that a
+register-only trace conflates: when the two emulators disagree at the *same* `cyc`, the cycle accounting is fine and a peripheral is out of phase;
+when `cyc` itself diverges, the instruction stream consumed different time.
+
+Read the columns in this order:
+
+1. **First non-`ly` divergence.** Strip `ly` before diffing (`sed 's/ ly=[0-9]*//'`); its instruction-granular sampling jitters around line
+   boundaries and buries the real first divergence in noise.
+2. **Is `cyc` equal on the diverging line?** If yes, the CPU consumed identical time and the divergence is peripheral state. If no, walk back to
+   the first line where `cyc` diverges: a control-flow split (a test ROM branching on its own pass/fail byte) also shows up here, so confirm
+   whether `pc` diverged first.
+
+A worked example, on `mem_timing.gb`:
+
+```
+sameboy: pc=0745 af=0500 ... ly=005 lcdc=91 cyc=0000002108
+ocelot : pc=0745 af=0400 ... ly=004 lcdc=91 cyc=0000002108
+```
+
+Same `pc`, same `cyc`, and `A` differs only because the preceding `LDH A,(FF44)` read a different `LY`. That rules out cycle accounting and points
+at PPU line phase. Bracketing the `LY` transitions against the 456-T-cycle line (each first-occurrence of `LY=n` bounds the true boundary to
+`(previous cyc, this cyc]`) put SameBoy's phase in `[176, 180)` and Ocelot's in `[168, 172)`: Ocelot raised `LY`, and the VBlank IF bit with it, 8
+T-cycles late for the rest of the run.
+
+That one is now fixed. The cause was the first scanline after the LCD is enabled, which hardware runs short (76-dot mode 2, 448-dot line) and Ocelot
+ran at the full 456; see `ppuLcdOnFirstLine` in `src/Ocelot/Ppu.hs`. Both sides now bracket to `[176, 180)`, and the first divergence on
+`mem_timing.gb` moved from line 224 to line 8147. The bracketing recipe is worth keeping: it is the way to compare PPU phase through an
+instruction-granular trace.
+
+The divergence now first shows up as the VBlank IF bit, at equal `cyc` and equal `LY=144`, with Ocelot latching it one instruction before SameBoy.
+That is a separate and finer timing question than the line length, and it is still open. `acceptance/ppu/lcdon_timing-GS` and
+`lcdon_write_timing-GS` also still fail: they pin down more of the LCD-enable sequence than the line length alone.
+
+### A Measured Dead End on the VBlank IF Latch
+
+Worth recording so it is not re-attempted blind. On `misc/ppu/vblank_stat_intr-C.gb` the ROM `HALT`s waiting for VBlank; SameBoy enters the handler
+at `cyc=65516` and Ocelot at `cyc=65508`, so Ocelot services it 8 T-cycles early. SameBoy's `display.c` lines 2152-2178 raise it at dot 5 of line 144
+(`LY := 144` two dots in, `IF |= 1` three dots after that), against Ocelot's dot 0; the halt loop only samples pending interrupts on M-cycle
+boundaries, which turns that 5-dot offset into the observed 8.
+
+Moving the raise to dot 5 on its own is **wrong**: it breaks `acceptance/ppu/vblank_stat_intr-GS`, which passes today, and does not fix the CGB
+variant it was aimed at. Five ROMs constrain this timing while passing (`blargg interrupt_time`, `vblank_stat_intr-GS`, `intr_1_2_timing-GS`,
+`intr_2_0_timing`, and `stat_irq_blocking`), so the raise dot cannot be moved in isolation.
+
+Two leads that were not followed up:
+
+- SameBoy also delays `LY` itself to dot 2 and the STAT mode bits to dot 5. Ocelot flips both at dot 0. The mooneye tests measure `LY` reads against
+  interrupt arrival, so the offsets probably have to move together rather than one at a time.
+- The same SameBoy block raises the *OAM* STAT source on entering VBlank (`display.c:2160` and `:2177`, "Entering VBlank state triggers the OAM
+  interrupt"). That quirk is a plausible reading of what the failing `-C` variant is actually testing, and is unrelated to the raise dot.
+
+Instruction-granular sampling is still the remaining limit: the callback fires at instruction starts, so a boundary that falls *inside* an
+instruction is only bracketed, not pinpointed. The bracketing above is the way around it.
 
 This tooling is manual. Nothing in `test/` runs it.
 

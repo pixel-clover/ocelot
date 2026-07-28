@@ -72,14 +72,25 @@ data SnapshotError
 magic :: ByteString
 magic = BS.pack [0x4F, 0x43, 0x53, 0x31] -- "OCS1"
 
-{- | Blob format version. Bumped to 2 when the loader became strict and the
-APU section gained the CH1 sweep negate-used latch. Version 1 blobs are
-rejected with 'UnsupportedVersion': the format had in fact changed several
-times under that number, so a v1 blob's section layout is not knowable and
-accepting it would half-restore into garbage.
+{- | Blob format version.
+
+Version 1 blobs are rejected with 'UnsupportedVersion': the format had in fact
+changed several times under that number, so a v1 blob's section layout is not
+knowable and accepting it would half-restore into garbage. Version 2 was the
+loader becoming strict plus the APU CH1 sweep negate-used latch.
+
+The constant then sat at 2 while the section layout kept growing, so the @v3:@
+through @v8:@ labels on the sections below never had a bump behind them and no
+blob was ever written with those numbers. Version 9 adds the PPU
+short-first-line-after-LCD-on latch and realigns the constant with those labels
+in one step. Any blob on disk predating this is a 2 and is rejected, which is
+correct: its PPU section is a byte shorter.
+
+Keep this history current. A section change without a bump is what produced the
+gap in the first place.
 -}
 currentVersion :: Word32
-currentVersion = 2
+currentVersion = 9
 
 ----------------------------------------------------------------------
 -- Save
@@ -185,6 +196,10 @@ ppuSnapshot ps = do
     -- OPRI=1 would resume with the default 0 if not snapshotted, which
     -- silently flips sprite Z-ordering on reload.
     opri <- readIORef (Ppu.ppuOpri ps)
+    -- v9 addition: the short-first-line latch. A snapshot taken during the
+    -- first (448-dot) scanline after the LCD was enabled would otherwise resume
+    -- on a full 456-dot line and land the rest of the frame 8 T-cycles late.
+    lcdOnFirst <- readIORef (Ppu.ppuLcdOnFirstLine ps)
     pure $
         Snap.putU8 lcdc
             <> Snap.putU8 stat
@@ -215,6 +230,8 @@ ppuSnapshot ps = do
             <> Snap.putBool pendStat
             -- v8: OPRI register.
             <> Snap.putU8 opri
+            -- v9: short-first-line-after-LCD-on latch.
+            <> Snap.putBool lcdOnFirst
 
 busSnapshot :: Bus.Bus -> IO BB.Builder
 busSnapshot b = do
@@ -307,6 +324,7 @@ data PpuData = PpuData
     , pdWindowLine :: !Int
     , pdPrevStat, pdPendingStat :: !Bool
     , pdOpri :: !Word8
+    , pdLcdOnFirstLine :: !Bool
     }
 
 data BusData = BusData
@@ -432,6 +450,7 @@ decodePpu = do
     prevStat <- Snap.getBool
     pendStat <- Snap.getBool
     opri <- Snap.getU8
+    lcdOnFirst <- Snap.getBool
     pure
         PpuData
             { pdLcdc = lcdc
@@ -461,6 +480,7 @@ decodePpu = do
             , pdPrevStat = prevStat
             , pdPendingStat = pendStat
             , pdOpri = opri .&. 0x01
+            , pdLcdOnFirstLine = lcdOnFirst
             }
 
 decodePpuMode :: Word8 -> Ppu.PpuMode
@@ -541,6 +561,9 @@ applySnapshot sd m = do
     writeIORef (Ppu.ppuPrevStatLine ps) (pdPrevStat pd)
     writeIORef (Ppu.ppuPendingStatIrq ps) (pdPendingStat pd)
     writeIORef (Ppu.ppuOpri ps) (pdOpri pd)
+    -- Restore this before 'resyncMode3End': mode 3 starts at dot 76 rather than
+    -- 80 on the short line, so the latch it rebuilds depends on this flag.
+    writeIORef (Ppu.ppuLcdOnFirstLine ps) (pdLcdOnFirstLine pd)
     -- The mode 3 end latch is derived from the registers just restored, and is
     -- not part of the blob. Rebuild it so the line in progress does not finish
     -- on whatever the previous machine had latched.

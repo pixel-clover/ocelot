@@ -323,8 +323,10 @@ fromCartridgeOnHost host bootMode c = do
             Apu.write8 0xFF24 0x77 apu
             Apu.write8 0xFF25 0xF3 apu
             -- PPU: LCDC=0x91 (LCD on, BG on, tile data 0x8000, tile map 0x9800),
-            -- BGP=0xFC, OBP0/1=0xFF.
-            Ppu.write8 0xFF40 0x91 ppu
+            -- BGP=0xFC, OBP0/1=0xFF. LCDC goes through 'seedLcdc' rather than
+            -- 'write8' so the handoff is not mistaken for a fresh LCD enable,
+            -- which would start the machine on the short first scanline.
+            Ppu.seedLcdc 0x91 ppu
             Ppu.write8 0xFF47 0xFC ppu
             Ppu.write8 0xFF48 0xFF ppu
             Ppu.write8 0xFF49 0xFF ppu

@@ -19,6 +19,11 @@ Mode 3 is variable-length: 'mode3Length' adds the @SCX mod 8@ fine-scroll
 discard and the 6-dot window-activation restart to the 172-dot base, and mode
 0 absorbs the difference.
 
+One scanline is not 456 dots: the first one after LCDC bit 7 goes @0 -> 1@ runs
+a 76-dot mode 2 and 448 dots overall. 'ppuLcdOnFirstLine' tracks it. Running
+that line at the full 456 leaves every later @LY@ edge, and the VBlank
+interrupt with it, 8 T-cycles late for as long as the LCD stays on.
+
 State is held in 'IORef's and 'IOVector's so reads and writes are O(1) and
 the rendered framebuffer is updated in place.
 
@@ -58,6 +63,7 @@ module Ocelot.Ppu (
     setFbTarget,
     takePendingStatIrq,
     resyncMode3End,
+    seedLcdc,
 ) where
 
 import Control.Monad (unless, when)
@@ -134,6 +140,13 @@ data PpuState = PpuState
     -- mode 3 takes, so the scanline stays 456 dots either way. Derived state,
     -- recomputed every line; 'resyncMode3End' rebuilds it after a snapshot
     -- load so the restored line does not use the previous machine's value.
+    , ppuLcdOnFirstLine :: !(IORef Bool)
+    -- ^ Set while the PPU is on the first scanline after LCDC bit 7 went
+    -- 0 -> 1, which hardware runs short: mode 2 lasts 76 dots instead of 80,
+    -- and the line as a whole lasts 448 dots instead of 456. Cleared when that
+    -- line ends. Without it the whole PPU line phase sits 8 T-cycles late from
+    -- the moment the LCD is enabled, which shifts every later LY edge and the
+    -- VBlank IRQ with it.
     , ppuWindowLine :: !(IORef Int)
     -- ^ Internal window-line counter (\"WLY\"). Reset to 0 at the start
     -- of each frame and on LCD-off; increments by 1 only on lines where
@@ -210,8 +223,9 @@ data PpuState = PpuState
 
 initialPpu :: IO PpuState
 initialPpu = do
-    -- Hardware power-on: LCD off. Callers that want the post-boot
-    -- handoff (LCDC=0x91, LCD on) set it explicitly via 'write8'.
+    -- Hardware power-on: LCD off. Callers that want the post-boot handoff
+    -- (LCDC=0x91, LCD on) go through 'seedLcdc', not 'write8': the handoff is
+    -- not a guest-visible LCD enable and must not start the short first line.
     lcdc <- newIORef 0x00
     stat <- newIORef 0x00
     ly <- newIORef 0x00
@@ -228,6 +242,7 @@ initialPpu = do
     mode <- newIORef ModeOamScan
     dot <- newIORef 0
     mode3End <- newIORef (oamScanDots + mode3BaseDots)
+    lcdOnFirstLine <- newIORef False
     windowLine <- newIORef 0
     vram <- MV.replicate 0x4000 0
     oam <- MV.replicate 0xA0 0
@@ -269,6 +284,7 @@ initialPpu = do
             , ppuMode = mode
             , ppuDot = dot
             , ppuMode3End = mode3End
+            , ppuLcdOnFirstLine = lcdOnFirstLine
             , ppuWindowLine = windowLine
             , ppuVram = vram
             , ppuOam = oam
@@ -519,6 +535,7 @@ handleLcdcWrite v ps = do
         writeIORef (ppuDot ps) 0
         writeIORef (ppuWindowLine ps) 0
         writeIORef (ppuPrevStatLine ps) False
+        writeIORef (ppuLcdOnFirstLine ps) False
     -- LCD turning back on: real hardware starts a fresh frame at mode 2
     -- (OAM scan), LY=0, dot=0. Without this reset the PPU resumes from
     -- 'ModeHBlank' (where 'unless (testBit v 7)' just put it during the
@@ -526,11 +543,35 @@ handleLcdcWrite v ps = do
     -- as one elongated HBlank: real CGB games that toggle LCD on/off per
     -- frame end up with their first scanline never re-entering OAM scan,
     -- which serialises into "BG never renders" on the very first frame.
+    --
+    -- That first line is also special, and 'ppuLcdOnFirstLine' marks it: it runs
+    -- 448 dots instead of 456, and it has no mode 2 at all. Hardware reports
+    -- mode 0 with OAM and VRAM unblocked for its first 76 dots and then goes
+    -- straight to mode 3, so the mode here is 'ModeHBlank' rather than
+    -- 'ModeOamScan'. Using mode 2 fabricates an OAM-source STAT interrupt that
+    -- hardware never raises, and blocks OAM reads that hardware allows.
     when (not (testBit prev 7) && testBit v 7) $ do
-        writeIORef (ppuMode ps) ModeOamScan
+        writeIORef (ppuMode ps) ModeHBlank
         writeIORef (ppuLy ps) 0
         writeIORef (ppuDot ps) 0
         writeIORef (ppuWindowLine ps) 0
+        writeIORef (ppuLcdOnFirstLine ps) True
+    sampleStatLine ps
+
+{- | Seed LCDC the way the boot ROM left it, skipping the side effects of a
+guest-visible @0 -> 1@ enable.
+
+The post-boot handoff in "Ocelot.Bus" jumps straight to the state the boot ROM
+produced, and by then the LCD has been on for most of a frame drawing the logo.
+Routing that seed through 'write8' would look like a fresh enable and start the
+machine on the short 448-dot line, which shifts the whole first frame and breaks
+mooneye @acceptance/boot_hwio-dmgABCmgb@. The mode, LY, dot, and window-line
+values the enable path would write are already what 'initialPpu' set, so only
+the STAT sample is still needed here.
+-}
+seedLcdc :: Word8 -> PpuState -> IO ()
+seedLcdc v ps = do
+    writeIORef (ppuLcdc ps) v
     sampleStatLine ps
 
 modeBits :: PpuMode -> Word8
@@ -578,6 +619,31 @@ oamScanDots = 80
 scanlineDots :: Int
 scanlineDots = 456
 
+{- | Dots the first scanline after the LCD is enabled gives up relative to a
+normal line: 4 out of mode 2, and 4 more out of mode 0.
+-}
+lcdOnOamScanSaving, lcdOnLineSaving :: Int
+lcdOnOamScanSaving = 4
+lcdOnLineSaving = 8
+
+{- | Dots of OAM scan on the line currently being scanned. Hardware runs a
+76-dot mode 2 on the first line after the LCD is enabled.
+-}
+oamScanDotsFor :: PpuState -> IO Int
+{-# INLINE oamScanDotsFor #-}
+oamScanDotsFor ps = do
+    short <- readIORef (ppuLcdOnFirstLine ps)
+    pure (if short then oamScanDots - lcdOnOamScanSaving else oamScanDots)
+
+{- | Total dots on the line currently being scanned. The first line after the
+LCD is enabled runs 448 dots; every other line runs the full 456.
+-}
+scanlineDotsFor :: PpuState -> IO Int
+{-# INLINE scanlineDotsFor #-}
+scanlineDotsFor ps = do
+    short <- readIORef (ppuLcdOnFirstLine ps)
+    pure (if short then scanlineDots - lcdOnLineSaving else scanlineDots)
+
 {- | Mode 3 with no penalties: 12 dots of initial fetch plus 160 pixels.
 Everything that stalls the fetcher is added on top by 'mode3Length'.
 -}
@@ -591,8 +657,30 @@ simply runs from there to the end of the scanline.
 boundaryFor :: PpuMode -> PpuState -> IO Int
 {-# INLINE boundaryFor #-}
 boundaryFor ModeDrawing ps = readIORef (ppuMode3End ps)
-boundaryFor ModeOamScan _ = pure oamScanDots
-boundaryFor _ _ = pure scanlineDots
+boundaryFor ModeOamScan ps = oamScanDotsFor ps
+boundaryFor ModeHBlank ps = do
+    preDraw <- inLcdOnPreDrawWindow ps
+    if preDraw then oamScanDotsFor ps else scanlineDotsFor ps
+boundaryFor _ ps = scanlineDotsFor ps
+
+{- | Whether the PPU is in the mode-0-looking window that opens the first
+scanline after the LCD is enabled, before drawing starts.
+
+The mode alone cannot answer this, because that line passes through 'ModeHBlank'
+twice: once for this window at the head of the line, and again for the real
+HBlank after mode 3. The dot position is what separates them, so 'boundaryFor'
+and 'transition' both ask through here to stay in agreement.
+-}
+inLcdOnPreDrawWindow :: PpuState -> IO Bool
+{-# INLINE inLcdOnPreDrawWindow #-}
+inLcdOnPreDrawWindow ps = do
+    short <- readIORef (ppuLcdOnFirstLine ps)
+    if not short
+        then pure False
+        else do
+            dot <- readIORef (ppuDot ps)
+            oamEnd <- oamScanDotsFor ps
+            pure (dot < oamEnd)
 
 {- | How long mode 3 runs on the line that is about to be drawn.
 
@@ -630,7 +718,11 @@ mode3Length ps = do
                 && fromIntegral wx <= (166 :: Int)
         !windowPenalty = if windowHere then 6 else 0
         !len = mode3BaseDots + fineScroll + windowPenalty
-    pure (min (scanlineDots - oamScanDots - 1) len)
+    -- Clamp against this line's own length, which is shorter on the first line
+    -- after the LCD is enabled.
+    lineDots <- scanlineDotsFor ps
+    start <- oamScanDotsFor ps
+    pure (min (lineDots - start - 1) len)
 
 {- | Recompute the latched mode 3 end from the current registers.
 
@@ -642,7 +734,8 @@ machine's value.
 resyncMode3End :: PpuState -> IO ()
 resyncMode3End ps = do
     len <- mode3Length ps
-    writeIORef (ppuMode3End ps) (oamScanDots + len)
+    start <- oamScanDotsFor ps
+    writeIORef (ppuMode3End ps) (start + len)
 
 {- | Transition out of the current mode at its boundary. Returns a bitmask:
 bit 0 = VBlank entry, bit 1 = STAT (rising edge of the OR'd STAT line),
@@ -661,7 +754,11 @@ transition mode ps = case mode of
         -- mid-line write must not retroactively move the mode 0 boundary.
         resyncMode3End ps
         writeIORef (ppuMode ps) ModeDrawing
-        writeIORef (ppuDot ps) oamScanDots
+        -- Not the 'oamScanDots' constant: on the first line after the LCD is
+        -- enabled mode 2 ended at dot 76, and jumping to 80 here would skip
+        -- 4 dots and shorten the line past the 8 hardware actually drops.
+        start <- oamScanDotsFor ps
+        writeIORef (ppuDot ps) start
         statEdge ps
     ModeDrawing -> do
         renderLine ps
@@ -671,20 +768,8 @@ transition mode ps = case mode of
         s <- statEdge ps
         pure (s .|. 0x04) -- Bit 2: HBlank entered (consumed by Bus for HDMA).
     ModeHBlank -> do
-        ly <- readIORef (ppuLy ps)
-        let ly' = ly + 1
-        if ly' == 144
-            then do
-                writeIORef (ppuMode ps) ModeVBlank
-                writeIORef (ppuLy ps) 144
-                writeIORef (ppuDot ps) 0
-                s <- statEdge ps
-                pure (0x01 .|. s)
-            else do
-                writeIORef (ppuMode ps) ModeOamScan
-                writeIORef (ppuLy ps) ly'
-                writeIORef (ppuDot ps) 0
-                statEdge ps
+        preDraw <- inLcdOnPreDrawWindow ps
+        if preDraw then lcdOnPreDrawEnd ps else hblankLineEnd ps
     ModeVBlank -> do
         ly <- readIORef (ppuLy ps)
         let ly' = ly + 1
@@ -699,6 +784,39 @@ transition mode ps = case mode of
                 writeIORef (ppuLy ps) ly'
                 writeIORef (ppuDot ps) 0
                 statEdge ps
+
+{- | End of the mode-0-looking window that opens the first scanline after the LCD
+is enabled. Hardware skips mode 2 entirely on this line, so this goes straight to
+mode 3 rather than advancing to the next line.
+-}
+lcdOnPreDrawEnd :: PpuState -> IO Word8
+lcdOnPreDrawEnd ps = do
+    -- Latch mode 3's length for this line exactly as leaving mode 2 would.
+    resyncMode3End ps
+    writeIORef (ppuMode ps) ModeDrawing
+    oamEnd <- oamScanDotsFor ps
+    writeIORef (ppuDot ps) oamEnd
+    statEdge ps
+
+-- | End of a visible scanline: advance LY, entering VBlank after line 143.
+hblankLineEnd :: PpuState -> IO Word8
+hblankLineEnd ps = do
+    -- The short first-line-after-LCD-on applies to this line only.
+    writeIORef (ppuLcdOnFirstLine ps) False
+    ly <- readIORef (ppuLy ps)
+    let ly' = ly + 1
+    if ly' == 144
+        then do
+            writeIORef (ppuMode ps) ModeVBlank
+            writeIORef (ppuLy ps) 144
+            writeIORef (ppuDot ps) 0
+            s <- statEdge ps
+            pure (0x01 .|. s)
+        else do
+            writeIORef (ppuMode ps) ModeOamScan
+            writeIORef (ppuLy ps) ly'
+            writeIORef (ppuDot ps) 0
+            statEdge ps
 
 {- | Compute the OR of all enabled STAT interrupt sources and update the
 edge-detector. Returns @0x02@ on a low->high transition of the OR'd
