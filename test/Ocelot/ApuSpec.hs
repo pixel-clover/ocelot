@@ -26,6 +26,117 @@ spec = do
             v <- read8 0xFF26 apu
             (v .&. 0x80) `shouldBe` 0x80
             (v .&. 0x0F) `shouldBe` 0x00
+    describe "NR52 power-on frame sequencer" $ do
+        {- Writing NR52 bit 7 when the APU is already on is not a power-on, so it must
+        leave the frame sequencer's step pointer alone. Ocelot used to reset the step to
+        0 on any bit-7 write, which pulled the next length clock a whole frame step
+        (8192 T-cycles) earlier than hardware. blargg @07-len sweep period sync@ subtest
+        5 measures exactly this: it writes NR52=$80 to an already-on APU and requires the
+        next length clock to stay two steps away, not one.
+
+        The write sequence below mirrors the ROM's, including the NR14=$40 pre-write.
+        That write turns length-enable on while it is still off, so the later NR14=$C0
+        has no 0->1 transition on bit 6 and cannot fire the extra-length-clock quirk,
+        which would otherwise disable the channel immediately and mask the timing. -}
+        let framePeriodM = 2048 -- 8192 T-cycles, one frame-sequencer step
+
+            -- Leave the sequencer with an odd next step, so the next event does not
+            -- clock length and the one after it does.
+            armChannel1 apu = do
+                write8 0xFF26 0x80 apu -- power on: step 0 next, full period to go
+                advance framePeriodM apu -- fires step 0, so step 1 is next
+                write8 0xFF14 0x40 apu -- length enable on (no trigger)
+                write8 0xFF11 0x3F apu -- length = 1
+                write8 0xFF12 0x08 apu -- DAC on, silent
+                write8 0xFF14 0xC0 apu -- trigger, length still enabled
+            ch1On apu = do
+                v <- read8 0xFF26 apu
+                pure (v .&. 0x01)
+
+        it "keeps the length clock two steps away when bit 7 is written to an already-on APU" $ do
+            apu <- initial
+            armChannel1 apu
+            write8 0xFF26 0x80 apu -- already on: must not reset the step
+            advance framePeriodM apu -- fires step 1: no length clock
+            afterOne <- ch1On apu
+            afterOne `shouldBe` 0x01
+            advance framePeriodM apu -- fires step 2: length clock disables the channel
+            afterTwo <- ch1On apu
+            afterTwo `shouldBe` 0x00
+
+        it "clocks length on the next step after a genuine off-to-on power cycle" $ do
+            apu <- initial
+            armChannel1 apu
+            write8 0xFF26 0x00 apu -- power off
+            write8 0xFF26 0x80 apu -- genuine power-on: step resets to 0
+            -- Power-off cleared the channel, so re-arm before timing the clock.
+            write8 0xFF14 0x40 apu
+            write8 0xFF11 0x3F apu
+            write8 0xFF12 0x08 apu
+            write8 0xFF14 0xC0 apu
+            advance framePeriodM apu -- fires step 0: clocks length immediately
+            afterOne <- ch1On apu
+            afterOne `shouldBe` 0x00
+
+    describe "channel 3 sample timing" $ do
+        {- Wave RAM at 0xFF30-0xFF3F is only directly addressable while channel 3 is
+        off. Once the channel is running, a read is redirected to the byte holding the
+        sample the channel is currently on (CGB), or blocked outright (DMG). Both tests
+        below therefore load the wave bytes before triggering, then read back through
+        that redirect to observe the channel's sample position without exporting it. -}
+        let armWave apu = do
+                write8 0xFF26 0x80 apu -- APU on
+                write8 0xFF1A 0x80 apu -- ch3 DAC on
+                write8 0xFF30 0xAA apu -- wave byte 0 (samples 0 and 1)
+                write8 0xFF31 0xBB apu -- wave byte 1 (samples 2 and 3)
+        it "delays the first sample fetch after an NR34 trigger" $ do
+            {- freq 2046 gives a 4 T-cycle period, so the first fetch is due at 4 + delay
+            and every 4 T-cycles after. Reading at 12 and then 16 T-cycles brackets the
+            delay: 0xAA at 12 rules out a delay of 4 or less (the position would already
+            have reached wave byte 1), and 0xBB at 16 rules out 10 or more (the position
+            would still be on byte 0).
+
+            This pins the delay to 5-8 T-cycles rather than to exactly 6. 'advance' is
+            M-cycle granular, so a read can only land on a multiple of 4 T-cycles, and
+            fetch times are always even; delays of 6 and 8 put the fetch at 10 and 12,
+            which no such read can separate. 6 is SameBoy's value. -}
+            apu <- initial
+            setCgbMode True apu
+            armWave apu
+            write8 0xFF1D 0xFE apu -- NR33: frequency low
+            write8 0xFF1E 0x87 apu -- NR34: trigger, frequency high 7 -> freq 2046
+            advance 3 apu -- 12 T-cycles: first fetch due at 10, so position 1, byte 0
+            atTwelve <- read8 0xFF30 apu
+            atTwelve `shouldBe` 0xAA
+            advance 1 apu -- 16 T-cycles: position 2, byte 1
+            atSixteen <- read8 0xFF30 apu
+            atSixteen `shouldBe` 0xBB
+
+        {- On DMG a wave read is redirected to the current sample byte only inside the
+        window where the channel just read it, and returns 0xFF outside. The pair below
+        brackets the window's width: it must be open when the read lands on the fetch
+        itself, and shut 2 T-cycles later. That pins the width to 1-2 T-cycles; as above,
+        M-cycle granular reads cannot separate those two, because every reachable offset
+        past an (always even) fetch is even. Hardware's window is one 2 T-cycle APU step,
+        and Ocelot previously modelled it as 4, which left it open at offset 2. -}
+        it "redirects a DMG wave read landing on the channel's own fetch" $ do
+            apu <- initial
+            armWave apu
+            write8 0xFF1D 0xFF apu -- NR33: frequency low
+            write8 0xFF1E 0x87 apu -- NR34: trigger, frequency high 7 -> freq 2047
+            advance 2 apu -- 8 T-cycles: 2 T-cycle period, so the fetch lands exactly here
+            v <- read8 0xFF30 apu
+            v `shouldBe` 0xAA
+
+        it "blocks a DMG wave read landing 2 T-cycles after the channel's own fetch" $ do
+            apu <- initial
+            armWave apu
+            write8 0xFF1D 0xFC apu -- NR33: frequency low
+            write8 0xFF1E 0x87 apu -- NR34: trigger, frequency high 7 -> freq 2044
+            advance 4 apu -- 16 T-cycles: 8 T-cycle period puts the fetch at 14
+            v <- read8 0xFF30 apu
+            v `shouldBe` 0xFF
+
     describe "register read masks" $ do
         it "NR10 high bit reads as 1" $ do
             apu <- initial

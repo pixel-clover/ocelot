@@ -106,8 +106,9 @@ emit base m = do
     ly <- Bus.read8 0xFF44 (machineBus m)
     lcdc <- Bus.read8 0xFF40 (machineBus m)
     stat <- Bus.read8 0xFF41 (machineBus m)
+    nr52 <- Bus.read8 0xFF26 (machineBus m)
     printf
-        "pc=%04X af=%04X bc=%04X de=%04X hl=%04X sp=%04X if=%02X ie=%02X ly=%03d lcdc=%02X stat=%02X cyc=%010d\n"
+        "pc=%04X af=%04X bc=%04X de=%04X hl=%04X sp=%04X if=%02X ie=%02X ly=%03d lcdc=%02X stat=%02X nr52=%02X cyc=%010d\n"
         (regPC r)
         af
         bc
@@ -119,6 +120,7 @@ emit base m = do
         ly
         lcdc
         stat
+        nr52
         cyc
 
 w16 :: Word8 -> Word8 -> Word16

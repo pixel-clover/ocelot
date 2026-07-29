@@ -40,6 +40,8 @@ module Ocelot.Apu (
     read8,
     write8,
     advance,
+    divReset,
+    alignFrameTimer,
     drainSamples,
     drainSamplesVector,
     drainSamplesInto,
@@ -818,7 +820,12 @@ handleNr52 cgb v s
     -- Powering on: reset the frame-sequencer step pointer so the next
     -- step to fire is 0. The 8192-cycle divider ('apuFrameTimer') keeps
     -- counting through power-off, so it is preserved here.
-    | testBit v 7 = s{apuPower = True, apuFrameStep = 0}
+    --
+    -- Writing bit 7 to an APU that is already on is not a power-on, and must
+    -- leave the sequencer's phase alone. Resetting the step unconditionally
+    -- pulled the next length clock a whole step (8192 T-cycles) early, which is
+    -- what blargg @07-len sweep period sync@ subtest 5 measures.
+    | testBit v 7 = if apuPower s then s else s{apuPower = True, apuFrameStep = 0}
     | otherwise =
         -- Powering off: clear channels and the mixer. Wave RAM is
         -- preserved on both DMG and CGB; length counters are preserved
@@ -1137,7 +1144,13 @@ writeNr34 cgb v s =
                 else ch1
         !postClock = trigger && lengthEn && firstHalf && (lenJustEn || preTrigLen == 0)
         !ch3 = applyExtraClockWave postClock True ch2
-        !t3' = if trigger then (2048 - freq) * 2 else apuCh3Timer s
+        -- Triggering ch3 delays its first sample fetch by 6 T-cycles beyond the
+        -- normal period. SameBoy's @Core/apu.c@ loads @(sample_length ^ 0x7FF) + 3@
+        -- on an NR34 trigger, in units of 2 T-cycles (its wave reload is
+        -- @sample_length ^ 0x7FF@ where the square reload is @* 2 + 1@ for a period
+        -- twice as long). Without the delay every later sample lands one step early,
+        -- which is what blargg @09-wave read while on@ measures on both DMG and CGB.
+        !t3' = if trigger then (2048 - freq) * 2 + 6 else apuCh3Timer s
      in s{apuCh3 = ch3, apuWaveRam = waveRam', apuCh3Timer = t3'}
 
 {- | Apply the DMG wave-RAM corruption transform. The byte index of the
@@ -1363,7 +1376,7 @@ tickWave !t !curr w
             !remainder = overshoot `mod` period
             !timer' = period - remainder
             -- Last crossing happened `remainder` cycles before chunk end.
-            !cd = max 0 (4 - remainder)
+            !cd = max 0 (2 - remainder)
          in ( timer'
             , w
                 { wvPos = pos'
@@ -1403,6 +1416,45 @@ tickNoise !t !curr n
 ----------------------------------------------------------------------
 -- Frame sequencer
 ----------------------------------------------------------------------
+
+{- | Point the frame sequencer at the next divider edge, @cycles@ from now.
+
+Used when the APU is powered on. Hardware resets the sequencer's step but not its
+clock: the steps come from DIV bit 4 falling edges, so the next one arrives
+whenever the divider says, not a full period after the write. Leaving the period
+counter wherever it happened to be is what left blargg @07-len sweep period sync@
+misaligned, since that ROM syncs by power-cycling the APU rather than by touching
+DIV.
+-}
+alignFrameTimer :: Int -> ApuState -> IO ()
+alignFrameTimer cycles apu =
+    modifyIORef' (apuRef apu) $ \s -> s{apuFrameTimer = cycles}
+
+{- | DIV was reset, so realign the frame sequencer to the divider's new phase.
+
+The sequencer is not free-running on hardware: it is clocked by a falling edge of
+DIV bit 4, i.e. internal divider bit 12. Ocelot counts 'frameSequencerPeriod'
+T-cycles instead, which gives the right period but keeps its own phase, so a DIV
+write left the length and sweep periods misaligned. That is what blargg
+@07-len sweep period sync@ measures.
+
+@fallingEdge@ says whether bit 12 was set before the reset; if it was, zeroing the
+divider drops it and clocks the sequencer once. Either way the next edge is a full
+period after the reset, because bit 12 rises at half a period and falls at one.
+
+Callers must settle any deferred APU time first, or the realignment lands at the
+wrong point in the APU's timeline; 'Ocelot.Bus' does that with @flushApu@.
+-}
+divReset :: Bool -> ApuState -> IO ()
+divReset fallingEdge apu = modifyIORef' (apuRef apu) $ \s ->
+    let !s1 =
+            if fallingEdge
+                then
+                    let !step = apuFrameStep s
+                        !s' = s{apuFrameStep = (step + 1) `mod` 8}
+                     in stepFrame step s'
+                else s
+     in s1{apuFrameTimer = frameSequencerPeriod}
 
 stepFrame :: Int -> ApuInternal -> ApuInternal
 stepFrame step s = case step of

@@ -38,6 +38,7 @@ import Control.Monad (forM_, when)
 import Data.Bits (clearBit, complement, setBit, shiftL, shiftR, testBit, (.&.), (.|.))
 import Data.IORef (readIORef, writeIORef)
 import Data.Int (Int8)
+import Data.Maybe (isJust)
 import Data.Word (Word16, Word8)
 import qualified Ocelot.Bus as Bus
 import qualified Ocelot.Cpu.Alu as Alu
@@ -113,16 +114,26 @@ step m = do
                         then haltStep m
                         else doInstruction m
 
+{- | One M-cycle of a halted CPU.
+
+Ticks first, then tests for a pending interrupt, so the cycle during which a
+peripheral raises @IF@ is also the cycle the CPU wakes on. Testing before the tick
+instead costs an extra M-cycle: that tick raises @IF@, and only the following
+'haltStep' notices and wakes. Mooneye
+@acceptance\/halt_ime0_nointr_timing@ measures exactly this, and had Ocelot 4
+T-cycles slow leaving a @HALT@ that waited a frame for VBlank.
+
+Waking is separate from servicing. With @IME@ set, 'step' routes a pending
+interrupt to 'serviceInterrupt' and never reaches here; with @IME@ clear the CPU
+just resumes at the instruction after the @HALT@.
+-}
 haltStep :: Machine -> IO ()
 haltStep m = do
+    mapCpu (\c -> c{cpuCycles = cpuCycles c + 1}) m
+    advanceBus 1 m
     mIrq <- pendingInterrupt m
-    case mIrq of
-        Just _ -> do
-            mapCpu (\c -> c{cpuHalted = False, cpuCycles = cpuCycles c + 1}) m
-            advanceBus 1 m
-        Nothing -> do
-            mapCpu (\c -> c{cpuCycles = cpuCycles c + 1}) m
-            advanceBus 1 m
+    when (isJust mIrq) $
+        mapCpu (\c -> c{cpuHalted = False}) m
 
 doInstruction :: Machine -> IO ()
 doInstruction m = do

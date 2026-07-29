@@ -182,12 +182,13 @@ static void on_instruction(GB_gameboy_t *gb, uint16_t pc, uint8_t opcode) {
   uint8_t ly = GB_read_memory(gb, 0xFF44);
   uint8_t lcdc = GB_read_memory(gb, 0xFF40);
   uint8_t stat = GB_read_memory(gb, 0xFF41);
+  uint8_t nr52 = GB_read_memory(gb, 0xFF26);
   uint64_t cyc = gb->debugger_ticks - cart_entry_ticks;
   fprintf(trace_out,
           "pc=%04X af=%04X bc=%04X de=%04X hl=%04X sp=%04X if=%02X ie=%02X "
-          "ly=%03d lcdc=%02X stat=%02X cyc=%010llu\n",
+          "ly=%03d lcdc=%02X stat=%02X nr52=%02X cyc=%010llu\n",
           pc, r->af, r->bc, r->de, r->hl, r->sp, iflag, ie, ly, lcdc, stat,
-          (unsigned long long)cyc);
+          nr52, (unsigned long long)cyc);
 }
 
 int main(int argc, char **argv) {

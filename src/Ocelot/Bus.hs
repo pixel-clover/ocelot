@@ -468,7 +468,19 @@ addrInDmaUse addr b
             then pure False
             else
                 if addr >= 0xFE00
-                    then pure True
+                    then do
+                        -- OAM is not held for the whole transfer. SameBoy blocks it while
+                        -- @dma_current_dest /= 0@, and that counter is the 0xFF sentinel on the
+                        -- trigger cycle, wraps to 0 on the cycle before byte 0 lands, then counts up.
+                        -- So there is exactly one readable cycle, just before the first write. Holding
+                        -- OAM for the whole transfer made a ROM executing from OAM fetch 0xFF and
+                        -- derail into RST 38h, which is what mooneye 'oam_dma_start' catches.
+                        --
+                        -- SameBoy also blocks when @dma_restarting@; Ocelot does not model a distinct
+                        -- restart flag, so a DMA retriggered mid-transfer gets the readable cycle again.
+                        starting <- readIORef (busOamDmaStarting b)
+                        idx <- readIORef (busOamDmaIndex b)
+                        pure (starting || idx /= 0)
                     else do
                         -- 'busOamDmaStarting' is Ocelot's startup delay: the DMA has been requested
                         -- but has not taken the bus yet, which is SameBoy's warm-up.
@@ -643,10 +655,11 @@ write8Raw addr !v b
     | addr <= 0xFEFF = pure ()
     | addr == 0xFF00 = Joypad.writeP1 v (busJoypad b)
     | addr == 0xFF02 = handleSerialControl v b
-    | addr == 0xFF04 = modifyIORef' (busTimer b) Timer.writeDiv
+    | addr == 0xFF04 = resetDivider b
     | addr == 0xFF05 = modifyIORef' (busTimer b) (Timer.writeTima v)
     | addr == 0xFF06 = modifyIORef' (busTimer b) (Timer.writeTma v)
-    | addr == 0xFF07 = modifyIORef' (busTimer b) (Timer.writeTac v)
+    | addr == 0xFF07 = applyTimerWrite (Timer.writeTac v) b
+    | addr == 0xFF26 = writeNr52 v b
     | addr >= 0xFF10 && addr <= 0xFF3F = flushApu b >> Apu.write8 addr v (busApu b)
     | addr == 0xFF46 = oamDma v b
     | addr >= 0xFF40 && addr <= 0xFF4B = Ppu.write8 addr v (busPpu b)
@@ -920,7 +933,74 @@ through 'Timer.writeDiv' so the falling-edge quirk (a high AND signal
 dropping to 0 bumps TIMA once) still applies.
 -}
 resetTimerDiv :: Bus -> IO ()
-resetTimerDiv b = modifyIORef' (busTimer b) Timer.writeDiv
+resetTimerDiv = resetDivider
+
+{- | T-cycles until the divider next clocks the APU frame sequencer.
+
+The sequencer runs off a falling edge of DIV bit 4, so the edges land on multiples
+of 8192 divider ticks. In double speed it uses bit 5 instead, doubling the divider
+period, and the APU is handed the halved cycle count, so the two cancel and the
+answer stays in the same range.
+-}
+untilNextFrameEdge :: Bool -> Word16 -> Int
+untilNextFrameEdge double d =
+    let !period = if double then 16384 else 8192
+        !remaining = period - (fromIntegral d `mod` period)
+     in if double then remaining `div` 2 else remaining
+
+{- | Write NR52, realigning the frame sequencer when this powers the APU on.
+
+Hardware resets the sequencer's step on power-on but keeps clocking it from the
+divider, so the next step arrives at the next DIV edge rather than a full period
+later. 'Apu.write8' cannot work that out on its own: the divider lives in the
+timer, so the phase has to come from here.
+-}
+writeNr52 :: Word8 -> Bus -> IO ()
+writeNr52 v b = do
+    flushApu b
+    before <- Apu.read8 0xFF26 (busApu b)
+    Apu.write8 0xFF26 v (busApu b)
+    when (not (testBit before 7) && testBit v 7) $ do
+        ts <- readIORef (busTimer b)
+        double <- readIORef (busDoubleSpeed b)
+        Apu.alignFrameTimer (untilNextFrameEdge double (Timer.timDivider ts)) (busApu b)
+
+{- | Zero the divider, realigning the APU frame sequencer to its new phase.
+
+The sequencer is clocked by a falling edge of DIV bit 4 on hardware (internal
+divider bit 12, or bit 13 in double speed so the wall-clock rate is unchanged), so
+zeroing the divider drops that bit if it was set and clocks the sequencer once.
+'Apu.divReset' also restarts the APU's period counter, since the next edge is a
+full period after the reset either way.
+
+The APU is settled first: its time is deferred in 'busApuDebt', and realigning the
+sequencer before settling would apply the new phase at the wrong point in the APU's
+timeline.
+-}
+resetDivider :: Bus -> IO ()
+resetDivider b = do
+    ts <- readIORef (busTimer b)
+    double <- readIORef (busDoubleSpeed b)
+    let !seqBit = if double then 13 else 12
+        !falling = testBit (Timer.timDivider ts) seqBit
+    flushApu b
+    applyTimerWrite Timer.writeDiv b
+    Apu.divReset falling (busApu b)
+
+{- | Run a timer register write that can itself drive a TIMA overflow, latching
+@IF@ bit 2 straight away when it does.
+
+Not deferred like the divider-driven overflow in 'Timer.advance': a write lands
+part-way through its M-cycle on hardware, so @IF@ is up by the instruction
+boundary, and 'Ocelot.Machine.cycleWrite' leaves no cycle after the write to run
+the reload state machine in. See 'Timer.writeFallingEdge'.
+-}
+applyTimerWrite :: (Timer.TimerState -> (Timer.TimerState, Bool)) -> Bus -> IO ()
+applyTimerWrite f b = do
+    ts <- readIORef (busTimer b)
+    let (!ts', !fired) = f ts
+    writeIORef (busTimer b) ts'
+    when fired (setIfBit 2 b)
 
 {- | Read and clear the CPU-stall debit the bus accrued during the current
 instruction. See 'busStallCycles'.

@@ -16,7 +16,9 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Bit/rotate/shift helpers (RLC/RRC/RL/RR/SLA/SRA/SWAP/SRL/BIT/RES/SET)
 - [x] ALU helpers (add/adc/sub/sbc/and/or/xor/cp/inc/dec) with correct flag effects, plus add16 and addSP
 - [x] Interrupt controller (IF/IE, IME, EI/DI delay, HALT wait-for-interrupt)
-- [x] Master step loop services pending interrupts before fetch and ticks during HALT
+- [x] Master step loop services pending interrupts before fetch and ticks during HALT. A halted CPU ticks first and then tests for a pending
+  interrupt, so the cycle a peripheral raises `IF` on is also the cycle the CPU wakes on; testing before the tick wasted an extra M-cycle and failed
+  mooneye `acceptance/halt_ime0_nointr_timing`
 - [x] Master step loop driving CPU, PPU, APU, timer, and DMA from a one-instruction budget (`Bus.advance` ticks all subsystems after each CPU
   instruction)
 - [x] STOP instruction triggers CGB speed switch when KEY1 bit 0 is set; halts otherwise
@@ -32,6 +34,9 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 
 - [x] DMG memory map: ROM banks, VRAM, ERAM, WRAM, OAM, IO, HRAM, IE
 - [x] Echo RAM mirroring (`0xE000-0xFDFF` -> `0xC000-0xDDFF`)
+- [x] OAM DMA (`0xFF46`) leaves OAM itself readable for exactly the one cycle before the first byte lands, matching SameBoy blocking only while
+  `dma_current_dest /= 0` (that counter is a sentinel on the trigger cycle and wraps to 0 just before byte 0). Holding OAM for the whole transfer made a
+  ROM executing from OAM fetch `0xFF` and derail into `RST 38h`
 - [x] OAM DMA (`0xFF46`) stepped one byte per M-cycle for 160 M-cycles, with a 1-cycle startup delay matching real hardware and a per-bus CPU lockout
   while the transfer is active: the DMA occupies one internal bus (main, VRAM, or CGB WRAM), so a VRAM-sourced transfer leaves the main bus readable,
   and the DMA's own source address and its echo alias read back normally. Passes the nine mooneye instruction-timing ROMs, which a blanket
@@ -59,8 +64,10 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] DIV register at 16384 Hz with reset-on-write, and reset-on-`STOP`
 - [x] TIMA/TMA/TAC with selectable input clock
 - [x] Timer falling-edge detector and TIMA reload window (writes to TIMA cancel reload, writes to TMA shift the loaded value but leave TIMA
-  reading 0 until the reload fires, DIV/TAC writes that drop the AND signal increment TIMA). Mooneye timer category: 12/13 passing;
-  `acceptance/timer/rapid_toggle.gb` is still pending.
+  reading 0 until the reload fires, DIV/TAC writes that drop the AND signal increment TIMA). A write-driven overflow latches `IF` bit 2 immediately
+  rather than after the 4 T-cycle reload delay the divider-driven edge uses: a register write lands part-way through its M-cycle on hardware, so `IF`
+  is up by the instruction boundary, whereas `cycleWrite` ticks and then writes and leaves no cycle to run the reload state machine in. Mooneye timer
+  category: 13/13.
 - [x] Serial transfer (SB/SC) with a timed internal clock: 8 bits over 128 CPU M-cycles, then SB reads 0xFF (line idles high with no peer),
   SC bit 7 clears, and IF bit 3 is raised. The outgoing byte is also captured to a buffer for blargg test ROM output. External-clock
   transfers never complete, since there is no peer to supply the clock.
@@ -69,6 +76,9 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 ### Picture Processing Unit
 
 - [x] LCDC, STAT, LY, LYC, SCX, SCY, WX, WY, BGP, OBP0, OBP1 register surface
+- [x] LY reads 0 for most of line 153: hardware writes `LY = 153` two dots into the line and `LY = 0` six dots later, so a read of `0xFF44` returns 0
+  for roughly 448 of the line's 456 dots while the PPU is still on line 153. Holding 153 for the whole line desynced every ROM that waits on LY at the
+  frame wrap
 - [x] STAT mode bits lag the PPU's real mode on reads: 4 dots at most boundaries, 5 on entry to VBlank. The STAT interrupt line keeps using the real
   mode, as SameBoy models the two separately via `mode_for_interrupt`. Passes mooneye `acceptance/ppu/intr_2_mode0_timing` and `intr_2_mode3_timing`;
   the mode 2 -> 3 report is still about a dot off, and lowering the delay to 3 is worse
@@ -113,8 +123,8 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Bulk-step APU at event boundaries (per-T-cycle iteration replaced with chunked stepper)
 - [x] Reusable APU sample queue with vector drains for frontend hot paths
 - [ ] CGB stereo wave RAM read-during-play behavior
-- [ ] Validation: blargg `dmg_sound` test ROMs
-- [ ] Validation: blargg `cgb_sound` test ROMs
+- [x] Validation: blargg `dmg_sound` test ROMs
+- [x] Validation: blargg `cgb_sound` test ROMs
 
 ### Input and Interaction
 
@@ -176,10 +186,8 @@ This document outlines the features implemented in the Ocelot emulator, and the 
   serial (sound, oam_bug, mem_timing, halt_bug, interrupt_time) get a real verdict + numeric error code instead of "no Pass/Fail in N instructions"
   timeouts
 - [x] Blargg mem_timing wired in (3 sub-ROMs, aspirational; reveals memory timing gaps via error codes)
-- [x] Blargg dmg_sound wired in (12 sub-ROMs, aspirational; 8 currently pass: 01-registers, 02-len ctr, 03-trigger, 04-sweep, 05-sweep details,
-  06-overflow on trigger, 08-len ctr during power, 11-regs after power)
-- [x] Blargg cgb_sound wired in (12 sub-ROMs available, aspirational; 10 currently pass: 01-registers, 02-len ctr, 03-trigger, 04-sweep, 05-sweep
-  details, 06-overflow on trigger, 08-len ctr during power, 10-wave trigger while on, 11-regs after power, 12-wave)
+- [x] Blargg dmg_sound fully passes (12/12 sub-ROMs)
+- [x] Blargg cgb_sound fully passes (12/12 sub-ROMs)
 - [x] Blargg oam_bug wired in (8 sub-ROMs, aspirational; ~2 currently pass: 3-non_causes, 6-timing_no_bug)
 - [x] Blargg halt_bug and interrupt_time both pass (interrupt_time started passing once the timer stopped being halved in CGB double-speed mode)
 - [ ] Promote aspirational blargg ROMs to strict run-to-pass as accuracy is added

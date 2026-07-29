@@ -17,6 +17,8 @@ use, so any state divergence they surface is the same divergence production code
 - `probe-ocps.hs` — dumps CGB OBJ palette RAM through the OCPS/OCPD index register.
 - `bench.hs` — throughput benchmark. Drives the SDL frontend's per-frame path and reports the multiple of real hardware speed. See
   "Benchmarking" below.
+- `blargg-run.hs` — runs a blargg test ROM and prints its serial text and `0xA000` result code verbatim. The golden suite reduces a blargg ROM to
+  pass/fail, which discards the subtest number the ROM itself reports. See "Read the ROM's Own Verdict First" below.
 - `ocelot-trace.hs` and `sameboy-trace.c` — the two halves of the SameBoy differential tracer. See "Differential tracing" below.
 
 ### Differential tracing against SameBoy
@@ -25,12 +27,22 @@ use, so any state divergence they surface is the same divergence production code
 emulators first disagree. This is the fastest way to chase an accuracy bug that a test ROM reports only as a final pass/fail.
 
 ```
-pc=XXXX af=XXXX bc=XXXX de=XXXX hl=XXXX sp=XXXX if=XX ie=XX ly=XXX lcdc=XX cyc=XXXXXXXXXX
+pc=XXXX af=XXXX bc=XXXX de=XXXX hl=XXXX sp=XXXX if=XX ie=XX ly=XXX lcdc=XX stat=XX nr52=XX cyc=XXXXXXXXXX
 ```
 
 `stat` is the STAT register (`0xFF41`) as the CPU would read it. It was added because the PPU cluster is almost entirely STAT timing and the register was
 invisible in the trace: adding it dropped the first divergence on `mem_timing.gb` from line 8147 to line **32**, which is where the 4-dot STAT mode-bit
 delay was found. When chasing a PPU failure, diff this column first.
+
+`nr52` is the APU control register (`0xFF26`), whose low four bits are the per-channel active flags. It makes length-counter and sweep timing visible,
+which is otherwise invisible in a CPU trace: on blargg `07-len sweep period sync` it located the defect as channel 2's length clock landing 8 T-cycles
+late (SameBoy clears the flag at `cyc=1760220`, Ocelot at `1760228`), where the register-only trace had only shown a downstream read 1500 instructions
+further on.
+
+**Reading it is safe, and that was checked rather than assumed.** SameBoy's `GB_apu_read` calls `GB_apu_run`, a lazy sync, so sampling NR52 every
+instruction syncs the *reference* APU far more often than the ROM does — a possible observer effect on the side being treated as ground truth. The check
+is cheap: strip the new column from a fresh reference trace and diff it against one captured before the column existed. Identical means no perturbation.
+Do this for any new column that touches a lazily-synced subsystem.
 
 `cyc` is CPU-relative T-cycles since the cart entry point, sampled at the start of the instruction on the line. Both sides zero it at hand-off, so
 boot-stub accounting cannot offset the column. It is CPU-relative rather than wall-clock on both sides (Ocelot's `cpuCycles`, SameBoy's
@@ -97,6 +109,60 @@ The divergence now first shows up as the VBlank IF bit, at equal `cyc` and equal
 That is a separate and finer timing question than the line length, and it is still open. `acceptance/ppu/lcdon_timing-GS` and
 `lcdon_write_timing-GS` also still fail; see "Open: The Enable-Line STAT Mode 3 Report Is 8 Dots Late" below for the measurement rather than
 duplicating it here.
+
+### Read the ROM's Own Verdict First
+
+Before reaching for the differential tracer, run `blargg-run` and read the number the ROM reports, then read the matching
+`.s` file in `external/gb-test-roms/<suite>/source/`. blargg's ROMs `set_test N,"<description>"` before each group, and the
+`0xA000` result code is that `N`, so the code names the failing behavior in the ROM author's own words. The source also gives
+the expected cycle counts as literal constants.
+
+This is much cheaper than trace bisection, and on `07-len sweep period sync` it was also more accurate. A trace comparison had
+pinned that ROM's defect to "channel 2's length clock is 8 T-cycles late", derived from an `nr52` column sampled at instruction
+boundaries. That was wrong twice over: the failing subtest was 5, `"Powering up APU MODs next frame time with 8192"`, which is
+about channel 1 and about the frame sequencer's *phase*, not a small delay. The 8-cycle figure was the spacing of the polling
+loop's own instructions, so it measured the sampling resolution rather than the error, and the sampled divergence was inside a
+subtest that passes. The source also shows the real tolerance: the poll loop is 11 M-cycles per iteration and the check accepts
+a 5-iteration window, so an error has to exceed ~220 T-cycles to fail at all.
+
+The actual bug was that `Apu.handleNr52` reset `apuFrameStep` to 0 on *any* NR52 bit-7 write. Writing bit 7 to an already-on
+APU is not a power-on, and hardware leaves the sequencer's phase alone; resetting it pulled the next length clock a whole step
+(8192 T-cycles) early. Subtests 2, 3, and 4 passing was the clue that the period was right and only the power-on phase was
+wrong.
+
+A related finding from the same probe: `apuFrameTimer` free-runs in phase with the timer's divider, because both start at
+machine init and only a DIV write (`Bus.resetDivider`) can separate them. That makes the realignment in `Bus.writeNr52` a
+no-op under current invariants. It is kept as documented defensive code, but it is not what fixed this ROM, and a fix
+attributed to it would be misattributed.
+
+To find a phase bug like this, instrument rather than trace: a temporary `Debug.Trace`-style probe printing every frame-sequencer
+step and every NR52 write, with a running T-cycle count, showed in one run that the write at `t=1941648` had `wasOn=True` and
+still reset the step from 3 to 0. Revert the probe with a file copy, not `git checkout` — `git checkout` on a file with other
+uncommitted work discards that work too.
+
+### Two Wave-Channel Constants, and the Limit of M-Cycle Tests
+
+The four blargg wave ROMs (`dmg_sound` 09/10/12 and `cgb_sound` 09) were one diagnosis with two fixes, both read off
+`external/SameBoy/Core/apu.c` rather than measured:
+
+- **Trigger delay.** An NR34 trigger delays channel 3's first sample fetch by 6 T-cycles beyond the normal period. SameBoy loads
+  `(sample_length ^ 0x7FF) + 3` at `apu.c:2014`; those units are 2 T-cycles each, which you can confirm from the same file without
+  external docs: the wave reload is `sample_length ^ 0x7FF` where the square reload is `* 2 + 1`, and the square's period is exactly
+  twice the wave's. Ocelot had no delay, so every later sample landed one step early. This alone fixed `cgb_sound` 09 and
+  `dmg_sound` 10.
+- **The DMG `wave_form_just_read` window.** Ocelot modelled it as 4 T-cycles wide, deliberately, to cover M-cycle read granularity.
+  Hardware's is one 2 T-cycle APU step. At the period these ROMs use, `(2048 - 2046) * 2 = 4` T-cycles, a 4-cycle window is open on
+  every possible read, so DMG never returned `0xFF` at all. Narrowing it to 2 fixed `dmg_sound` 09 and 12.
+
+`09` is self-oracling and worth knowing about: its wave table is `$00,$11,$22,...,$FF`, one distinct byte per index, so a returned
+byte names the index that was read. A probe on `waveRamRead` gives the channel's sample position directly, with no reference
+emulator needed.
+
+The unit tests here can only pin these constants to a bucket, and they say so. `Apu.advance` takes M-cycles, so a test read lands
+only on a multiple of 4 T-cycles, and fetch times are always even. That makes a trigger delay of 6 indistinguishable from 5, 7, or
+8, and a window of 2 indistinguishable from 1. Mutating each constant in *both* directions is what surfaces this: the first pair of
+tests written here passed with the delay set to 2 and to 10, and with the window set to 1, which made them nearly worthless as a
+guard. Check both directions and record which mutants survive, or the ratchet is the only thing actually holding the behavior.
 
 ### A Measured Dead End on the VBlank IF Latch
 
@@ -174,7 +240,11 @@ an event dot plus a handler, added and measured one at a time.
 
 The concrete mechanism, found by trying it. SameBoy's LY=LYC comparison runs off a separate
 `ly_for_comparison` that holds -1 at the head of a line and becomes the line number a dot later, so the
-match is suppressed for 1 dot on a visible line, 4 on a VBlank line, and 0 on line 0. Ocelot now models
+value is not simply suppressed on a visible line: it holds the *previous* line number for dots 0-2, is a
+no-match for dot 3, and only becomes the current line from dot 4. A VBlank line stores -1 up front and so
+is genuinely suppressed from dot 0 to 3, and line 0 stores 0 rather than -1 so it has no no-match dot at
+all. An earlier pass here read only the last sleep of the sequence and recorded "1 dot on a visible
+line", which was both the wrong length and the wrong shape. Ocelot now models
 that for the STAT **register** read (`lycMatches`), which is safe because a register read is a pure
 observation.
 
@@ -201,7 +271,32 @@ Lowering the constant to 3 does not help, it hurts: the first divergence moves f
 longer one, which is the same shape as the VBlank case already carved out as `statVblankModeDelay = 5`. The fix is per-boundary offsets read out of
 SameBoy's `GB_STAT_update` call sites, not a single tuned number. Both values are now pinned by dot-precise tests, so a change either way will show up.
 
-### Open: The Enable-Line STAT Mode 3 Report Is 8 Dots Late
+### Open: The Enable Line Needs Its STAT Report Decoupled From Its Mode 3 Start
+
+This supersedes the section below, which recorded the sweep as showing "no change". That was wrong, and
+wrong for a known reason: `make tools` relinks against the *installed* library, so a `sed` on
+`src/Ocelot/Ppu.hs` followed by `make tools` traces the **old** code. Always `stack build` first.
+
+Redone properly, `lcdOnPreDrawDots` does move the observable, and the result rules the value out rather
+than in:
+
+| `lcdOnPreDrawDots` | enable STAT mode 3 | first divergence on `lcdon_timing-GS` |
+|---|---|---|
+| 78 (current) | +84 dots (SameBoy: +76) | line 83829 |
+| 70 | **+76, exact match** | line **26** (`ly=1` vs `ly=0` at cyc 280) |
+
+So 70 fixes the STAT report and breaks the LY phase far earlier; 78 does the reverse. No ROM verdict
+distinguishes them and the acid2 hashes survive both. The two constraints are coupled through one
+constant, which is the actual finding: on the enable line, *the dot at which STAT reports mode 3* and
+*the dot at which mode 3 actually starts* are not related by `statModeDelay`. `visibleModeBits` derives
+the former from the latter, so no single value can satisfy both.
+
+The next step is therefore a separate event for the STAT mode-3 report on the enable line, independent
+of the internal mode-3 start, which is what the sub-line event mechanism was built for. Note also the
+reference-point caveat when re-measuring: `cycleWrite` ticks the bus and *then* writes, on both sides,
+so the dot at which `lcdc` first reads enabled is dot 0 and `+N` really is dot N.
+
+### Superseded: The Enable-Line STAT Mode 3 Report Is 8 Dots Late
 
 Measured, not inferred, and recorded because the plausible-looking fix does **not** work. On `lcdon_timing-GS.gb`, taking the instruction where `lcdc`
 first reads enabled as the reference, SameBoy reports STAT mode 3 at **+76** dots and Ocelot at **+84**. Both read mode 0 at +68, which bounds SameBoy's

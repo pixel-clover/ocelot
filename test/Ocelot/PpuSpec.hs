@@ -69,21 +69,6 @@ spec = do
             m `shouldBe` ModeHBlank
             d `shouldBe` 252
 
-        {- The STAT mode bits lag the PPU's actual mode by 4 dots. SameBoy carries this as a standing
-        note ("the STAT register's mode bits are always late by 4 T-cycles"), and the trace confirms
-        it: at the dot-80 mode 2 -> 3 boundary Ocelot reported mode 3 where SameBoy still read mode 2.
-
-        Only the register view is delayed. The STAT interrupt line keeps using the real mode, matching
-        SameBoy's separate @mode_for_interrupt@, which is what keeps the interrupt-timing ROMs
-        (@intr_1_2_timing-GS@, @intr_2_0_timing@, @stat_irq_blocking@, blargg @interrupt_time@) intact.
-        -}
-        {- The LY=LYC comparison does not use LY directly. SameBoy keeps a separate
-        @ly_for_comparison@ that is -1 (no match possible) at the head of a line and only becomes the
-        line number a dot or so later, and 'GB_STAT_update' drives both the STAT bit-2 flag and the
-        LYC interrupt source from it. The suppression window is not uniform: 1 dot on a visible line
-        (display.c:1776 then @GB_SLEEP(7, 1)@), 4 on a VBlank line (:2153 then two 2-dot sleeps), and
-        none at all on line 0, where it is initialised to 0 rather than -1.
-        -}
         {- The DMG OAM bug: a CPU access anywhere in 0xFE00-0xFEFF while the PPU is scanning OAM
         corrupts the row it is scanning, even though the access itself reads 0xFF. SameBoy's
         'GB_trigger_oam_bug' glitches the row's first word against the two rows above it with
@@ -160,6 +145,50 @@ spec = do
                 v <- oamAt ps [0, 1]
                 v `shouldBe` [0x11, 0x22]
 
+        {- The LY=LYC comparison does not use LY directly. SameBoy keeps a separate
+        @ly_for_comparison@ that is -1 (no match possible) at the head of a line and only becomes the
+        line number a dot or so later, and 'GB_STAT_update' drives both the STAT bit-2 flag and the
+        LYC interrupt source from it. Counting the sleeps in display.c dot by dot, a visible line holds the
+        PREVIOUS line number for dots 0-2, is a no-match for dot 3, and only reads the current line from
+        dot 4. A VBlank line stores -1 before its first sleep so it is suppressed from dot 0 to 3, and
+        line 0 stores 0 rather than -1 so it has no no-match dot.
+        -}
+        {- Line 153 does not report itself for long. SameBoy writes @LY = 153@ two dots in and then
+        @LY = 0@ six dots after that, so for roughly 448 of the line's 456 dots a CPU read of 0xFF44
+        returns 0 while the PPU is still on line 153 (display.c, the line-153 block).
+
+        Holding 153 for the whole line is what made every blargg APU subtest and mooneye
+        @oam_dma_start@ diverge: they sync on LY at the frame wrap and read 153 where hardware reads 0.
+        This is a register view only; 'ppuLy' stays the internal line counter.
+        -}
+        describe "LY on line 153" $ do
+            let lyAtDot ps d = writeIORef (ppuDot ps) d >> read8 0xFF44 ps
+                onLine153 = do
+                    ps <- freshOn
+                    writeIORef (ppuLy ps) 153
+                    writeIORef (ppuMode ps) ModeVBlank
+                    pure ps
+
+            it "reads 153 only for the first few dots, then 0" $ do
+                ps <- onLine153
+                early <- lyAtDot ps 4
+                atClear <- lyAtDot ps 8
+                late <- lyAtDot ps 400
+                (early, atClear, late) `shouldBe` (153, 0, 0)
+
+            it "leaves the internal line counter on 153" $ do
+                ps <- onLine153
+                _ <- lyAtDot ps 400
+                ly <- readLy ps
+                ly `shouldBe` 153
+
+            it "does not touch any other line" $ do
+                ps <- freshOn
+                writeIORef (ppuLy ps) 152
+                writeIORef (ppuMode ps) ModeVBlank
+                v <- lyAtDot ps 400
+                v `shouldBe` 152
+
         describe "LYC comparison delay" $ do
             let atDot ps d = do
                     writeIORef (ppuDot ps) d
@@ -171,22 +200,41 @@ spec = do
                     writeIORef (ppuMode ps) mode
                     pure ps
 
-            it "suppresses the flag for one dot at the head of a visible line" $ do
+            it "matches its own line only from dot 4 on a visible line" $ do
                 ps <- withLine 5 ModeOamScan
-                at0 <- atDot ps 0
-                at1 <- atDot ps 1
-                (at0, at1) `shouldBe` (0, 4)
-
-            it "compares immediately on line 0" $ do
-                ps <- withLine 0 ModeOamScan
-                at0 <- atDot ps 0
-                at0 `shouldBe` 4
-
-            it "suppresses for four dots on a VBlank line" $ do
-                ps <- withLine 144 ModeVBlank
-                at3 <- atDot ps 3
+                before <- mapM (atDot ps) [0, 2, 3]
                 at4 <- atDot ps 4
-                (at3, at4) `shouldBe` (0, 4)
+                (before, at4) `shouldBe` ([0, 0, 0], 4)
+
+            it "still matches the PREVIOUS line for the first three dots" $ do
+                -- The distinctive part: dots 0-2 are not suppressed, they hold line-1.
+                ps <- freshOn
+                writeIORef (ppuLy ps) 5
+                writeIORef (ppuLyc ps) 4
+                writeIORef (ppuMode ps) ModeOamScan
+                held <- mapM (atDot ps) [0, 1, 2]
+                gone <- mapM (atDot ps) [3, 4]
+                (held, gone) `shouldBe` ([4, 4, 4], [0, 0])
+
+            it "wraps to 153 for the first three dots of line 0" $ do
+                ps <- freshOn
+                writeIORef (ppuLy ps) 0
+                writeIORef (ppuLyc ps) 153
+                writeIORef (ppuMode ps) ModeOamScan
+                held <- atDot ps 0
+                gone <- atDot ps 3
+                (held, gone) `shouldBe` (4, 0)
+
+            it "has no no-match dot on line 0, which stores 0 rather than -1" $ do
+                ps <- withLine 0 ModeOamScan
+                at3 <- atDot ps 3
+                at3 `shouldBe` 4
+
+            it "is suppressed from dot 0 to 3 on a VBlank line" $ do
+                ps <- withLine 144 ModeVBlank
+                before <- mapM (atDot ps) [0, 3]
+                at4 <- atDot ps 4
+                (before, at4) `shouldBe` ([0, 0], 4)
 
             {- The suppression window only means anything if the dot walk stops at the compare dot.
             'statEdge' runs from 'transition', so without a stop at dot 1 the LYC rising edge would be
@@ -211,6 +259,14 @@ spec = do
                 v <- atDot ps 40
                 v `shouldBe` 0
 
+        {- The STAT mode bits lag the PPU's actual mode by 4 dots. SameBoy carries this as a standing
+        note ("the STAT register's mode bits are always late by 4 T-cycles"), and the trace confirms
+        it: at the dot-80 mode 2 -> 3 boundary Ocelot reported mode 3 where SameBoy still read mode 2.
+
+        Only the register view is delayed. The STAT interrupt line keeps using the real mode, matching
+        SameBoy's separate @mode_for_interrupt@, which is what keeps the interrupt-timing ROMs
+        (@intr_1_2_timing-GS@, @intr_2_0_timing@, @stat_irq_blocking@, blargg @interrupt_time@) intact.
+        -}
         describe "STAT mode-bit delay" $ do
             it "still reports mode 2 at the dot-80 start of drawing" $ do
                 ps <- freshOn

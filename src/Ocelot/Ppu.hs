@@ -80,6 +80,7 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString.Internal as BSI
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Int (Int8)
+import Data.Maybe (isJust)
 import qualified Data.Vector.Storable.Mutable as VSM
 import Data.Vector.Unboxed (Vector)
 import qualified Data.Vector.Unboxed as V
@@ -450,7 +451,7 @@ read8 addr ps
         pure ((stat .&. 0x78) .|. bits .|. lyMatch .|. 0x80)
     | addr == 0xFF42 = readIORef (ppuScy ps)
     | addr == 0xFF43 = readIORef (ppuScx ps)
-    | addr == 0xFF44 = readIORef (ppuLy ps)
+    | addr == 0xFF44 = visibleLy ps
     | addr == 0xFF45 = readIORef (ppuLyc ps)
     | addr == 0xFF47 = readIORef (ppuBgp ps)
     | addr == 0xFF48 = readIORef (ppuObp0 ps)
@@ -656,28 +657,88 @@ triggerOamBug addr ps
                         (\i -> MV.read oam (row - 8 + i) >>= MV.write oam (row + i))
                         [2 .. 7]
 
-{- | Dots at the head of a line during which the LY=LYC comparison is suppressed.
+{- | Dot on line 153 at which the LY register stops reporting 153 and reads 0.
 
-The comparison does not read LY directly. SameBoy keeps a separate
-@ly_for_comparison@ holding -1 (no match possible) at the head of a line, becoming
-the line number a dot or so in, and drives both the STAT bit-2 flag and the LYC
-interrupt source from it. The window is not the same everywhere:
-
-* 1 dot on a visible line (@display.c@ sets -1, then @GB_SLEEP(7, 1)@).
-* 4 dots on a VBlank line (-1, then two 2-dot sleeps).
-* None on line 0, which initialises the value to 0 rather than -1.
+Line 153 barely reports itself. SameBoy writes @LY = 153@ two dots in and @LY = 0@
+six dots after that, so for roughly 448 of the line's 456 dots a read of @0xFF44@
+returns 0 while the PPU is still on line 153. Holding 153 for the whole line is
+what made every blargg APU subtest and mooneye @acceptance\/oam_dma_start@ diverge:
+they sync on LY at the frame wrap and read 153 where hardware reads 0.
 -}
-lycCompareDelay :: PpuState -> IO Int
-{-# INLINE lycCompareDelay #-}
-lycCompareDelay ps = do
+lyLine153ClearDot :: Int
+lyLine153ClearDot = 8
+
+{- | LY as the CPU reads it at @0xFF44@.
+
+Only line 153 differs from the internal counter, per 'lyLine153ClearDot'.
+'ppuLy' stays the line counter the state machine advances and compares.
+-}
+visibleLy :: PpuState -> IO Word8
+{-# INLINE visibleLy #-}
+visibleLy ps = do
     ly <- readIORef (ppuLy ps)
+    if ly /= 153
+        then pure ly
+        else do
+            dot <- readIORef (ppuDot ps)
+            pure (if dot < lyLine153ClearDot then 153 else 0)
+
+{- | The value the PPU compares against LYC, or 'Nothing' when no match is
+possible.
+
+The comparison does not read LY. SameBoy keeps a separate @ly_for_comparison@ and
+both the STAT bit-2 flag and the LYC interrupt source run off it. Reading the sleep
+sequence in @display.c@ dot by dot, on a visible line it is not simply "suppressed
+for a while" -- it still holds the *previous* line number until the register is
+written:
+
+> dots 0-2  previous line   (the -1 store has not happened yet)
+> dot  3    none            (@ly_for_comparison = current_line ? -1 : 0@, and LY is
+>                            written in the same breath)
+> dots 4+   current line    (one more 1-dot sleep, then the real value)
+
+A VBlank line stores -1 before its first sleep instead, so it is genuinely
+suppressed from dot 0 until dot 4. Line 0 stores 0 rather than -1, so it never has
+a no-match dot.
+
+Getting this shape wrong matters in both directions: treating dots 0-2 as "no
+match" loses a real match against the previous line, and treating dot 3 as a match
+invents one.
+-}
+lycCompareValue :: PpuState -> IO (Maybe Word8)
+{-# INLINE lycCompareValue #-}
+lycCompareValue ps = do
+    ly <- readIORef (ppuLy ps)
+    dot <- readIORef (ppuDot ps)
     pure $
-        if ly == 0
-            then 0
+        if ly >= 144
+            then if dot < 4 then Nothing else Just ly
             else
-                if ly >= 144
-                    then 4
-                    else 1
+                if dot < 3
+                    then Just (if ly == 0 then 153 else ly - 1)
+                    else
+                        if dot < 4
+                            then if ly == 0 then Just 0 else Nothing
+                            else Just ly
+
+{- | Dots within the current line at which 'lycCompareValue' changes, and so at
+which the STAT line has to be re-sampled.
+-}
+lycEventDots :: PpuState -> IO [Int]
+{-# INLINE lycEventDots #-}
+lycEventDots ps = do
+    ly <- readIORef (ppuLy ps)
+    pure (if ly >= 144 then [4] else [3, 4])
+
+-- | The next dot on this line at which 'lycCompareValue' changes, if any is left.
+nextLycEventDot :: PpuState -> IO (Maybe Int)
+{-# INLINE nextLycEventDot #-}
+nextLycEventDot ps = do
+    dots <- lycEventDots ps
+    dot <- readIORef (ppuDot ps)
+    pure $ case filter (> dot) dots of
+        (d : _) -> Just d
+        [] -> Nothing
 
 {- | Whether LY compares equal to LYC as the STAT register reports it, honouring
 'lycCompareDelay'.
@@ -690,14 +751,12 @@ rising edge by a dot, it would defer it to the next transition.
 lycMatches :: PpuState -> IO Bool
 {-# INLINE lycMatches #-}
 lycMatches ps = do
-    delay <- lycCompareDelay ps
-    dot <- readIORef (ppuDot ps)
-    if dot < delay
-        then pure False
-        else do
-            ly <- readIORef (ppuLy ps)
+    mv <- lycCompareValue ps
+    case mv of
+        Nothing -> pure False
+        Just v -> do
             lyc <- readIORef (ppuLyc ps)
-            pure (ly == lyc)
+            pure (v == lyc)
 
 {- | Dots by which the STAT mode bits lag the PPU's actual mode at most boundaries.
 
@@ -903,13 +962,7 @@ late.
 -}
 atLycCompareDot :: PpuState -> IO Bool
 {-# INLINE atLycCompareDot #-}
-atLycCompareDot ps = do
-    delay <- lycCompareDelay ps
-    if delay == 0
-        then pure False
-        else do
-            dot <- readIORef (ppuDot ps)
-            pure (dot < delay)
+atLycCompareDot ps = isJust <$> nextLycEventDot ps
 
 {- | Dot at which the current mode ends, or at which the next sub-line event
 happens, whichever comes first. 'transition' dispatches on the same predicates.
@@ -918,14 +971,18 @@ boundaryFor :: PpuMode -> PpuState -> IO Int
 {-# INLINE boundaryFor #-}
 boundaryFor ModeDrawing ps = readIORef (ppuMode3End ps)
 boundaryFor ModeOamScan ps = do
-    atLyc <- atLycCompareDot ps
-    if atLyc then lycCompareDelay ps else oamScanDotsFor ps
+    next <- nextLycEventDot ps
+    case next of
+        Just d -> pure d
+        Nothing -> oamScanDotsFor ps
 boundaryFor ModeHBlank ps = do
     preDraw <- inLcdOnPreDrawWindow ps
     if preDraw then oamScanDotsFor ps else scanlineDotsFor ps
 boundaryFor ModeVBlank ps = do
-    atLyc <- atLycCompareDot ps
-    if atLyc then lycCompareDelay ps else scanlineDotsFor ps
+    next <- nextLycEventDot ps
+    case next of
+        Just d -> pure d
+        Nothing -> scanlineDotsFor ps
 
 {- | Whether the PPU is in the mode-0-looking window that opens the first
 scanline after the LCD is enabled, before drawing starts.
@@ -1035,8 +1092,8 @@ boundary. Stays in the same mode, only the dot moves.
 -}
 lycCompareEvent :: PpuState -> IO Word8
 lycCompareEvent ps = do
-    delay <- lycCompareDelay ps
-    writeIORef (ppuDot ps) delay
+    next <- nextLycEventDot ps
+    mapM_ (writeIORef (ppuDot ps)) next
     statEdge ps
 
 -- | End of mode 2: latch mode 3's length and start drawing.

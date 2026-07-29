@@ -371,6 +371,39 @@ spec = do
             wram <- read8 0xC800 b
             wram `shouldBe` 0xFF
 
+        {- OAM is not locked for the whole transfer. SameBoy blocks an OAM read while
+        @dma_current_dest != 0@, and @dest@ is the sentinel 0xFF on the trigger cycle, wraps to 0 on the
+        cycle before byte 0 lands, then counts up. So there is exactly one readable cycle, right before
+        the first byte is written. mooneye @acceptance/oam_dma_start@ measures it: without the window,
+        a ROM executing from OAM fetches 0xFF and derails into @RST 38h@.
+        -}
+        it "leaves OAM readable for the one cycle before the first byte lands" $ do
+            b <- emptyBus
+            write8 0xFF40 0x00 b -- LCD off, so the PPU does not gate OAM either
+            Ppu.write8 0xFE00 0x5A (Bus.busPpu b)
+            write8 0xFF46 0xC0 b
+            advance 1 b -- startup delay consumed; about to write byte 0
+            v <- read8 0xFE00 b
+            v `shouldBe` 0x5A
+
+        it "blocks OAM again once the first byte has landed" $ do
+            b <- emptyBus
+            write8 0xFF40 0x00 b
+            Ppu.write8 0xFE00 0x5A (Bus.busPpu b)
+            write8 0xFF46 0xC0 b
+            advance 1 b -- startup
+            advance 1 b -- byte 0 copied, so the DMA now owns OAM
+            v <- read8 0xFE00 b
+            v `shouldBe` 0xFF
+
+        it "blocks OAM on the trigger cycle, before the startup delay elapses" $ do
+            b <- emptyBus
+            write8 0xFF40 0x00 b
+            Ppu.write8 0xFE00 0x5A (Bus.busPpu b)
+            write8 0xFF46 0xC0 b
+            v <- read8 0xFE00 b -- dest is still the 0xFF sentinel here
+            v `shouldBe` 0xFF
+
         it "blocks main-bus reads but lets I/O regs and HRAM through" $ do
             b <- emptyBus
             mapM_ (\i -> write8 (0xC000 + fromIntegral i) 0xAA b) [0 .. 0x9F :: Int]

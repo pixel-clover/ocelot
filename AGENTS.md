@@ -96,7 +96,8 @@ Do not invent modules that do not yet exist when answering questions, but do pla
 - `Makefile`: developer workflow entry points (`build`, `test`, `lint`, `format`, `format-check`, `coverage`, `docs`, `repl`, and `tools`).
 - `tools/`: standalone developer diagnostics built by `make tools` into `bin/tools/` (built `-O2 -rtsopts`, so they are usable for
   measurement). `bench.hs` is the throughput benchmark; `ocelot-trace.hs` pairs with `sameboy-trace.c` as a differential tracer against
-  SameBoy; the rest are state-dump probes. See `tools/README.md`.
+  SameBoy; `blargg-run.hs` prints a blargg ROM's own serial text and `0xA000` subtest code, which is the cheapest first step on a
+  failing blargg ROM; the rest are state-dump probes. See `tools/README.md`.
 - `package.yaml`: hpack source of truth. Do not hand-edit `*.cabal`; let `stack build` regenerate it.
 - `stack.yaml`: resolver pin and packages.
 
@@ -130,7 +131,10 @@ Do not invent modules that do not yet exist when answering questions, but do pla
     - `Bus.advance` (peripheral cycle dispatch; halves the cycle count for peripherals in CGB double-speed mode)
     - `Ppu.advance` (mode 2/3/0/1 transitions, STAT/VBlank interrupts, HBlank-entered signal for HDMA)
     - `Timer.advance` (DIV/TIMA edges, TAC obscure behavior)
-    - `Apu.advance` (frame sequencer steps tied to DIV)
+    - `Apu.advance` (frame sequencer steps on its own 8192-T-cycle `apuFrameTimer`). Note this is **not** DIV-phase-locked, which hardware is: the
+      sequencer is clocked by a falling edge of DIV bit 4, so resetting DIV realigns the length and sweep periods. Ocelot's independent counter keeps
+      the right period but the wrong phase after a DIV write or an APU power cycle, which is what blargg `dmg_sound`/`cgb_sound`
+      `07-len sweep period sync` measures
 - Cartridge MBC behavior is owned by `Ocelot.Cartridge`. The bus calls into the cartridge for `0x0000-0x7FFF` and `0xA000-0xBFFF`; do not bypass it
   from elsewhere.
 - Keep frontend concerns (like windowing, audio output device, key mapping concrete codes, etc.) separate from emulation concerns.

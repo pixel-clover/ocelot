@@ -36,21 +36,13 @@ test/testroms/mooneye/acceptance/ppu/stat_lyc_onoff.gb
 # ---------------------------------------------------------------------------
 # mooneye acceptance and misc: other
 # ---------------------------------------------------------------------------
-test/testroms/mooneye/acceptance/halt_ime0_nointr_timing.gb
 test/testroms/mooneye/acceptance/oam_dma_start.gb
 test/testroms/mooneye/acceptance/serial/boot_sclk_align-dmgABCmgb.gb
-test/testroms/mooneye/acceptance/timer/rapid_toggle.gb
 test/testroms/mooneye/misc/ppu/vblank_stat_intr-C.gb
 
 # ---------------------------------------------------------------------------
 # blargg: APU
 # ---------------------------------------------------------------------------
-external/gb-test-roms/cgb_sound/rom_singles/07-len sweep period sync.gb
-external/gb-test-roms/cgb_sound/rom_singles/09-wave read while on.gb
-external/gb-test-roms/dmg_sound/rom_singles/07-len sweep period sync.gb
-external/gb-test-roms/dmg_sound/rom_singles/09-wave read while on.gb
-external/gb-test-roms/dmg_sound/rom_singles/10-wave trigger while on.gb
-external/gb-test-roms/dmg_sound/rom_singles/12-wave write while on.gb
 
 # ---------------------------------------------------------------------------
 # blargg: OAM bug
