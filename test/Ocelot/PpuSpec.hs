@@ -77,6 +77,140 @@ spec = do
         SameBoy's separate @mode_for_interrupt@, which is what keeps the interrupt-timing ROMs
         (@intr_1_2_timing-GS@, @intr_2_0_timing@, @stat_irq_blocking@, blargg @interrupt_time@) intact.
         -}
+        {- The LY=LYC comparison does not use LY directly. SameBoy keeps a separate
+        @ly_for_comparison@ that is -1 (no match possible) at the head of a line and only becomes the
+        line number a dot or so later, and 'GB_STAT_update' drives both the STAT bit-2 flag and the
+        LYC interrupt source from it. The suppression window is not uniform: 1 dot on a visible line
+        (display.c:1776 then @GB_SLEEP(7, 1)@), 4 on a VBlank line (:2153 then two 2-dot sleeps), and
+        none at all on line 0, where it is initialised to 0 rather than -1.
+        -}
+        {- The DMG OAM bug: a CPU access anywhere in 0xFE00-0xFEFF while the PPU is scanning OAM
+        corrupts the row it is scanning, even though the access itself reads 0xFF. SameBoy's
+        'GB_trigger_oam_bug' glitches the row's first word against the two rows above it with
+        @((a^c) & (b^c)) ^ c@ and then copies bytes 2..7 down from the previous row.
+
+        'accessedOamRow' walks 0 for the first 4 dots and then 8 bytes every 4 dots, reaching 152 by
+        the end of mode 2, matching SameBoy advancing it once per pair of objects.
+        -}
+        describe "DMG OAM bug" $ do
+            let oamAt ps = mapM (MV.read (ppuOam ps))
+                inMode2At d = do
+                    ps <- freshOn
+                    writeIORef (ppuMode ps) ModeOamScan
+                    writeIORef (ppuDot ps) d
+                    pure ps
+
+            it "walks the scanned row 8 bytes every 4 dots" $ do
+                ps <- inMode2At 0
+                rows <- mapM (\d -> writeIORef (ppuDot ps) d >> accessedOamRow ps) [0, 3, 4, 7, 8, 12, 76]
+                rows `shouldBe` [0, 0, 8, 8, 16, 24, 152]
+
+            it "reports no row outside OAM scan" $ do
+                ps <- freshOn
+                writeIORef (ppuMode ps) ModeDrawing
+                writeIORef (ppuDot ps) 100
+                r <- accessedOamRow ps
+                r `shouldBe` (-1)
+
+            it "glitches the scanned row's first word and copies bytes 2..7 down" $ do
+                ps <- inMode2At 4 -- row 8
+                -- Row 0 spans bytes 0..7, so the word at row-4 (bytes 4,5) is also part of the copy
+                -- source. Keep those two zero so the glitch input stays easy to read off:
+                -- word 0 = 0x00FF, word 4 = 0x0000, word 8 = 0xFF00, all little-endian.
+                mapM_ (uncurry (MV.write (ppuOam ps))) $
+                    [ (0, 0xFF)
+                    , (1, 0x00)
+                    , (2, 0x21)
+                    , (3, 0x22)
+                    , (4, 0x00)
+                    , (5, 0x00)
+                    , (6, 0x25)
+                    , (7, 0x26)
+                    , (8, 0x00)
+                    , (9, 0xFF)
+                    ]
+                        <> [(i, 0x00) | i <- [10 .. 15]]
+                triggerOamBug 0xFE00 ps
+                -- ((0xFF00 ^ 0) & (0x00FF ^ 0)) ^ 0 = 0
+                glitched <- oamAt ps [8, 9]
+                copied <- oamAt ps [10 .. 15]
+                source <- oamAt ps [2 .. 7]
+                glitched `shouldBe` [0x00, 0x00]
+                copied `shouldBe` source
+
+            it "leaves OAM alone for an address outside 0xFE00-0xFEFF" $ do
+                ps <- inMode2At 4
+                mapM_ (uncurry (MV.write (ppuOam ps))) [(8, 0x11), (9, 0x22)]
+                triggerOamBug 0xC000 ps
+                v <- oamAt ps [8, 9]
+                v `shouldBe` [0x11, 0x22]
+
+            it "leaves OAM alone on CGB" $ do
+                ps <- inMode2At 4
+                setCgbMode True ps
+                mapM_ (uncurry (MV.write (ppuOam ps))) [(8, 0x11), (9, 0x22)]
+                triggerOamBug 0xFE00 ps
+                v <- oamAt ps [8, 9]
+                v `shouldBe` [0x11, 0x22]
+
+            it "leaves OAM alone while scanning row 0, which has nothing above it" $ do
+                ps <- inMode2At 0
+                mapM_ (uncurry (MV.write (ppuOam ps))) [(0, 0x11), (1, 0x22)]
+                triggerOamBug 0xFE00 ps
+                v <- oamAt ps [0, 1]
+                v `shouldBe` [0x11, 0x22]
+
+        describe "LYC comparison delay" $ do
+            let atDot ps d = do
+                    writeIORef (ppuDot ps) d
+                    (.&. 0x04) <$> read8 0xFF41 ps
+                withLine ly mode = do
+                    ps <- freshOn
+                    writeIORef (ppuLy ps) ly
+                    writeIORef (ppuLyc ps) ly
+                    writeIORef (ppuMode ps) mode
+                    pure ps
+
+            it "suppresses the flag for one dot at the head of a visible line" $ do
+                ps <- withLine 5 ModeOamScan
+                at0 <- atDot ps 0
+                at1 <- atDot ps 1
+                (at0, at1) `shouldBe` (0, 4)
+
+            it "compares immediately on line 0" $ do
+                ps <- withLine 0 ModeOamScan
+                at0 <- atDot ps 0
+                at0 `shouldBe` 4
+
+            it "suppresses for four dots on a VBlank line" $ do
+                ps <- withLine 144 ModeVBlank
+                at3 <- atDot ps 3
+                at4 <- atDot ps 4
+                (at3, at4) `shouldBe` (0, 4)
+
+            {- The suppression window only means anything if the dot walk stops at the compare dot.
+            'statEdge' runs from 'transition', so without a stop at dot 1 the LYC rising edge would be
+            deferred to the mode 2 -> 3 boundary at dot 80. That is not academic: wiring the window in
+            without the stop shifted every LYC interrupt ~80 dots and changed the dmg-acid2 hash.
+            -}
+            it "raises the STAT IRQ at the compare dot, not at the next mode boundary" $ do
+                ps <- freshOn
+                writeIORef (ppuLy ps) 5
+                writeIORef (ppuLyc ps) 5
+                writeIORef (ppuStat ps) 0x40 -- LYC source enabled
+                writeIORef (ppuMode ps) ModeOamScan
+                writeIORef (ppuDot ps) 0
+                writeIORef (ppuPrevStatLine ps) False
+                irqs <- advance 1 ps -- 4 dots, crossing the dot-1 compare event
+                (irqs .&. 0x02) `shouldBe` 0x02
+
+            it "still reports no match when LY and LYC differ" $ do
+                ps <- freshOn
+                writeIORef (ppuLy ps) 5
+                writeIORef (ppuLyc ps) 9
+                v <- atDot ps 40
+                v `shouldBe` 0
+
         describe "STAT mode-bit delay" $ do
             it "still reports mode 2 at the dot-80 start of drawing" $ do
                 ps <- freshOn

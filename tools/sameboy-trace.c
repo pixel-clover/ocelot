@@ -191,12 +191,33 @@ static void on_instruction(GB_gameboy_t *gb, uint16_t pc, uint8_t opcode) {
 }
 
 int main(int argc, char **argv) {
-  if (argc != 3) {
-    fprintf(stderr, "usage: sameboy-trace <rom> <instruction-count>\n");
+  // Model defaults to the cart's CGB flag, matching Ocelot's
+  // 'machineFromCartridgeWithBoot'. --dmg/--cgb force it, which is needed for the
+  // mooneye ROMs whose host Ocelot overrides in 'GoldenSpec.mooneyeHost': every
+  // mooneye ROM ships with CGB flag 0x00, so a "-C" test that Ocelot deliberately
+  // runs on CGB would otherwise be traced against a DMG SameBoy.
+  int force_cgb = -1;
+  int argi = 1;
+  while (argi < argc && argv[argi][0] == '-') {
+    if (strcmp(argv[argi], "--dmg") == 0) {
+      force_cgb = 0;
+    }
+    else if (strcmp(argv[argi], "--cgb") == 0) {
+      force_cgb = 1;
+    }
+    else {
+      fprintf(stderr, "unknown option: %s\n", argv[argi]);
+      return 2;
+    }
+    argi++;
+  }
+  if (argc - argi != 2) {
+    fprintf(stderr,
+            "usage: sameboy-trace [--dmg|--cgb] <rom> <instruction-count>\n");
     return 2;
   }
-  const char *rom_path = argv[1];
-  uint64_t target = strtoull(argv[2], NULL, 10);
+  const char *rom_path = argv[argi];
+  uint64_t target = strtoull(argv[argi + 1], NULL, 10);
   if (target == 0) {
     fprintf(stderr, "instruction-count must be > 0\n");
     return 2;
@@ -209,7 +230,9 @@ int main(int argc, char **argv) {
   // Mooneye ROMs all ship with CGB flag 0x00 because their test code needs no
   // CGB opcodes, so Ocelot ran them on DMG while this side ran them on CGB, and
   // every mooneye trace silently compared two different machines.
-  GB_model_t model = cart_is_cgb_aware(rom_path) ? GB_MODEL_CGB_E : GB_MODEL_DMG_B;
+  bool cgb =
+      force_cgb >= 0 ? (bool)force_cgb : cart_is_cgb_aware(rom_path);
+  GB_model_t model = cgb ? GB_MODEL_CGB_E : GB_MODEL_DMG_B;
   fprintf(stderr, "sameboy-trace: model=%s\n",
           model == GB_MODEL_CGB_E ? "CGB_E" : "DMG_B");
   GB_init(&gb, model);

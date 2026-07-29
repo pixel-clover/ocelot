@@ -46,6 +46,10 @@ The *register* hand-off is not aligned with that model: both sides execute the s
 that model-detects by reading `A` will take its CGB path on DMG hardware. Aligning the stub per model would need DMG post-boot register values on both
 sides.
 
+`sameboy-trace` takes `--dmg` / `--cgb` to force the model. You need that for any ROM whose host `GoldenSpec.mooneyeHost` overrides: every mooneye ROM
+ships with CGB flag `0x00`, so a `-C` test that Ocelot deliberately runs on CGB is otherwise traced against a DMG SameBoy. `misc/ppu/vblank_stat_intr-C`
+is exactly that case, and it defaults to `DMG_B` here while Ocelot forces CGB.
+
 **Check the model line before trusting a diff.** `sameboy-trace` prints `model=DMG_B` or `model=CGB_E` to stderr. It used to hardcode `CGB_E` while
 `Ocelot.Machine.machineFromCartridgeWithBoot` followed the header, and because every mooneye ROM ships with CGB flag `0x00` (their test code needs no
 CGB opcodes), every mooneye trace silently compared DMG-Ocelot against CGB-SameBoy. That is not a small effect: fixing it moved the first divergence on
@@ -128,6 +132,63 @@ hardware only occupies one internal bus. Fixing that passed all nine. None of th
 
 Two lessons worth keeping: classify by failure *mode* before reading anything into a failure count, and remember that a register-only trace cannot see
 a memory divergence until it corrupts a register. A per-access trace mode would have found this directly.
+
+### The OAM Bug Also Waits on the Line Model
+
+`Ocelot.Ppu.triggerOamBug` and `accessedOamRow` implement SameBoy's write-side
+`GB_trigger_oam_bug` and its `accessed_oam_row` walk, with unit tests, but are not called from the bus or
+the CPU. That is deliberate, and measured rather than assumed. Triggering it from OAM writes plus the
+address-bus instructions (16-bit `INC`/`DEC`, `PUSH`, `POP`, `LD SP,HL`) makes blargg `oam_bug/2-causes`
+pass and breaks `6-timing_no_bug`, which checks the timings where the bug must *not* appear:
+
+| Triggers | Result |
+|---|---|
+| read + write + address bus | +`2-causes`, −`6-timing_no_bug` (net 0) |
+| write + address bus | −`6-timing_no_bug` (net −1) |
+| read only | no change |
+
+Two things are missing. The trigger window is derived from "mode is 2" rather than SameBoy's per-dot
+`oam_write_blocked` transitions, so it over-triggers at the edges; and reads need
+`GB_trigger_oam_bug_read`'s separate secondary/tertiary/quaternary patterns, several of them
+model-specific, rather than the write pattern. The first of those is the same per-dot problem as below,
+so the remaining four `oam_bug` subtests are gated on the line model too.
+
+### Sub-Line Events: The Mechanism Now Exists
+
+The blocker described below is now partly lifted. `stepDots` no longer walks only between mode
+boundaries: `boundaryFor` can return a *sub-line event* dot, and `transition` dispatches to a handler
+that performs the event and stays in the same mode. `atLycCompareDot` / `lycCompareEvent` are the first
+user, stopping the walk at the LYC-compare dot so `statEdge` runs there.
+
+That makes the LYC suppression window expressible, and it is now wired into `computeStatLine` where
+last time it could not be: the acid2 hashes are unchanged and no ROM regressed, against the ~80-dot
+LYC-interrupt shift the naive version caused. A test pins the stop specifically (disable it and the
+STAT IRQ arrives at the mode boundary instead), separately from the tests covering the register view.
+
+No ROM verdict moved yet, because the LYC window was only one of the offsets. The remaining ones now
+have somewhere to go: `LY` written +2 into the line, the per-boundary STAT mode-bit offsets, the
+enable-line report at +76, and the per-dot `oam_write_blocked` transitions the OAM bug needs. Each is
+an event dot plus a handler, added and measured one at a time.
+
+### Why the PPU Line Model Has to Change, Not Its Constants
+
+The concrete mechanism, found by trying it. SameBoy's LY=LYC comparison runs off a separate
+`ly_for_comparison` that holds -1 at the head of a line and becomes the line number a dot later, so the
+match is suppressed for 1 dot on a visible line, 4 on a VBlank line, and 0 on line 0. Ocelot now models
+that for the STAT **register** read (`lycMatches`), which is safe because a register read is a pure
+observation.
+
+Wiring the same suppression into `computeStatLine`, which is the obviously "correct" thing, breaks it:
+`statEdge` is only called from `transition`, i.e. at mode boundaries. Suppressing the match at dot 0
+therefore does not move the LYC rising edge to dot 1 — there is no dot-1 sample — it defers the edge to
+the next transition at dot 80, shifting every LYC interrupt by roughly 80 dots. Measured effect: the
+`dmg-acid2` framebuffer hash changed, and no ROM verdict improved.
+
+That is the general shape of every remaining failure in this cluster. The offsets are all sub-line, and
+a model that samples mode and STAT only at boundaries cannot express them at any constant value. Note
+also that `dmg-acid2` and `cgb-acid2` pend through their own `pendingWith` rather than the ratchet, so a
+rendering change shows up as a changed hash and **not** as a `REGRESSION` — check them explicitly when
+touching interrupt timing.
 
 ### Open: The STAT Mode-Bit Delay Is Not One Constant
 

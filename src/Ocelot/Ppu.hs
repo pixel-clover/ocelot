@@ -70,10 +70,12 @@ module Ocelot.Ppu (
     takePendingStatIrq,
     resyncMode3End,
     seedLcdc,
+    accessedOamRow,
+    triggerOamBug,
 ) where
 
 import Control.Monad (unless, when)
-import Data.Bits (shiftL, shiftR, testBit, (.&.), (.|.))
+import Data.Bits (shiftL, shiftR, testBit, xor, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Internal as BSI
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
@@ -443,9 +445,8 @@ read8 addr ps
     | addr == 0xFF41 = do
         stat <- readIORef (ppuStat ps)
         bits <- visibleModeBits ps
-        ly <- readIORef (ppuLy ps)
-        lyc <- readIORef (ppuLyc ps)
-        let lyMatch = if ly == lyc then 0x04 else 0
+        match <- lycMatches ps
+        let lyMatch = if match then 0x04 else 0
         pure ((stat .&. 0x78) .|. bits .|. lyMatch .|. 0x80)
     | addr == 0xFF42 = readIORef (ppuScy ps)
     | addr == 0xFF43 = readIORef (ppuScx ps)
@@ -579,6 +580,124 @@ seedLcdc :: Word8 -> PpuState -> IO ()
 seedLcdc v ps = do
     writeIORef (ppuLcdc ps) v
     sampleStatLine ps
+
+----------------------------------------------------------------------
+-- DMG OAM bug
+----------------------------------------------------------------------
+
+{- | Byte offset of the OAM row the PPU is currently scanning, or @-1@ when it is
+not scanning.
+
+SameBoy advances @accessed_oam_row@ once per *pair* of objects during mode 2: it
+starts at 0, and after each 2-dot step sets it to @(index & ~1) * 4 + 8@. That
+works out to 0 for the first 4 dots and then 8 more bytes every 4 dots, reaching
+152 by the end of the 80-dot scan, which is the last of OAM's 20 eight-byte rows.
+-}
+accessedOamRow :: PpuState -> IO Int
+accessedOamRow ps = do
+    lcdc <- readIORef (ppuLcdc ps)
+    mode <- readIORef (ppuMode ps)
+    if not (testBit lcdc 7) || mode /= ModeOamScan
+        then pure (-1)
+        else do
+            dot <- readIORef (ppuDot ps)
+            pure $
+                if dot < 4
+                    then 0
+                    else min 152 (8 * (1 + ((dot - 4) `div` 4)))
+
+{- | SameBoy's @bitwise_glitch@: how the scanned row's first word decays when the
+CPU touches the OAM address range mid-scan.
+-}
+oamBugGlitch :: Word16 -> Word16 -> Word16 -> Word16
+oamBugGlitch a b c = ((a `xor` c) .&. (b `xor` c)) `xor` c
+
+{- | Apply the DMG OAM bug for a CPU access to @addr@.
+
+A CPU access anywhere in @0xFE00-0xFEFF@ while the PPU is scanning OAM corrupts the
+row being scanned, even though the access itself reads @0xFF@. The row's first word
+is glitched against the two rows above it and bytes 2..7 are copied down from the
+previous row. CGB has no OAM bug, and row 0 has nothing above it to decay towards.
+
+__Not wired into the bus or the CPU yet, deliberately.__ This is the write-side
+pattern (SameBoy's @GB_trigger_oam_bug@), and it is correct as far as it goes: with
+it on OAM writes and on the address-bus instructions (16-bit @INC@\/@DEC@, @PUSH@,
+@POP@, @LD SP, HL@) blargg @oam_bug\/2-causes@ passes. But the same wiring breaks
+@6-timing_no_bug@, which checks the cases where the bug must *not* appear, because
+the trigger window here is derived from mode 2 rather than from SameBoy's per-dot
+@oam_write_blocked@ transitions. Reads also need @GB_trigger_oam_bug_read@'s
+separate secondary\/tertiary\/quaternary patterns, which are unimplemented.
+
+So this is groundwork with its own tests, waiting on the per-dot line model. Wiring
+it as-is is a net loss of one ROM; see @tools\/README.md@.
+-}
+triggerOamBug :: Word16 -> PpuState -> IO ()
+triggerOamBug addr ps
+    | addr < 0xFE00 || addr > 0xFEFF = pure ()
+    | otherwise = do
+        cgb <- readIORef (ppuCgbMode ps)
+        if cgb
+            then pure ()
+            else do
+                row <- accessedOamRow ps
+                when (row >= 8) $ do
+                    let oam = ppuOam ps
+                        wordAt i = do
+                            !lo <- MV.read oam i
+                            !hi <- MV.read oam (i + 1)
+                            pure (fromIntegral lo .|. (fromIntegral hi `shiftL` 8) :: Word16)
+                    !cur <- wordAt row
+                    !prev <- wordAt (row - 8)
+                    !mid <- wordAt (row - 4)
+                    let !glitched = oamBugGlitch cur prev mid
+                    MV.write oam row (fromIntegral (glitched .&. 0xFF))
+                    MV.write oam (row + 1) (fromIntegral (glitched `shiftR` 8))
+                    mapM_
+                        (\i -> MV.read oam (row - 8 + i) >>= MV.write oam (row + i))
+                        [2 .. 7]
+
+{- | Dots at the head of a line during which the LY=LYC comparison is suppressed.
+
+The comparison does not read LY directly. SameBoy keeps a separate
+@ly_for_comparison@ holding -1 (no match possible) at the head of a line, becoming
+the line number a dot or so in, and drives both the STAT bit-2 flag and the LYC
+interrupt source from it. The window is not the same everywhere:
+
+* 1 dot on a visible line (@display.c@ sets -1, then @GB_SLEEP(7, 1)@).
+* 4 dots on a VBlank line (-1, then two 2-dot sleeps).
+* None on line 0, which initialises the value to 0 rather than -1.
+-}
+lycCompareDelay :: PpuState -> IO Int
+{-# INLINE lycCompareDelay #-}
+lycCompareDelay ps = do
+    ly <- readIORef (ppuLy ps)
+    pure $
+        if ly == 0
+            then 0
+            else
+                if ly >= 144
+                    then 4
+                    else 1
+
+{- | Whether LY compares equal to LYC as the STAT register reports it, honouring
+'lycCompareDelay'.
+
+This feeds the register view only. 'computeStatLine' deliberately keeps the raw
+compare, for the reason recorded there: the STAT line is sampled at mode
+transitions rather than per dot, so suppressing the match here would not delay the
+rising edge by a dot, it would defer it to the next transition.
+-}
+lycMatches :: PpuState -> IO Bool
+{-# INLINE lycMatches #-}
+lycMatches ps = do
+    delay <- lycCompareDelay ps
+    dot <- readIORef (ppuDot ps)
+    if dot < delay
+        then pure False
+        else do
+            ly <- readIORef (ppuLy ps)
+            lyc <- readIORef (ppuLyc ps)
+            pure (ly == lyc)
 
 {- | Dots by which the STAT mode bits lag the PPU's actual mode at most boundaries.
 
@@ -772,14 +891,41 @@ mode3BaseDots = 172
 latched per line into 'ppuMode3End' when the PPU leaves OAM scan; mode 0 then
 simply runs from there to the end of the scanline.
 -}
+
+{- | Whether the dot walk is short of this line's LYC-compare event.
+
+The PPU does things partway through a line, not only at mode boundaries, and
+'stepDots' has to stop for them or they are invisible. This is the first such
+event: 'lycCompareDelay' dots in, @ly_for_comparison@ becomes the line number, so
+the LYC STAT source can go high there. Without a stop, 'statEdge' would not run
+again until the next mode boundary and the rising edge would land up to 80 dots
+late.
+-}
+atLycCompareDot :: PpuState -> IO Bool
+{-# INLINE atLycCompareDot #-}
+atLycCompareDot ps = do
+    delay <- lycCompareDelay ps
+    if delay == 0
+        then pure False
+        else do
+            dot <- readIORef (ppuDot ps)
+            pure (dot < delay)
+
+{- | Dot at which the current mode ends, or at which the next sub-line event
+happens, whichever comes first. 'transition' dispatches on the same predicates.
+-}
 boundaryFor :: PpuMode -> PpuState -> IO Int
 {-# INLINE boundaryFor #-}
 boundaryFor ModeDrawing ps = readIORef (ppuMode3End ps)
-boundaryFor ModeOamScan ps = oamScanDotsFor ps
+boundaryFor ModeOamScan ps = do
+    atLyc <- atLycCompareDot ps
+    if atLyc then lycCompareDelay ps else oamScanDotsFor ps
 boundaryFor ModeHBlank ps = do
     preDraw <- inLcdOnPreDrawWindow ps
     if preDraw then oamScanDotsFor ps else scanlineDotsFor ps
-boundaryFor _ ps = scanlineDotsFor ps
+boundaryFor ModeVBlank ps = do
+    atLyc <- atLycCompareDot ps
+    if atLyc then lycCompareDelay ps else scanlineDotsFor ps
 
 {- | Whether the PPU is in the mode-0-looking window that opens the first
 scanline after the LCD is enabled, before drawing starts.
@@ -867,18 +1013,8 @@ line stays high through the boundary and no second IRQ fires.
 transition :: PpuMode -> PpuState -> IO Word8
 transition mode ps = case mode of
     ModeOamScan -> do
-        -- Latch this line's mode 3 length now: the registers it depends on
-        -- (SCX, WY/WX, LCDC) are sampled at the start of drawing, so a
-        -- mid-line write must not retroactively move the mode 0 boundary.
-        resyncMode3End ps
-        writeIORef (ppuMode ps) ModeDrawing
-        -- 'oamScanDotsFor', not the 'oamScanDots' constant, so this stays correct if
-        -- the caller is ever reached with the enable-line latch set. On the enable
-        -- line itself the PPU leaves the mode-0 window through 'lcdOnPreDrawEnd'
-        -- instead, so in practice this is always the plain 80.
-        start <- oamScanDotsFor ps
-        writeIORef (ppuDot ps) start
-        statEdge ps
+        atLyc <- atLycCompareDot ps
+        if atLyc then lycCompareEvent ps else oamScanEnd ps
     ModeDrawing -> do
         renderLine ps
         writeIORef (ppuMode ps) ModeHBlank
@@ -890,19 +1026,51 @@ transition mode ps = case mode of
         preDraw <- inLcdOnPreDrawWindow ps
         if preDraw then lcdOnPreDrawEnd ps else hblankLineEnd ps
     ModeVBlank -> do
-        ly <- readIORef (ppuLy ps)
-        let ly' = ly + 1
-        if ly' == 154
-            then do
-                writeIORef (ppuMode ps) ModeOamScan
-                writeIORef (ppuLy ps) 0
-                writeIORef (ppuDot ps) 0
-                writeIORef (ppuWindowLine ps) 0 -- New frame resets WLY.
-                statEdge ps
-            else do
-                writeIORef (ppuLy ps) ly'
-                writeIORef (ppuDot ps) 0
-                statEdge ps
+        atLyc <- atLycCompareDot ps
+        if atLyc then lycCompareEvent ps else vblankLineEnd ps
+
+{- | The LYC-compare event partway into a line: @ly_for_comparison@ takes the line
+number, so re-sample the STAT line here rather than waiting for the next mode
+boundary. Stays in the same mode, only the dot moves.
+-}
+lycCompareEvent :: PpuState -> IO Word8
+lycCompareEvent ps = do
+    delay <- lycCompareDelay ps
+    writeIORef (ppuDot ps) delay
+    statEdge ps
+
+-- | End of mode 2: latch mode 3's length and start drawing.
+oamScanEnd :: PpuState -> IO Word8
+oamScanEnd ps = do
+    -- Latch this line's mode 3 length now: the registers it depends on
+    -- (SCX, WY/WX, LCDC) are sampled at the start of drawing, so a
+    -- mid-line write must not retroactively move the mode 0 boundary.
+    resyncMode3End ps
+    writeIORef (ppuMode ps) ModeDrawing
+    -- 'oamScanDotsFor', not the 'oamScanDots' constant, so this stays correct if
+    -- the caller is ever reached with the enable-line latch set. On the enable
+    -- line itself the PPU leaves the mode-0 window through 'lcdOnPreDrawEnd'
+    -- instead, so in practice this is always the plain 80.
+    start <- oamScanDotsFor ps
+    writeIORef (ppuDot ps) start
+    statEdge ps
+
+-- | End of a VBlank scanline: advance LY, wrapping to a new frame after line 153.
+vblankLineEnd :: PpuState -> IO Word8
+vblankLineEnd ps = do
+    ly <- readIORef (ppuLy ps)
+    let ly' = ly + 1
+    if ly' == 154
+        then do
+            writeIORef (ppuMode ps) ModeOamScan
+            writeIORef (ppuLy ps) 0
+            writeIORef (ppuDot ps) 0
+            writeIORef (ppuWindowLine ps) 0 -- New frame resets WLY.
+            statEdge ps
+        else do
+            writeIORef (ppuLy ps) ly'
+            writeIORef (ppuDot ps) 0
+            statEdge ps
 
 {- | End of the mode-0-looking window that opens the first scanline after the LCD
 is enabled. Hardware skips mode 2 entirely on this line, so this goes straight to
@@ -981,7 +1149,10 @@ computeStatLine ps = do
             mode <- readIORef (ppuMode ps)
             stat <- readIORef (ppuStat ps)
             ly <- readIORef (ppuLy ps)
-            lyc <- readIORef (ppuLyc ps)
+            -- Honours the LYC suppression window. Safe now that 'atLycCompareDot'
+            -- makes 'stepDots' stop at the compare dot, so the rising edge is seen
+            -- there rather than deferred to the next mode boundary.
+            match <- lycMatches ps
             -- The OAM-scan STAT source (bit 5) is also asserted on the
             -- first scanline of VBlank (LY=144), per the documented DMG
             -- quirk. Subsequent VBlank lines (145-153) only see bit 4.
@@ -991,7 +1162,7 @@ computeStatLine ps = do
                         testBit stat 4 || (ly == 144 && testBit stat 5)
                     ModeOamScan -> testBit stat 5
                     ModeDrawing -> False
-                lycSrc = testBit stat 6 && ly == lyc
+                lycSrc = testBit stat 6 && match
             pure (modeSrc || lycSrc)
 
 ----------------------------------------------------------------------
