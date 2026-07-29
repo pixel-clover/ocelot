@@ -69,8 +69,9 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 ### Picture Processing Unit
 
 - [x] LCDC, STAT, LY, LYC, SCX, SCY, WX, WY, BGP, OBP0, OBP1 register surface
-- [x] STAT mode bits lag the PPU's real mode by 4 dots on reads, while the STAT interrupt line keeps using the real mode (SameBoy models the two
-  separately via `mode_for_interrupt`). Passes mooneye `acceptance/ppu/intr_2_mode0_timing` and `intr_2_mode3_timing`
+- [x] STAT mode bits lag the PPU's real mode on reads: 4 dots at most boundaries, 5 on entry to VBlank. The STAT interrupt line keeps using the real
+  mode, as SameBoy models the two separately via `mode_for_interrupt`. Passes mooneye `acceptance/ppu/intr_2_mode0_timing` and `intr_2_mode3_timing`;
+  the mode 2 -> 3 report is still about a dot off, and lowering the delay to 3 is worse
 - [x] Mode 2 OAM scan, Mode 3 pixel transfer, Mode 0 HBlank, Mode 1 VBlank state machine
 - [x] Tile data fetch from `0x8000`/`0x8800` addressing modes
 - [x] Background rendering (SCX fine-scroll discard still deferred)
@@ -90,7 +91,8 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [ ] LCD on/off transitions and STAT/LY behavior on reset. LCD-off freeze is implemented, and the first scanline after the LCD is enabled is modelled:
   no mode 2 at all (STAT reports mode 0 with OAM and VRAM unblocked), drawing starting at dot 78, and a 448-dot line, each gaining one dot on DMG. That
   makes LY agree with SameBoy across every sampled instruction on `mem_timing`. The rest of the enable sequence is not audited: mooneye
-  `acceptance/ppu/lcdon_timing-GS` and `lcdon_write_timing-GS` still fail, now on mode 3 length rather than the enable phase
+  `acceptance/ppu/lcdon_timing-GS` and `lcdon_write_timing-GS` still fail. Both trip on the enable-line STAT mode 3 report, which lands 8 dots later
+  than SameBoy's; `tools/README.md` records the measurement and the fix that was tried and rejected
 - [x] Validation: dmg-acid2 golden frame hash (FNV-1a baseline locked; cross-check vs reference image at https://github.com/mattcurrie/dmg-acid2 to
   claim conformance)
 - [x] Validation: cgb-acid2 golden frame hash (same caveat; baseline locked from current PPU output)

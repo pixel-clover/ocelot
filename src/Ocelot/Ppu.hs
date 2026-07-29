@@ -26,8 +26,9 @@ that line at the full 456 leaves every later @LY@ edge, and the VBlank interrupt
 with it, 8 T-cycles late for as long as the LCD stays on.
 
 The mode the CPU reads back from STAT is not the mode the PPU is in: the register
-bits lag by 'statModeDelay' dots. 'visibleModeBits' applies that to reads only,
-while 'computeStatLine' drives the interrupt from the real mode.
+bits lag the real mode, by 'statModeDelay' at most boundaries and by
+'statVblankModeDelay' on entry to VBlank. 'visibleModeBits' applies that to reads
+only, while 'computeStatLine' drives the interrupt from the real mode.
 
 State is held in 'IORef's and 'IOVector's so reads and writes are O(1) and
 the rendered framebuffer is updated in place.
@@ -579,12 +580,16 @@ seedLcdc v ps = do
     writeIORef (ppuLcdc ps) v
     sampleStatLine ps
 
-{- | Dots by which the STAT mode bits lag the PPU's actual mode.
+{- | Dots by which the STAT mode bits lag the PPU's actual mode at most boundaries.
 
 SameBoy carries this as a standing note in @display.c@: \"It seems that the STAT
 register's mode bits are always late by 4 T-cycles.\" A differential trace agrees:
 at the dot-80 mode 2 -> 3 boundary Ocelot reported mode 3 while SameBoy still read
 mode 2, switching a few dots later.
+
+It is not uniform across boundaries, despite SameBoy's wording: entry to VBlank
+uses 'statVblankModeDelay', and the mode 2 -> 3 report is still about a dot off
+against SameBoy (see @tools\/README.md@). Lowering this to 3 is worse, not better.
 -}
 statModeDelay :: Int
 statModeDelay = 4
@@ -599,7 +604,7 @@ statVblankModeDelay :: Int
 statVblankModeDelay = 5
 
 {- | The mode bits as the CPU sees them in STAT, which lag 'ppuMode' by
-'statModeDelay' dots.
+'statModeDelay' dots, or 'statVblankModeDelay' on entry to VBlank.
 
 Only this register view is delayed. 'computeStatLine' keeps using the real mode,
 mirroring SameBoy's separate @mode_for_interrupt@, so interrupt timing is
@@ -623,13 +628,6 @@ visibleModeBits ps = do
         then pure 0
         else do
             dot <- readIORef (ppuDot ps)
-            -- Read the enable-line latch once. Games poll this register hard while waiting for mode 0
-            -- before touching VRAM, so the mode 0 and mode 3 arms below avoid re-reading it through
-            -- 'oamScanDotsFor' and 'inLcdOnPreDrawWindow'.
-            firstLine <- readIORef (ppuLcdOnFirstLine ps)
-            let drawStart
-                    | not firstLine = pure oamScanDots
-                    | otherwise = (lcdOnPreDrawDots +) <$> lcdOnExtraDots ps
             case mode of
                 ModeOamScan -> do
                     -- Line 0 follows VBlank; every other OAM scan follows an HBlank.
@@ -637,13 +635,16 @@ visibleModeBits ps = do
                     let prev = if ly == 0 then ModeVBlank else ModeHBlank
                     pure (modeBits (if dot < statModeDelay then prev else mode))
                 ModeDrawing -> do
-                    start <- drawStart
+                    -- Through 'oamScanDotsFor', not a local copy of its arithmetic: the state machine
+                    -- decides where mode 3 begins, and this has to report the same dot it does.
+                    start <- oamScanDotsFor ps
+                    firstLine <- readIORef (ppuLcdOnFirstLine ps)
                     -- The enable line reaches mode 3 from its mode-0 window, not from a mode 2.
                     let prev = if firstLine then ModeHBlank else ModeOamScan
                     pure (modeBits (if dot - start < statModeDelay then prev else mode))
                 ModeHBlank -> do
-                    start <- drawStart
-                    if firstLine && dot < start
+                    preDraw <- inLcdOnPreDrawWindow ps
+                    if preDraw
                         then pure (modeBits mode) -- pre-draw window: no predecessor to hold
                         else do
                             end <- readIORef (ppuMode3End ps)
@@ -702,8 +703,10 @@ scanlineDots = 456
 
 Hardware runs no mode 2 there at all. SameBoy holds the STAT mode bits at 0 for
 @MODE2_LENGTH - 4@ (76) dots, sleeps 2 more, and only then sets mode 3, so drawing
-begins at dot 78. Using 76 here reported mode 3 three dots early on DMG, which is
-what mooneye @acceptance\/ppu\/lcdon_timing-GS@ measures.
+begins at dot 78. Using 76 here failed blargg @oam_bug\/1-lcd_sync@, which passes at
+78; mooneye @acceptance\/ppu\/lcdon_timing-GS@ fails either way and wants the STAT
+report no later than its own +76, which no single value of this constant has yet
+satisfied. See the open item in @tools\/README.md@ before changing it.
 -}
 lcdOnPreDrawDots :: Int
 lcdOnPreDrawDots = 78

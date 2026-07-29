@@ -86,6 +86,18 @@ spec = do
                 afterDelay <- read8 0xFF41 ps
                 (atBoundary .&. 0x03, afterDelay .&. 0x03) `shouldBe` (2, 3)
 
+            it "switches to mode 3 at exactly dot 84, pinning the delay at 4" $ do
+                -- Stepping alone cannot tell 3 from 4: dot 80 reads mode 2 and dot 84 mode 3 under
+                -- either. Drive the dot to bracket the boundary to a single dot. A delay of 3 was
+                -- tried and is worse: the traced divergence moves much earlier.
+                ps <- freshOn
+                _ <- advance 20 ps -- internal mode 3, dot 80
+                writeIORef (ppuDot ps) 83
+                at83 <- read8 0xFF41 ps
+                writeIORef (ppuDot ps) 84
+                at84 <- read8 0xFF41 ps
+                (at83 .&. 0x03, at84 .&. 0x03) `shouldBe` (2, 3)
+
             it "leaves the internal mode undelayed" $ do
                 ps <- freshOn
                 _ <- advance 20 ps
@@ -120,57 +132,68 @@ spec = do
         -- DMG. Without this the PPU line phase sits 8 T-cycles late against SameBoy forever after
         -- (every LY edge and the VBlank IRQ with it).
         describe "first scanline after the LCD is enabled" $ do
-            let turnOn = do
+            -- 'initialPpu' is DMG; pass True for a CGB machine. On CGB both the mode 3 start and the
+            -- line length drop by one, because SameBoy spends an extra dot before the post-enable line
+            -- begins on DMG only.
+            let turnOnHost cgb = do
                     ps <- initialPpu
+                    setCgbMode cgb ps
                     write8 0xFF40 0x11 ps -- LCD off
                     write8 0xFF40 0x91 ps -- LCD on: starts the short line
                     pure ps
+                turnOn = turnOnHost False
 
-            -- 'initialPpu' is DMG, so these expect the DMG figures: mode 3 starts at dot 79 and the
-            -- line runs 449 dots. On CGB both drop by one (78 and 448); SameBoy spends one extra dot
-            -- before the post-enable line begins on DMG only.
-            -- 'advance' moves 4 dots at a time, so stepping alone brackets the boundary only to
-            -- 77..80. Drive the dot counter directly to pin the exact figure, otherwise 77, 79, and
-            -- 80 are all indistinguishable.
+            {- Pinning the mode 3 start to a single dot needs a *pure* observation: 'advance' moves
+            4 dots at a time, so stepping alone cannot tell 79 from 80, and an earlier attempt here
+            used @advance 0@, which is a no-op ('stepDots' returns immediately on 0) and asserted
+            nothing at all.
+
+            Reading STAT is pure, and 'visibleModeBits' reports mode 3 from @start + statModeDelay@,
+            so walking the dot counter across that flip locates @start@ exactly. On the enable line the
+            mode before drawing is 0, not 2, so the flip is 0 -> 3.
+            -}
+            let statModeAtDot ps d = do
+                    writeIORef (ppuDot ps) d
+                    (.&. 0x03) <$> read8 0xFF41 ps
+                drawStartOf cgb = do
+                    ps <- turnOnHost cgb
+                    _ <- advance 25 ps -- comfortably into mode 3 (100 dots)
+                    m <- readMode ps
+                    m `shouldBe` ModeDrawing
+                    let probe d
+                            | d > 120 = pure (-1)
+                            | otherwise = do
+                                v <- statModeAtDot ps d
+                                if v == 3 then pure (d - 4) else probe (d + 1)
+                    probe 0
+
             it "starts drawing at exactly dot 79 on DMG" $ do
-                ps <- turnOn
-                writeIORef (ppuDot ps) 78
-                _ <- advance 0 ps
-                m78 <- readMode ps
-                ps2 <- turnOn
-                writeIORef (ppuDot ps2) 78
-                _ <- advance 1 ps2 -- 78 -> 79 crosses the boundary
-                m79 <- readMode ps2
-                (m78, m79) `shouldBe` (ModeHBlank, ModeDrawing)
+                start <- drawStartOf False
+                start `shouldBe` 79
 
-            it "starts drawing one dot earlier on CGB" $ do
-                -- The DMG-only extra dot; without it this and the DMG case would agree.
-                ps <- initialPpu
-                setCgbMode True ps
-                write8 0xFF40 0x11 ps
-                write8 0xFF40 0x91 ps
-                writeIORef (ppuDot ps) 77
-                _ <- advance 1 ps -- 77 -> 78 crosses the CGB boundary
-                m <- readMode ps
-                m `shouldBe` ModeDrawing
+            it "starts drawing at exactly dot 78 on CGB" $ do
+                start <- drawStartOf True
+                start `shouldBe` 78
 
-            it "runs one dot longer on DMG than on CGB" $ do
-                let lineEndOn cgb = do
-                        ps <- initialPpu
-                        setCgbMode cgb ps
-                        write8 0xFF40 0x11 ps
-                        write8 0xFF40 0x91 ps
-                        writeIORef (ppuDot ps) 440
+            it "runs exactly 449 dots on DMG and 448 on CGB" $ do
+                {- Reads the line length to a single dot without teleporting the counter. Stepping one
+                M-cycle at a time, the step that ends the line consumes only as many dots as the line
+                had left and carries the rest into line 1, where 'hblankLineEnd' has reset the counter
+                to 0. So the dot observed just after LY ticks is @4k - lineLength@ for the first
+                multiple of 4 at or past the length, which separates 448 (leftover 0), 449 (3), and
+                450 (2). Comparing last-dot-before-the-wrap instead only resolves 4 dots.
+                -}
+                let leftoverOn cgb = do
+                        ps <- turnOnHost cgb
                         let go !n
-                                | n > 20 = pure (-1)
+                                | n > 130 = pure (-1)
                                 | otherwise = do
                                     ly <- readLy ps
-                                    if ly == 1 then pure n else advance 1 ps >> go (n + 1)
-                        go 0
-                dmg <- lineEndOn False
-                cgb <- lineEndOn True
-                -- One extra M-cycle of stepping on DMG, i.e. 449 dots against 448.
-                (dmg - cgb) `shouldBe` 1
+                                    if ly == 1 then readDot ps else advance 1 ps >> go (n + 1)
+                        go (0 :: Int)
+                dmg <- leftoverOn False
+                cgb <- leftoverOn True
+                (dmg, cgb) `shouldBe` (3, 0)
 
             {- Hardware runs no mode 2 at all on this line: SameBoy clears the
             STAT mode bits to 0 and leaves OAM and VRAM unblocked for the whole
@@ -183,7 +206,7 @@ spec = do
                 ps <- turnOn
                 stat0 <- read8 0xFF41 ps
                 (stat0 .&. 0x03) `shouldBe` 0
-                _ <- advance 18 ps -- 72 T-cycles, still short of dot 76
+                _ <- advance 18 ps -- 72 T-cycles, still short of the drawing start
                 stat1 <- read8 0xFF41 ps
                 (stat1 .&. 0x03) `shouldBe` 0
 

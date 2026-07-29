@@ -91,7 +91,8 @@ instruction-granular trace.
 
 The divergence now first shows up as the VBlank IF bit, at equal `cyc` and equal `LY=144`, with Ocelot latching it one instruction before SameBoy.
 That is a separate and finer timing question than the line length, and it is still open. `acceptance/ppu/lcdon_timing-GS` and
-`lcdon_write_timing-GS` also still fail: they pin down more of the LCD-enable sequence than the line length alone.
+`lcdon_write_timing-GS` also still fail; see "Open: The Enable-Line STAT Mode 3 Report Is 8 Dots Late" below for the measurement rather than
+duplicating it here.
 
 ### A Measured Dead End on the VBlank IF Latch
 
@@ -106,8 +107,9 @@ variant it was aimed at. Five ROMs constrain this timing while passing (`blargg 
 
 Two leads that were not followed up:
 
-- SameBoy also delays `LY` itself to dot 2 and the STAT mode bits to dot 5. Ocelot flips both at dot 0. The mooneye tests measure `LY` reads against
-  interrupt arrival, so the offsets probably have to move together rather than one at a time.
+- SameBoy also delays `LY` itself to dot 2 and the STAT mode bits to dot 5. The STAT half is now modelled (`statVblankModeDelay`), which moved no ROM
+  either way; `LY` still flips at dot 0. Delaying the `LY` register alone was tried separately and reverted (it fixed `oam_bug/1-lcd_sync` but broke
+  `hblank_ly_scx_timing-GS`), so the remaining question is whether the two have to move together.
 - The same SameBoy block raises the *OAM* STAT source on entering VBlank (`display.c:2160` and `:2177`, "Entering VBlank state triggers the OAM
   interrupt"). That quirk is a plausible reading of what the failing `-C` variant is actually testing, and is unrelated to the raise dot.
 
@@ -126,6 +128,34 @@ hardware only occupies one internal bus. Fixing that passed all nine. None of th
 
 Two lessons worth keeping: classify by failure *mode* before reading anything into a failure count, and remember that a register-only trace cannot see
 a memory divergence until it corrupts a register. A per-access trace mode would have found this directly.
+
+### Open: The STAT Mode-Bit Delay Is Not One Constant
+
+`statModeDelay = 4` is right on balance but is not right at every boundary, and the two ROMs still failing in this family both trip on it.
+`ppu/stat_lyc_onoff` and `ppu/intr_2_oam_ok_timing` diverge identically: at equal `pc` and `cyc`, SameBoy reads mode 3 where Ocelot still reads mode 2, so
+Ocelot's mode 2 -> 3 report is about a dot late.
+
+Lowering the constant to 3 does not help, it hurts: the first divergence moves from line 78 to line **9** on `stat_lyc_onoff` and from 35 to 9 on
+`intr_2_oam_ok_timing`, and at line 9 Ocelot then reports mode 3 where SameBoy reads mode 0. So one boundary wants a shorter delay while another wants the
+longer one, which is the same shape as the VBlank case already carved out as `statVblankModeDelay = 5`. The fix is per-boundary offsets read out of
+SameBoy's `GB_STAT_update` call sites, not a single tuned number. Both values are now pinned by dot-precise tests, so a change either way will show up.
+
+### Open: The Enable-Line STAT Mode 3 Report Is 8 Dots Late
+
+Measured, not inferred, and recorded because the plausible-looking fix does **not** work. On `lcdon_timing-GS.gb`, taking the instruction where `lcdc`
+first reads enabled as the reference, SameBoy reports STAT mode 3 at **+76** dots and Ocelot at **+84**. Both read mode 0 at +68, which bounds SameBoy's
+transition to `(68, 76]` against Ocelot's 83 (its internal mode-3 start of 79 plus `statModeDelay`).
+
+The obvious reading is that `lcdOnPreDrawDots` double-counts the 4-dot STAT delay, since 78 came from SameBoy's STAT-visible dot while it feeds Ocelot's
+*internal* start. That reading is not sufficient: setting it to 70, which should land the report at 75, moved the internal start as intended (the
+dot-precise unit tests flipped) and left the traced transition at +84, unchanged. So the mapping from that constant to the observed report is not a simple
+`start + statModeDelay`, and the mechanism is not yet understood. Reverted rather than guessed at.
+
+Three notes for whoever picks it up. `lcdon_timing-GS` wants the report at or before +76, while blargg `oam_bug/1-lcd_sync` *failed* when this constant
+was 76 and passes at 78, so one constant appears unable to satisfy both. SameBoy separates the STAT mode-3 report (its dot 78) from the pixel-fetch start
+(`mode_3_start`, its dot 83) and Ocelot collapses the two into one boundary, which is the most likely reason those oracles pull opposite ways. And the
+`+N` figures are cycles from the *observation* point rather than PPU dots: the LCDC write lands mid-instruction, leaving an unmeasured offset of up to one
+instruction, so do not read `+76` as "dot 76".
 
 ### Resolved: LY Boundaries on `mem_timing.gb`
 
