@@ -198,13 +198,14 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Blargg dmg_sound fully passes (12/12 sub-ROMs)
 - [x] Blargg cgb_sound fully passes (12/12 sub-ROMs)
 - [x] Blargg oam_bug wired in (8 sub-ROMs, aspirational; 6 currently pass: 1-lcd_sync, 2-causes, 3-non_causes, 4-scanline_timing,
-  5-timing_bug, 6-timing_no_bug). The DMG OAM bug is implemented for the address-bus (write) side; a CPU *read* of OAM currently applies that same
-  write-side pattern, where hardware applies a different one. `8-instr_effect` fails at its subtest 3 (`POP rp`, i.e. a read) with subtest 2
-  (`INC/DEC rp`, the write side) passing, so what is left is SameBoy's `GB_trigger_oam_bug_read`. That is a different kind of work from the rest of
-  this list: four distinct glitch formulas selected by `accessed_oam_row & 0x18`, branching on chip revision and in places on the individual chip,
-  with SameBoy's own comments calling them "extremely revision and instance specific" and one path non-deterministic. Wiring it in risks the five
-  read-exercising ROMs that pass today, and a previous full port had to be reverted for a net loss of one. `7-timing_effect` additionally reaches no
-  verdict at all inside the instruction cap, which is unexplained and probably separate.
+  5-timing_bug, 6-timing_no_bug, 8-instr_effect). The DMG OAM bug is modelled on both sides: the address-bus pattern (`triggerOamBug`) and the
+  separate read pattern (`triggerOamBugRead`, SameBoy's `GB_trigger_oam_bug_read`), whose four glitch formulas are chosen by `accessed_oam_row & 0x18`
+  and, for the `mod 32 == 0` case, by the exact row. An access that reaches OAM through the bus also samples the scan one row later than the CPU's own
+  address bus does, because `cycleRead`/`cycleWrite` tick and then access (`accessedOamRowForBusAccess`); `INC/DEC rp` never touches the bus and wants
+  the uncorrected row, while `POP`, `PUSH`, and `LD A,(HL+/-)` want the corrected one.
+- [ ] `oam_bug/7-timing_effect`, the last outstanding ROM. It sweeps a trigger across 116 timings and CRCs the printed result, and Ocelot reaches no
+  verdict at all inside the instruction cap rather than reporting a wrong one (still 0x80 at a billion instructions). Not a matter of transcribing
+  SameBoy more faithfully: a standalone DMG driver over SameBoy's own core does not pass it either, returning 0xd1 where the other seven return 0x00.
 - [x] Blargg halt_bug and interrupt_time both pass (interrupt_time started passing once the timer stopped being halved in CGB double-speed mode)
 - [ ] Promote aspirational blargg ROMs to strict run-to-pass as accuracy is added
 - [x] Mooneye magic-breakpoint runner in `GoldenSpec.hs`: observes BCDEHL after each chunk for the Fibonacci pass tuple or all-`0x42` failure tuple

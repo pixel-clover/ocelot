@@ -196,14 +196,36 @@ that ROM is exactly the one validating LCD-on-to-scanline sync, which this windo
 off. Re-testing a blocked item after a related fix is cheap; assuming the blocker still
 holds is not.
 
-Two subtests remain. `8-instr_effect` fails subtest 3, "POP rp pattern is wrong", after
-subtest 2's INC/DEC pattern started passing: reads need SameBoy's
-`GB_trigger_oam_bug_read` secondary/tertiary/quaternary patterns, which are
-unimplemented, so a read currently gets the write pattern. `7-timing_effect` does not
-settle even at ten times the golden suite's cycle cap. It prints a full OAM dump on
-every iteration where corruption occurred, so it does far more work now than when
-nothing corrupted, but 10x the budget rules out slowness as the whole story and it
-should be treated as an unexplained non-termination rather than a timeout.
+`8-instr_effect` has since passed too, and it needed **two** fixes that had to land
+together, which is why either alone looked like it did nothing:
+
+1. Reads take a different corruption pattern from writes. SameBoy's
+   `GB_trigger_oam_bug_read` picks between a secondary, three tertiary, and a quaternary
+   formula by `accessed_oam_row & 0x18` and, in the `mod 32 == 0` case, by the exact row.
+   `Ppu.triggerOamBugRead` transcribes it.
+2. An access that reaches OAM *through the bus* samples the scan one row later than the
+   CPU's own address bus does, because `cycleRead`/`cycleWrite` tick and then access. So
+   `INC/DEC rp` (no bus access) wants the raw row while `POP`, `PUSH`, and `LD A,(HL+/-)`
+   want it one row back: `Ppu.accessedOamRowForBusAccess`.
+
+Fault 2 hid fault 1. With the row off by one, the `POP rp` subtest landed on row `0x40`
+and so took the quaternary branch where hardware takes the secondary one, so implementing
+the patterns changed nothing and looked like a dead end. The way out was to instrument
+*both* emulators at the same function and diff the rows: a temporary `fprintf` in
+SameBoy's `GB_trigger_oam_bug_read` reported rows 48 and 56 for the two `POP` reads
+against Ocelot's 56 and 64, which named the one-row offset immediately. Revert the
+submodule edit with `git -C external/SameBoy checkout Core/memory.c` when done.
+
+`7-timing_effect` is the last outstanding ROM and is not a transcription problem.
+It does not settle even at a billion instructions, where the golden cap is 80 million, so
+treat it as unexplained non-termination rather than a timeout. It sweeps a trigger across
+116 timings and prints a full OAM dump on each mismatching one, so it does far more work
+when corruption is wrong than when it is absent. **SameBoy does not pass it either**: a
+standalone driver over SameBoy's own core on DMG returns `0xd1` where the other seven
+oam_bug ROMs return `0x00`. Worth knowing before spending anything more on it, and worth
+keeping that driver technique in mind generally — ~60 lines of C against
+`external/SameBoy/build/obj/Core/*.o` plus the boot stub from `sameboy-trace.c` answers
+"does the oracle even pass this?" directly.
 
 One more repeat of an already-documented trap: `make tools` relinks against the
 *installed* library, so a `stack build` alone leaves `bin/tools/*` stale. This bit the

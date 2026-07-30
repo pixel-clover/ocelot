@@ -58,7 +58,15 @@
 # ---------------------------------------------------------------------------
 # blargg: OAM bug
 #
-# The DMG OAM corruption bug is not modelled at all.
+# 8-instr_effect used to live here. Two separate faults: a CPU read applied the write-side
+# corruption pattern instead of the read-side one ('triggerOamBugRead'), and an access that goes
+# through the bus samples the OAM scan a row later than the CPU's own address bus does, because
+# 'cycleRead'/'cycleWrite' tick and then access ('accessedOamRowForBusAccess'). The second fault hid
+# the first: with the row off by one the POP subtest went down the row-0x40 quaternary branch instead
+# of the secondary one, so fixing the patterns alone changed nothing.
+#
+# 7-timing_effect reaches no verdict at all rather than reporting a wrong one, and SameBoy does not
+# pass it either (a standalone DMG driver over SameBoy's own core returns 0xd1), so it is not a
+# question of transcribing SameBoy more faithfully.
 # ---------------------------------------------------------------------------
 external/gb-test-roms/oam_bug/rom_singles/7-timing_effect.gb
-external/gb-test-roms/oam_bug/rom_singles/8-instr_effect.gb

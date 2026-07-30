@@ -178,6 +178,44 @@ spec = do
                 v <- oamAt ps [8, 9]
                 v `shouldBe` [0x11, 0x22]
 
+            {- A CPU *read* corrupts differently from a write, and it also samples the scan a
+            row later, because 'cycleRead' ticks the bus before performing the access. Both
+            were wrong together, and the row error hid the pattern error: it sent blargg
+            @oam_bug/8-instr_effect@'s @POP rp@ subtest down the row-0x40 quaternary branch
+            instead of the secondary one, so correcting the patterns alone moved nothing.
+            -}
+            it "reads corrupt a row earlier than writes at the same dot" $ do
+                ps <- inMode2At 4
+                write <- accessedOamRow ps
+                -- Row 8 is what a bus read sees where the address bus sees 16.
+                mapM_ (uncurry (MV.write (ppuOam ps))) [(8, 0x11), (9, 0x22), (16, 0x33), (17, 0x44)]
+                triggerOamBugRead 0xFE00 ps
+                untouched <- oamAt ps [16, 17]
+                (write, untouched) `shouldBe` (16, [0x33, 0x44])
+
+            it "a read copies all eight bytes of the row above, where a write copies six" $ do
+                ps <- inMode2At 4 -- a read here works on row 8
+                -- Row 8 has @8 .&. 0x18 == 8@, so it takes the plain read glitch
+                -- @b .|. (a .&. c)@ over words at rows 8, 0, and 4: @0x0000 .|. 0xFFFF@.
+                mapM_ (uncurry (MV.write (ppuOam ps))) $
+                    [(0, 0x00), (1, 0x00), (2, 0x21), (3, 0x22), (4, 0xFF), (5, 0xFF)]
+                        <> [(6, 0x25), (7, 0x26), (8, 0xFF), (9, 0xFF)]
+                        <> [(i, 0x00) | i <- [10 .. 15]]
+                triggerOamBugRead 0xFE00 ps
+                glitched <- oamAt ps [0, 1]
+                copied <- oamAt ps [8 .. 15]
+                -- All eight bytes come down, so bytes 8..9 carry the glitched word too.
+                glitched `shouldBe` [0xFF, 0xFF]
+                copied `shouldBe` [0xFF, 0xFF, 0x21, 0x22, 0xFF, 0xFF, 0x25, 0x26]
+
+            it "leaves OAM alone on CGB for a read too" $ do
+                ps <- inMode2At 4
+                setCgbMode True ps
+                mapM_ (uncurry (MV.write (ppuOam ps))) [(8, 0x11), (9, 0x22)]
+                triggerOamBugRead 0xFE00 ps
+                v <- oamAt ps [8, 9]
+                v `shouldBe` [0x11, 0x22]
+
             it "leaves OAM alone in the last 4 dots of the scan, which name no row" $ do
                 ps <- inMode2At 76
                 mapM_ (uncurry (MV.write (ppuOam ps))) [(152, 0x11), (153, 0x22)]

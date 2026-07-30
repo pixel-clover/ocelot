@@ -544,10 +544,11 @@ read8Raw addr b
     | addr <= 0xDFFF = readUpperWram addr b
     | addr <= 0xFDFF = readEcho addr b
     | addr <= 0xFE9F = do
-        Ppu.triggerOamBug addr (busPpu b)
+        -- A read corrupts differently from a write; see 'Ppu.triggerOamBugRead'.
+        Ppu.triggerOamBugRead addr (busPpu b)
         accessible <- ppuCpuCanReadOam b
         if accessible then Ppu.read8 addr (busPpu b) else pure 0xFF
-    | addr <= 0xFEFF = Ppu.triggerOamBug addr (busPpu b) >> pure 0xFF
+    | addr <= 0xFEFF = Ppu.triggerOamBugRead addr (busPpu b) >> pure 0xFF
     | addr == 0xFF00 = Joypad.readP1 (busJoypad b)
     -- IF (0xFF0F): only the low 5 bits are real interrupt flags; the
     -- upper 3 bits always read as 1.
@@ -661,10 +662,12 @@ write8Raw addr !v b
     | addr <= 0xDFFF = writeUpperWram addr v b
     | addr <= 0xFDFF = writeEcho addr v b
     | addr <= 0xFE9F = do
-        Ppu.triggerOamBug addr (busPpu b)
+        -- A bus write samples the scan a row later than the CPU's address bus does;
+        -- see 'Ppu.accessedOamRowForBusAccess'.
+        Ppu.triggerOamBugBusWrite addr (busPpu b)
         accessible <- ppuCpuCanWriteOam b
         when accessible (Ppu.write8 addr v (busPpu b))
-    | addr <= 0xFEFF = Ppu.triggerOamBug addr (busPpu b)
+    | addr <= 0xFEFF = Ppu.triggerOamBugBusWrite addr (busPpu b)
     | addr == 0xFF00 = Joypad.writeP1 v (busJoypad b)
     | addr == 0xFF02 = handleSerialControl v b
     | addr == 0xFF04 = resetDivider b

@@ -76,10 +76,12 @@ module Ocelot.Ppu (
     seedLcdc,
     accessedOamRow,
     triggerOamBug,
+    triggerOamBugBusWrite,
+    triggerOamBugRead,
 ) where
 
 import Control.Monad (unless, when)
-import Data.Bits (shiftL, shiftR, testBit, xor, (.&.), (.|.))
+import Data.Bits (complement, shiftL, shiftR, testBit, xor, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Internal as BSI
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
@@ -642,20 +644,26 @@ instructions that never issue a bus access at all (16-bit @INC@\/@DEC@ and @PUSH
 Together those pass blargg @oam_bug@ 2-causes, 4-scanline_timing, and 5-timing_bug
 while keeping 3-non_causes and 6-timing_no_bug green.
 
-Still failing: @7-timing_effect@ and @8-instr_effect@. Reads need
-@GB_trigger_oam_bug_read@'s separate secondary\/tertiary\/quaternary corruption
-patterns, which are unimplemented, so a read's effect is currently modelled with the
-write pattern. That is the likely cause of both.
+A CPU *read* corrupts differently; see 'triggerOamBugRead'.
 -}
 triggerOamBug :: Word16 -> PpuState -> IO ()
-triggerOamBug addr ps
+triggerOamBug = triggerOamBugWith accessedOamRow
+
+{- | 'triggerOamBug' for a write that goes through the bus, which samples the scan one
+row later than the CPU's own address bus does. See 'accessedOamRowForBusAccess'.
+-}
+triggerOamBugBusWrite :: Word16 -> PpuState -> IO ()
+triggerOamBugBusWrite = triggerOamBugWith accessedOamRowForBusAccess
+
+triggerOamBugWith :: (PpuState -> IO Int) -> Word16 -> PpuState -> IO ()
+triggerOamBugWith rowOf addr ps
     | addr < 0xFE00 || addr > 0xFEFF = pure ()
     | otherwise = do
         cgb <- readIORef (ppuCgbMode ps)
         if cgb
             then pure ()
             else do
-                row <- accessedOamRow ps
+                row <- rowOf ps
                 when (row >= 8) $ do
                     let oam = ppuOam ps
                         wordAt i = do
@@ -671,6 +679,158 @@ triggerOamBug addr ps
                     mapM_
                         (\i -> MV.read oam (row - 8 + i) >>= MV.write oam (row + i))
                         [2 .. 7]
+
+{- | The scanned row as a CPU bus access sees it: one row earlier than 'accessedOamRow'.
+
+Ocelot's @cycleRead@ and @cycleWrite@ tick the bus and then perform the access, so an
+access samples the PPU one M-cycle after the point at which hardware would have driven the
+address, and one M-cycle of the OAM scan is exactly one row. The address-bus path in
+"Ocelot.Cpu.Execute" raises its trigger before any tick and needs no correction, which is
+why only accesses that actually go through the bus carry one. That split is visible in the
+ROM: @INC\/DEC rp@ never touches the bus and wants the uncorrected row, while @PUSH rp@
+does touch it and wants the corrected one.
+
+Measured, not assumed. With SameBoy instrumented at @GB_trigger_oam_bug_read@, blargg
+@oam_bug\/8-instr_effect@ reports rows 48 and 56 for the two reads of its @POP rp@
+subtest, and 48 and 80 for @LD A,(HL+\/-)@; Ocelot reported each of those 8 higher before
+this correction, which put the @POP@ on row @0x40@ and so down the quaternary branch
+instead of the secondary one.
+-}
+accessedOamRowForBusAccess :: PpuState -> IO Int
+accessedOamRowForBusAccess ps = do
+    row <- accessedOamRow ps
+    pure (if row < 0 then row else row - 8)
+
+{- | SameBoy's read-side glitch functions, one per branch of 'triggerOamBugRead'.
+
+Transcribed rather than derived. These are what the DMG's OAM read path was measured to
+do, and there is no rule behind them to check them against; the names follow SameBoy's so
+the two can be diffed.
+-}
+oamBugGlitchRead :: Word16 -> Word16 -> Word16 -> Word16
+oamBugGlitchRead a b c = b .|. (a .&. c)
+
+oamBugGlitchReadSecondary :: Word16 -> Word16 -> Word16 -> Word16 -> Word16
+oamBugGlitchReadSecondary a b c d =
+    (b .&. (a .|. c .|. d)) .|. (a .&. c .&. d)
+
+oamBugGlitchTertiary1
+    , oamBugGlitchTertiary2
+    , oamBugGlitchTertiary3 ::
+        Word16 -> Word16 -> Word16 -> Word16 -> Word16 -> Word16
+oamBugGlitchTertiary1 a b c d e = c .|. (a .&. b .&. d .&. e)
+oamBugGlitchTertiary2 a b c d e = (c .&. (a .|. b .|. d .|. e)) .|. (a .&. b .&. d .&. e)
+oamBugGlitchTertiary3 a b c d e = (c .&. (a .|. b .|. d .|. e)) .|. (b .&. d .&. e)
+
+{- | SameBoy's @bitwise_glitch_quaternary_read_dmg@. Its first argument is unused, kept
+so the shape matches the source.
+
+SameBoy notes that this case is non-deterministic on the author's own DMG and constant
+zero on others, and deliberately emulates the ones that yield zeros. Ocelot follows,
+because a test ROM cannot check a non-deterministic result either.
+-}
+oamBugGlitchQuaternaryDmg ::
+    Word16 -> Word16 -> Word16 -> Word16 -> Word16 -> Word16 -> Word16 -> Word16 -> Word16
+oamBugGlitchQuaternaryDmg _a b c d e f g h =
+    (e .&. (h .|. g .|. (complement d .&. f) .|. c .|. b)) .|. (c .&. g .&. h)
+
+{- | Apply the DMG OAM bug for a CPU *read* anywhere in @0xFE00-0xFEFF@.
+
+Hardware corrupts differently on a read than on a write, and the difference is not a
+detail: blargg @oam_bug\/8-instr_effect@ checks the resulting bytes against a CRC per
+instruction, and its @POP rp@ and @LD A,(HL+\/-)@ subtests are reads while its
+@INC\/DEC rp@ and @PUSH rp@ subtests go through the address bus and want
+'triggerOamBug'.
+
+Which corruption applies is chosen by the scanned row modulo 32, following SameBoy's
+@GB_trigger_oam_bug_read@:
+
+* @row mod 32 == 16@: the secondary pattern, writing the row above and copying it two
+  rows up.
+* @row mod 32 == 0@: a tertiary or quaternary pattern. SameBoy calls this case
+  \"extremely revision and instance specific\" and branches on the exact row; rows
+  @0x20@ and @0x60@ get their own formulas, @0x40@ a wider one taking eight words, and
+  everything else the plain tertiary.
+* otherwise: the row's own first word and the one above both take 'oamBugGlitchRead'.
+
+Every branch then copies all eight bytes of the row above down over the scanned row,
+which is where this differs most visibly from the write side's bytes 2..7. Row @0x80@
+additionally copies itself over row 0.
+
+The inner corruptions stop above row @0x98@, though the eight-byte copy still runs;
+that is SameBoy's @accessed_oam_row < 0x98@ guard, and the rows above it would index
+past the end of OAM.
+-}
+triggerOamBugRead :: Word16 -> PpuState -> IO ()
+triggerOamBugRead addr ps
+    | addr < 0xFE00 || addr > 0xFEFF = pure ()
+    | otherwise = do
+        cgb <- readIORef (ppuCgbMode ps)
+        if cgb
+            then pure ()
+            else do
+                row <- accessedOamRowForBusAccess ps
+                when (row >= 8) $ do
+                    let oam = ppuOam ps
+                        wordAt i = do
+                            !lo <- MV.read oam i
+                            !hi <- MV.read oam (i + 1)
+                            pure (fromIntegral lo .|. (fromIntegral hi `shiftL` 8) :: Word16)
+                        putWordAt i v = do
+                            MV.write oam i (fromIntegral (v .&. 0xFF))
+                            MV.write oam (i + 1) (fromIntegral (v `shiftR` 8))
+                        -- Copy eight bytes from row @from@ over row @to@.
+                        copyRow from to =
+                            mapM_ (\i -> MV.read oam (from + i) >>= MV.write oam (to + i)) [0 .. 7]
+                    case row .&. 0x18 of
+                        0x10 -> when (row < 0x98) $ do
+                            !above2 <- wordAt (row - 16)
+                            !above <- wordAt (row - 8)
+                            !cur <- wordAt row
+                            !mid <- wordAt (row - 4)
+                            putWordAt (row - 8) (oamBugGlitchReadSecondary above2 above cur mid)
+                            copyRow (row - 8) (row - 16)
+                        0x00 -> when (row < 0x98) $ do
+                            !cur <- wordAt row
+                            !mid <- wordAt (row - 4)
+                            !above <- wordAt (row - 8)
+                            !above2 <- wordAt (row - 16)
+                            !above4 <- wordAt (row - 32)
+                            !glitched <-
+                                if row == 0x40
+                                    then do
+                                        !first <- wordAt 0
+                                        !midOdd <- wordAt (row - 6)
+                                        !above2Odd <- wordAt (row - 14)
+                                        pure
+                                            ( oamBugGlitchQuaternaryDmg
+                                                first
+                                                cur
+                                                mid
+                                                midOdd
+                                                above
+                                                above2Odd
+                                                above2
+                                                above4
+                                            )
+                                    else
+                                        let op
+                                                | row == 0x20 = oamBugGlitchTertiary2
+                                                | row == 0x60 = oamBugGlitchTertiary3
+                                                | otherwise = oamBugGlitchTertiary1
+                                         in pure (op cur mid above above2 above4)
+                            putWordAt (row - 8) glitched
+                            copyRow (row - 8) (row - 16)
+                            copyRow (row - 8) (row - 32)
+                        _ -> do
+                            !cur <- wordAt row
+                            !above <- wordAt (row - 8)
+                            !mid <- wordAt (row - 4)
+                            let !glitched = oamBugGlitchRead cur above mid
+                            putWordAt (row - 8) glitched
+                            putWordAt row glitched
+                    copyRow (row - 8) row
+                    when (row == 0x80) (copyRow row 0)
 
 {- | Dot on line 153 at which the LY register stops reporting 153 and reads 0.
 
