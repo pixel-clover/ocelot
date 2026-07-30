@@ -117,6 +117,15 @@ executables:
           - -optl-Wl,--export=ocelot_snapshot_version
           - -optl-Wl,--export=ocelot_last_error_ptr
           - -optl-Wl,--export=ocelot_last_error_len
+          # Stall watchdog. A `foreign export ccall` declaration alone does not make a
+          # symbol visible in the wasm module: the linker exports only what this list
+          # names, so an export added in app-web/Main.hs and forgotten here compiles
+          # fine and is then simply missing from the built artifact.
+          - -optl-Wl,--export=ocelot_stalled_frames
+          - -optl-Wl,--export=ocelot_stall_threshold
+          - -optl-Wl,--export=ocelot_debug_state
+          - -optl-Wl,--export=ocelot_debug_state_ptr
+          - -optl-Wl,--export=ocelot_debug_state_len
           - -optl-Wl,--export=ocelot_framebuffer_width
           - -optl-Wl,--export=ocelot_framebuffer_height
           - -optl-Wl,--export=ocelot_audio_sample_rate
