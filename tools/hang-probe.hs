@@ -31,11 +31,12 @@ import Data.Bits (xor)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (sortOn)
 import qualified Data.Map.Strict as M
+import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word16, Word32, Word8)
 import qualified Ocelot.Bus as Bus
 import qualified Ocelot.Cartridge as Cartridge
 import qualified Ocelot.Snapshot as Snapshot
-import Ocelot.Cpu.Execute (runUntilFrame)
+import Ocelot.Cpu.Execute (runUntilFrame, step)
 import Ocelot.Joypad (Button (..))
 import Ocelot.Cpu.Registers (regPC)
 import Ocelot.Cpu.State (CpuState (..))
@@ -81,7 +82,10 @@ buttonAt seed frame
 main :: IO ()
 main = do
     args <- getArgs
-    (statePath, rest) <- case args of
+    (watchReset, args1) <- case args of
+        ("--watch-reset" : more) -> pure (True, more)
+        more -> pure (False, more)
+    (statePath, rest) <- case args1 of
         ("--state" : sp : more) -> pure (Just sp, more)
         more -> pure (Nothing, more)
     (path, frames, seed) <- case rest of
@@ -89,7 +93,7 @@ main = do
         [p, n] -> pure (p, read n, 0)
         [p, n, sd] -> pure (p, read n, read sd)
         _ ->
-            putStrLn "usage: hang-probe [--state FILE] <rom> [frames] [input-seed]"
+            putStrLn "usage: hang-probe [--watch-reset] [--state FILE] <rom> [frames] [input-seed]"
                 >> exitFailure
     hSetBuffering stdout LineBuffering
     bytes <- BS.readFile path
@@ -109,7 +113,82 @@ main = do
                     case loadedState of
                         Left err -> putStrLn ("snapshot load failed: " <> show err) >> exitFailure
                         Right () -> printf "resumed from state %s (%d bytes)\n" sp (BS.length blob)
-            run m frames seed
+            if watchReset then watchForReset m frames seed else run m frames seed
+
+{- | Step instruction by instruction watching for the game restarting.
+
+A game that freezes and then starts over has re-entered its own initialisation, so the
+trap is the cart entry point at @0x0100@. Nothing during play jumps there; only boot and
+a deliberate reset do.
+
+Do not trap on the @RST@ vectors, which is the tempting choice. @0xFF@ decodes as
+@RST 38h@, so a fetch that reads @0xFF@ lands at @0x0038@ and that really is the
+signature of the CPU executing unmapped memory. But games use the low vectors as
+compact one-byte calls, and Adventure Island uses several: @0x0000@ holds
+@POP HL; RST 20h; LD H,D; LD L,E; JP (HL)@, a jump-table dispatcher, and @0x0010@ holds
+a 16-bit add helper ending in @RET@. Trapping @0x0000@ here reports normal execution on
+the first eligible frame. Check what a ROM actually stores at a vector before treating
+it as garbage; @0xFF@-filled means unmapped, real instructions mean it is a routine.
+
+What makes a trap actionable is the trail: the last 'trailLength' program counters show
+which routine walked off, which a cycle count alone never tells you.
+
+Boot legitimately passes through the entry point, so the first 'settleFrames' frames are
+ignored.
+-}
+trailLength :: Int
+trailLength = 48
+
+settleFrames :: Int
+settleFrames = 120
+
+watchForReset :: Machine -> Int -> Int -> IO ()
+watchForReset m frames seed = do
+    trail <- MV.replicate trailLength 0
+    slot <- newIORef (0 :: Int)
+    let remember !pc = do
+            i <- readIORef slot
+            MV.write trail (i `mod` trailLength) pc
+            writeIORef slot (i + 1)
+        recent = do
+            i <- readIORef slot
+            let n = min i trailLength
+                order = [(i - n + k) `mod` trailLength | k <- [0 .. n - 1]]
+            mapM (MV.read trail) order
+        frameLoop !frame
+            | frame >= frames = putStrLn "no restart seen" >> pure ()
+            | otherwise = do
+                mapM_ (\btn -> Bus.setButton btn False (machineBus m)) (buttonAt seed (frame - 1))
+                mapM_ (\btn -> Bus.setButton btn True (machineBus m)) (buttonAt seed frame)
+                cap <- (+ 32) <$> Bus.cpuMCyclesPerLcdFrame (machineBus m)
+                trapped <- instrLoop frame 0 cap
+                if trapped then pure () else frameLoop (frame + 1)
+        instrLoop !frame !used !cap
+            | used >= cap = pure False
+            | otherwise = do
+                before <- readIORef (machineCpu m)
+                let c0 = cpuCycles before
+                step m
+                cpu <- readIORef (machineCpu m)
+                let pc = regPC (cpuRegs cpu)
+                    used' = used + fromIntegral (cpuCycles cpu - c0)
+                remember pc
+                if frame > settleFrames && pc == 0x0100
+                    then do
+                        printf "TRAP at frame %d: pc=%04X (%s)\n" frame pc (trapName pc)
+                        pcs <- recent
+                        putStrLn ("  last " <> show (length pcs) <> " PCs, oldest first:")
+                        putStrLn ("    " <> unwords (map (printf "%04X") pcs))
+                        reportState m
+                        pure True
+                    else do
+                        ready <- Bus.takeFrameReady (machineBus m)
+                        if ready then pure False else instrLoop frame used' cap
+    frameLoop 0
+
+trapName :: Word16 -> String
+trapName 0x0100 = "cart entry point, i.e. the game restarted"
+trapName _ = "unexpected"
 
 run :: Machine -> Int -> Int -> IO ()
 run m frames seed = do

@@ -108,9 +108,12 @@ spec = do
             n <- Web.stalledFrames session
             n `shouldBe` 0
 
-        it "keeps the threshold well clear of a momentary still frame" $
-            -- Ten seconds at ~60 fps. A menu that pauses for a second must not trip it.
-            Web.stallThreshold `shouldSatisfy` (>= 300)
+        it "brackets the threshold between a brief pause and a freeze that ends in a restart" $ do
+            -- Above ~2s so a momentary pause during play stays quiet, and well under 10s
+            -- because a game that freezes and then restarts is only still for a moment;
+            -- too long a threshold never fires for that symptom at all.
+            Web.stallThreshold `shouldSatisfy` (>= 120)
+            Web.stallThreshold `shouldSatisfy` (<= 300)
 
         it "reports machine state as text a user can paste into a bug report" $ do
             let rom = synthNoMbcRom BS.empty

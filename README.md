@@ -162,13 +162,13 @@ Shift+F12=record GIF, P=perf overlay, O=open ROM, R=reset, Escape=quit.
 
 #### Reporting a Frozen Game
 
-The web build watches for the picture going still. After about ten seconds unchanged it
+The web build watches for the picture going still. After about three seconds unchanged it
 writes a line to the browser console (F12) naming the CPU's program counter, which
 interrupts are pending, the LCD state, and the cartridge's bank selects:
 
 ```
-[ocelot] picture unchanged for 600 frames. If the game is actually frozen, please include this state:
-pc=025A sp=CFFF a=00 f=80 hl=DE79 halted=False ime=True if=F3 ie=09 pending=01 lcdc=87 stat=C0 ly=144 lyc=128 hdma5=FF double=True mbc=0500070000 stalledFrames=600
+[ocelot] picture unchanged for 180 frames. If the game is actually frozen, please include this state:
+pc=025A sp=CFFF a=00 f=80 hl=DE79 halted=False ime=True if=F3 ie=09 pending=01 lcdc=87 stat=C0 ly=144 lyc=128 hdma5=FF double=True mbc=0500070000 stalledFrames=180
 ```
 
 Paste that into a bug report along with the game's name. It is deliberately only a

@@ -101,16 +101,21 @@ crossing reports once per stall episode rather than once per frame.
 stalledFrames :: WebSession -> IO Int
 stalledFrames = readIORef . wsStalledFrames
 
-{- | Frames of unchanging picture that count as a stall: about ten seconds.
+{- | Frames of unchanging picture that count as a stall: about three seconds.
 
-Deliberately generous, because a static picture is not the same thing as a hang. A
-title screen, a pause menu, or any game waiting on input holds a still frame
-indefinitely and is perfectly healthy, so this cannot be treated as an error; it is
-a cue to gather diagnostics. Ten seconds is long enough that normal menus rarely
-trip it and short enough to catch a freeze while the user is still watching.
+A still picture is not the same thing as a hang, so this can never be treated as an
+error; it is a cue to gather diagnostics. The first version used ten seconds to keep
+menus quiet, which turned out to be too long for the symptom that matters: a game that
+freezes and then restarts is only still for a moment, and a ten-second threshold never
+fires at all.
+
+Three seconds is the compromise. It is longer than any brief pause during play and short
+enough to catch a freeze that ends in a restart. Menus and title screens do trip it, but
+the host latches the report so one still stretch yields one console line, which is a
+tolerable price for catching the real thing.
 -}
 stallThreshold :: Int
-stallThreshold = 600
+stallThreshold = 180
 
 {- | Machine state plus how long the picture has been still, as reportable text.
 
