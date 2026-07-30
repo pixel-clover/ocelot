@@ -20,24 +20,28 @@
 # address below 0xFF00, so an instruction fetch from WRAM or echo RAM read 0xFF, decoded as RST 38h,
 # and wedged at PC=0x38. Modelling the DMA conflict per-bus fixed all nine at once.
 
-# ---------------------------------------------------------------------------
-# mooneye acceptance: PPU mode and STAT timing
+# The five PPU mode and STAT timing ROMs that used to live here are all fixed. Recorded because
+# each was blamed on the wrong thing first, and reading the ROM's own source is what corrected it:
 #
-# intr_2_mode0_timing_sprites is expected: the per-object fetcher stall is not modelled, so lines
-# with sprites report their sprite-free mode 3 length. stat_lyc_onoff most likely wants the delayed
-# LY-to-LYC comparison that SameBoy models with ly_for_comparison.
-# ---------------------------------------------------------------------------
-test/testroms/mooneye/acceptance/ppu/intr_2_mode0_timing_sprites.gb
-test/testroms/mooneye/acceptance/ppu/intr_2_oam_ok_timing.gb
-test/testroms/mooneye/acceptance/ppu/lcdon_timing-GS.gb
-test/testroms/mooneye/acceptance/ppu/lcdon_write_timing-GS.gb
-test/testroms/mooneye/acceptance/ppu/stat_lyc_onoff.gb
+#   * intr_2_mode0_timing_sprites: the per-object fetcher stall was not modelled, so lines with
+#     objects reported their object-free mode 3 length. See 'objectPenaltyDots'. The cost is 6 dots
+#     per object plus one fetch abort per background tile, not the per-object abort Pandocs' formula
+#     reads like in isolation.
+#   * stat_lyc_onoff: blamed on the LY-to-LYC comparison delay. The ROM never measures that delay;
+#     it checks that STAT bit 2 is a latch the comparison clock drives, frozen while the LCD is off.
+#     See 'updateLycLatch'.
+#   * intr_2_oam_ok_timing, lcdon_timing-GS, lcdon_write_timing-GS: the OAM and VRAM blocking
+#     windows were gated on the internal mode, which lines up with neither edge of any of the four
+#     windows. See 'Ppu.cpuCanReadOam' and its neighbours.
 
 # ---------------------------------------------------------------------------
 # mooneye acceptance and misc: other
 # ---------------------------------------------------------------------------
+# boot_sclk_align-dmgABCmgb used to live here. Two faults, not one: the internal serial clock ran
+# eight times too fast (8192 Hz is the bit rate, so a byte is 4096 T-cycles, not 512), and it was
+# counted from the SC write rather than divided off the DIV divider, which is what fixes its edges
+# to the phase held since reset. See 'Bus.stepSerial'.
 test/testroms/mooneye/acceptance/oam_dma_start.gb
-test/testroms/mooneye/acceptance/serial/boot_sclk_align-dmgABCmgb.gb
 test/testroms/mooneye/misc/ppu/vblank_stat_intr-C.gb
 
 # ---------------------------------------------------------------------------

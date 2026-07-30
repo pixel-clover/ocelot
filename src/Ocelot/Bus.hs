@@ -100,12 +100,11 @@ data Bus = Bus
     , busApu :: !ApuState
     , busJoypad :: !JoypadState
     , busSerialOut :: !(IORef [Word8])
-    , busSerialCountdown :: !(IORef Int)
-    -- ^ CPU M-cycles left in an in-flight internal-clock serial transfer,
-    -- or 0 when idle. A transfer shifts 8 bits at 8192 Hz, i.e. 512
-    -- T-cycles = 128 M-cycles. The serial shift clock is derived from the
-    -- CPU clock, so like OAM DMA this counts CPU M-cycles rather than the
-    -- speed-divided peripheral cycles.
+    , busSerialBitsLeft :: !(IORef Int)
+    -- ^ Bits still to shift in an in-flight internal-clock serial transfer,
+    -- or 0 when idle. Bits rather than a cycle countdown because the shift
+    -- clock is a division of the DIV divider rather than something counted
+    -- from the @SC@ write; 'stepSerial' has the reasoning.
     , busFrameReady :: !(IORef Bool)
     , busCgb :: !Bool
     -- ^ True when the host hardware is CGB. Gates CGB-only registers
@@ -269,7 +268,7 @@ fromCartridgeOnHost host bootMode c = do
     apu <- Apu.initial
     joypad <- Joypad.initial
     serial <- newIORef []
-    serialCountdown <- newIORef 0
+    serialBitsLeft <- newIORef 0
     frameReady <- newIORef False
     wramBank <- newIORef 0x01
     key1 <- newIORef 0x00
@@ -365,7 +364,7 @@ fromCartridgeOnHost host bootMode c = do
             , busApu = apu
             , busJoypad = joypad
             , busSerialOut = serial
-            , busSerialCountdown = serialCountdown
+            , busSerialBitsLeft = serialBitsLeft
             , busFrameReady = frameReady
             , busCgb = cgb
             , busCgbDmgCompat = cgb && not cgbCart
@@ -506,29 +505,25 @@ addrInDmaUse addr b
                                 let !cur = src + fromIntegral (min idx 159)
                                 pure (conflictsWithDma (busCgb b) cur addr)
 
-ppuCpuCanAccessVram :: Bus -> IO Bool
-ppuCpuCanAccessVram b = do
-    lcdc <- readIORef (Ppu.ppuLcdc (busPpu b))
-    if not (testBit lcdc 7)
-        then pure True
-        else do
-            mode <- readIORef (Ppu.ppuMode (busPpu b))
-            pure (mode /= Ppu.ModeDrawing)
+-- The blocking windows line up with neither mode boundary, and reads and writes do not
+-- share edges, so the PPU owns all four: see 'Ppu.cpuCanReadOam' and its neighbours.
+ppuCpuCanReadVram :: Bus -> IO Bool
+ppuCpuCanReadVram b = Ppu.cpuCanReadVram (busPpu b)
 
-ppuCpuCanAccessOam :: Bus -> IO Bool
-ppuCpuCanAccessOam b = do
-    lcdc <- readIORef (Ppu.ppuLcdc (busPpu b))
-    if not (testBit lcdc 7)
-        then pure True
-        else do
-            mode <- readIORef (Ppu.ppuMode (busPpu b))
-            pure (mode /= Ppu.ModeOamScan && mode /= Ppu.ModeDrawing)
+ppuCpuCanWriteVram :: Bus -> IO Bool
+ppuCpuCanWriteVram b = Ppu.cpuCanWriteVram (busPpu b)
+
+ppuCpuCanReadOam :: Bus -> IO Bool
+ppuCpuCanReadOam b = Ppu.cpuCanReadOam (busPpu b)
+
+ppuCpuCanWriteOam :: Bus -> IO Bool
+ppuCpuCanWriteOam b = Ppu.cpuCanWriteOam (busPpu b)
 
 read8Raw :: Word16 -> Bus -> IO Word8
 read8Raw addr b
     | addr <= 0x7FFF = bootRomOrCart addr b
     | addr <= 0x9FFF = do
-        accessible <- ppuCpuCanAccessVram b
+        accessible <- ppuCpuCanReadVram b
         if accessible then Ppu.read8 addr (busPpu b) else pure 0xFF
     | addr <= 0xBFFF = Cartridge.read8 addr (busCart b)
     | addr <= 0xCFFF = MV.read (busWram b) (fromIntegral addr .&. 0x0FFF)
@@ -536,7 +531,7 @@ read8Raw addr b
     | addr <= 0xFDFF = readEcho addr b
     | addr <= 0xFE9F = do
         Ppu.triggerOamBug addr (busPpu b)
-        accessible <- ppuCpuCanAccessOam b
+        accessible <- ppuCpuCanReadOam b
         if accessible then Ppu.read8 addr (busPpu b) else pure 0xFF
     | addr <= 0xFEFF = Ppu.triggerOamBug addr (busPpu b) >> pure 0xFF
     | addr == 0xFF00 = Joypad.readP1 (busJoypad b)
@@ -645,7 +640,7 @@ write8Raw :: Word16 -> Word8 -> Bus -> IO ()
 write8Raw addr !v b
     | addr <= 0x7FFF = Cartridge.write8 addr v (busCart b)
     | addr <= 0x9FFF = do
-        accessible <- ppuCpuCanAccessVram b
+        accessible <- ppuCpuCanWriteVram b
         when accessible (Ppu.write8 addr v (busPpu b))
     | addr <= 0xBFFF = Cartridge.write8 addr v (busCart b)
     | addr <= 0xCFFF = MV.write (busWram b) (fromIntegral addr .&. 0x0FFF) v
@@ -653,7 +648,7 @@ write8Raw addr !v b
     | addr <= 0xFDFF = writeEcho addr v b
     | addr <= 0xFE9F = do
         Ppu.triggerOamBug addr (busPpu b)
-        accessible <- ppuCpuCanAccessOam b
+        accessible <- ppuCpuCanWriteOam b
         when accessible (Ppu.write8 addr v (busPpu b))
     | addr <= 0xFEFF = Ppu.triggerOamBug addr (busPpu b)
     | addr == 0xFF00 = Joypad.writeP1 v (busJoypad b)
@@ -686,9 +681,10 @@ selects the internal clock.
 The outgoing byte is captured into the serial output buffer straight away
 (that buffer is the emulator's stand-in for a printer/link peer, and test
 ROMs use it as their verdict channel), but the register-visible side of the
-transfer is timed: @SC@ bit 7 stays set and no interrupt fires until the
-eighth bit has been shifted out, 128 CPU M-cycles later. An external-clock
-transfer has no peer to supply the clock, so it never completes.
+transfer is timed: @SC@ bit 7 stays set and no interrupt fires until all
+eight bits have been shifted out. Arming only loads the bit counter; the
+shifting itself is paced by 'stepSerial'. An external-clock transfer has no
+peer to supply the clock, so it never completes.
 -}
 handleSerialControl :: Word8 -> Bus -> IO ()
 handleSerialControl v b
@@ -697,32 +693,60 @@ handleSerialControl v b
         MV.write (busIo b) 0x02 v
         modifyIORef' (busSerialOut b) (sb :)
         writeIORef
-            (busSerialCountdown b)
-            (if testBit v 0 then serialTransferMCycles else 0)
+            (busSerialBitsLeft b)
+            (if testBit v 0 then serialTransferBits else 0)
     | otherwise = do
         MV.write (busIo b) 0x02 v
-        writeIORef (busSerialCountdown b) 0
+        writeIORef (busSerialBitsLeft b) 0
 
-{- | CPU M-cycles an internal-clock serial transfer takes: 8 bits at
-8192 Hz is 512 T-cycles.
+-- | Bits an internal-clock transfer shifts before it completes.
+serialTransferBits :: Int
+serialTransferBits = 8
+
+{- | T-cycles between shift-clock edges on the internal clock.
+
+The internal serial clock is 8192 Hz, and that is the *bit* rate, so a whole
+byte takes @8 * 512 = 4096@ T-cycles rather than the 512 an earlier reading of
+"8 bits at 8192 Hz" produced here. Getting this eight times too fast is what
+made mooneye @acceptance\/serial\/boot_sclk_align-dmgABCmgb@ fire its interrupt
+inside the first few loop iterations instead of the 145th.
 -}
-serialTransferMCycles :: Int
-serialTransferMCycles = 128
+serialClockPeriod :: Int
+serialClockPeriod = 512
 
 {- | Tick an in-flight serial transfer. On completion the incoming byte
 lands in @SB@ (@0xFF@ with no link peer, since the line idles high), @SC@
 bit 7 clears, and @IF@ bit 3 is raised.
+
+The shift clock is not counted from the @SC@ write. It is a division of the
+same 16-bit divider that drives DIV, so its edges are fixed to the phase the
+divider has held since reset and a transfer's first bit lands on the next
+edge, however soon that is. That is what mooneye
+@acceptance\/serial\/boot_sclk_align-dmgABCmgb@ checks, and its own comment
+spells out: "clock edges align based on the *reset time*, not the time when SC
+is written to".
+
+An edge is a falling edge of divider bit 8, i.e. the divider crossing a
+multiple of 'serialClockPeriod'. 'Bus.advance' has already stepped the timer by
+the time this runs, so the window just covered is @(now - 4n, now]@. The
+counter is 16 bits and 65536 is a whole number of periods, so a wrap adds no
+spurious edge and the subtraction can run in 'Int' without special-casing it.
 -}
 stepSerial :: Int -> Bus -> IO ()
 {-# INLINE stepSerial #-}
 stepSerial n b = do
-    remaining <- readIORef (busSerialCountdown b)
-    when (remaining > 0) $ do
-        let !remaining' = remaining - n
-        if remaining' > 0
-            then writeIORef (busSerialCountdown b) remaining'
+    bitsLeft <- readIORef (busSerialBitsLeft b)
+    when (bitsLeft > 0) $ do
+        ts <- readIORef (busTimer b)
+        let !now = fromIntegral (Timer.timDivider ts) :: Int
+            !before = now - 4 * n
+            !edges =
+                (now `div` serialClockPeriod) - (before `div` serialClockPeriod)
+            !bitsLeft' = bitsLeft - edges
+        if bitsLeft' > 0
+            then writeIORef (busSerialBitsLeft b) bitsLeft'
             else do
-                writeIORef (busSerialCountdown b) 0
+                writeIORef (busSerialBitsLeft b) 0
                 MV.write (busIo b) 0x01 0xFF
                 sc <- MV.read (busIo b) 0x02
                 MV.write (busIo b) 0x02 (sc .&. 0x7F)
@@ -1286,7 +1310,7 @@ readDmaSource :: Word16 -> Bus -> IO Word8
 readDmaSource addr b
     | addr <= 0x7FFF = bootRomOrCart addr b
     | addr <= 0x9FFF = do
-        accessible <- ppuCpuCanAccessVram b
+        accessible <- ppuCpuCanReadVram b
         if accessible then Ppu.read8 addr (busPpu b) else pure 0xFF
     | addr <= 0xBFFF = Cartridge.read8 addr (busCart b)
     | addr <= 0xCFFF = MV.read (busWram b) (fromIntegral addr .&. 0x0FFF)

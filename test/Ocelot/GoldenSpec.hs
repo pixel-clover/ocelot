@@ -583,6 +583,13 @@ mooneyeHost path
     | "boot_div-cgbABCDE.gb" `isSuffixOf` base =
         -- 27 NOPs prelude → 140 T → handoff = 0x2700 - 140 = 0x2674
         AsVariantWithDiv Machine.VarCgbDmg 0x2674
+    -- boot_sclk_align asserts *when* a serial transfer started right after boot completes.
+    -- The shift clock is a division of the same divider DIV runs off, so the completion dot
+    -- depends on the divider phase at handoff exactly as boot_div does, and the ROM only
+    -- claims to pass on DMG ABC and MGB. Without the variant seed it runs on a zeroed
+    -- divider and lands on the wrong loop iteration.
+    | "boot_sclk_align-dmgABCmgb.gb" `isSuffixOf` base =
+        AsVariantWithDiv Machine.VarDmgABC 0xABCC
     -- boot_hwio-* tests sweep the entire I/O page and check post-boot register state.
     -- They need the variant register seed, the right DIV (so $FF04 reads correctly mid-sweep),
     -- I/O state the real boot ROM leaves (IF=$01, DMA=$FF, APU "bing" registers, NR32 mute),

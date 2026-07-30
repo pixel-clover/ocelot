@@ -4,7 +4,7 @@
 module Ocelot.PpuSpec (spec) where
 
 import Control.Monad (forM_)
-import Data.Bits ((.&.))
+import Data.Bits (testBit, (.&.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
 import Data.IORef (readIORef, writeIORef)
@@ -49,6 +49,39 @@ advanceThroughDraw ps = go (0 :: Int)
             if m == ModeHBlank || m == ModeVBlank
                 then pure ()
                 else advance 1 ps >> go (n + 4)
+
+{- | Dot at which the current line first reports mode 0, i.e. the end of mode 3.
+
+'advance' moves four dots at a time, so the result is the first M-cycle boundary
+at or past the true end. Compare against 'roundUpM' of the expected dot.
+-}
+hblankStartDot :: PpuState -> IO Int
+hblankStartDot ps = go 0
+  where
+    go !n = do
+        m <- readMode ps
+        if m == ModeHBlank
+            then pure n
+            else if n > 456 then pure (-1) else advance 1 ps >> go (n + 4)
+
+-- | Round a dot up to the M-cycle granularity 'hblankStartDot' can observe.
+roundUpM :: Int -> Int
+roundUpM d = (d + 3) `div` 4 * 4
+
+{- | A PPU parked mid-VBlank with the LYC interrupt source enabled, which is where
+mooneye @ppu/stat_lyc_onoff@ sets up each of its rounds.
+
+Dot 8 is past the dot-4 point at which a VBlank line starts comparing, so the
+comparison is live and a write to LYC settles the flag immediately.
+-}
+vblankMatching :: IO PpuState
+vblankMatching = do
+    ps <- freshOn
+    writeIORef (ppuStat ps) 0x40
+    writeIORef (ppuLy ps) 144
+    writeIORef (ppuMode ps) ModeVBlank
+    writeIORef (ppuDot ps) 8
+    pure ps
 
 spec :: Spec
 spec = do
@@ -199,6 +232,12 @@ spec = do
         describe "LYC comparison delay" $ do
             let atDot ps d = do
                     writeIORef (ppuDot ps) d
+                    -- Bit 2 is a latch, so moving the dot does not on its own refresh
+                    -- it. Rewriting LYC with the value it already holds runs the
+                    -- comparison clock at this dot without changing what is compared,
+                    -- which is the shape these tests are here to pin down.
+                    lyc <- readIORef (ppuLyc ps)
+                    write8 0xFF45 lyc ps
                     (.&. 0x04) <$> read8 0xFF41 ps
                 withLine ly mode = do
                     ps <- freshOn
@@ -345,9 +384,10 @@ spec = do
             used @advance 0@, which is a no-op ('stepDots' returns immediately on 0) and asserted
             nothing at all.
 
-            Reading STAT is pure, and 'visibleModeBits' reports mode 3 from @start + statModeDelay@,
-            so walking the dot counter across that flip locates @start@ exactly. On the enable line the
-            mode before drawing is 0, not 2, so the flip is 0 -> 3.
+            Reading STAT is pure, and on this line 'visibleModeBits' reports mode 3 from @start@
+            itself ('statModeDelayFor' is zero here), so walking the dot counter across that flip
+            locates @start@ exactly. On the enable line the mode before drawing is 0, not 2, so the
+            flip is 0 -> 3.
             -}
             let statModeAtDot ps d = do
                     writeIORef (ppuDot ps) d
@@ -361,7 +401,7 @@ spec = do
                             | d > 120 = pure (-1)
                             | otherwise = do
                                 v <- statModeAtDot ps d
-                                if v == 3 then pure (d - 4) else probe (d + 1)
+                                if v == 3 then pure d else probe (d + 1)
                     probe 0
 
             it "starts drawing at exactly dot 79 on DMG" $ do
@@ -482,6 +522,85 @@ spec = do
             got <- go 0
             got `shouldBe` ((172 + 6 + 80) + 3) `div` 4 * 4
 
+        {- Objects stall the pixel fetcher, so a line carrying them spends longer in
+        mode 3 than the sprite-free 172. Pandocs gives the per-object cost as
+        @11 - min(5, (x + SCX) mod 8)@, and that is what takes mode 3 to its
+        documented 289-dot maximum: ten objects at 11 dots each on top of the 172
+        base and a fine scroll of 7. Drives mooneye @ppu/intr_2_mode0_timing_sprites@.
+        -}
+        it "an object at a tile boundary extends mode 3 by 11 dots" $ do
+            ps <- freshOn
+            writeIORef (ppuLcdc ps) 0x93 -- 'freshOn' plus OBJ enable (bit 1)
+            -- Y=16 puts the object's top row on LY=0; X=8 puts it at screen x=0.
+            writeOam ps [(0, 16), (1, 8), (2, 0), (3, 0)]
+            got <- hblankStartDot ps
+            got `shouldBe` roundUpM (80 + 172 + 11)
+
+        it "an object's penalty shrinks as its fine offset into the tile grows" $ do
+            -- The penalty falls by one dot per unit of @(x + SCX) mod 8@ until it
+            -- bottoms out at 6, while the fine scroll adds that same amount back.
+            -- The two therefore cancel up to SCX=5 and only then start to diverge.
+            forM_ (zip [0 .. 7 :: Word8] [11, 11, 11, 11, 11, 11, 12, 13]) $
+                \(scx, extra) -> do
+                    ps <- freshOn
+                    writeIORef (ppuLcdc ps) 0x93
+                    writeIORef (ppuScx ps) scx
+                    writeOam ps [(0, 16), (1, 8), (2, 0), (3, 0)]
+                    got <- hblankStartDot ps
+                    (scx, got) `shouldBe` (scx, roundUpM (80 + 172 + extra))
+
+        it "ten objects on a tile boundary reach the 289-dot mode 3 maximum" $ do
+            ps <- freshOn
+            writeIORef (ppuLcdc ps) 0x93
+            writeIORef (ppuScx ps) 7
+            -- Ten objects, each on a distinct tile boundary so each pays the full 11.
+            -- The eleventh is dropped by the ten-per-line OAM scan limit and so is
+            -- free, which is what pins the cap rather than the object count.
+            writeOam ps $
+                concat
+                    [ [(i * 4, 16), (i * 4 + 1, fromIntegral (8 + 8 * i + 1)), (i * 4 + 2, 0), (i * 4 + 3, 0)]
+                    | i <- [0 .. 10]
+                    ]
+            got <- hblankStartDot ps
+            got `shouldBe` roundUpM (80 + 289)
+
+        {- The abort is charged per background tile, not per object. Charging it per
+        object would make this case 110 dots instead of 65, and the ROM's
+        @testcase 16, 0,0,...@ line rejects that.
+        -}
+        it "objects sharing a background tile pay the fetch abort only once" $ do
+            ps <- freshOn
+            writeIORef (ppuLcdc ps) 0x93
+            -- Ten objects stacked at OAM X=0: 6 dots each plus a single 5-dot abort.
+            writeOam ps $
+                concat
+                    [ [(i * 4, 16), (i * 4 + 1, 0), (i * 4 + 2, 0), (i * 4 + 3, 0)]
+                    | i <- [0 .. 9]
+                    ]
+            got <- hblankStartDot ps
+            got `shouldBe` roundUpM (80 + 172 + 65)
+
+        it "objects off the right edge cost nothing but still fill scan slots" $ do
+            ps <- freshOn
+            writeIORef (ppuLcdc ps) 0x93
+            -- OAM X=168 puts an object at screen x=160, entirely past the last pixel.
+            -- Ten of them are free, and they leave no slot for the eleventh, which sits
+            -- on screen and would otherwise have cost 11 dots.
+            writeOam ps $
+                concat
+                    [ [(i * 4, 16), (i * 4 + 1, 168), (i * 4 + 2, 0), (i * 4 + 3, 0)]
+                    | i <- [0 .. 9]
+                    ]
+                    ++ [(40, 16), (41, 8), (42, 0), (43, 0)]
+            got <- hblankStartDot ps
+            got `shouldBe` roundUpM (80 + 172)
+
+        it "objects cost nothing while LCDC bit 1 leaves them disabled" $ do
+            ps <- freshOn
+            writeOam ps [(0, 16), (1, 8), (2, 0), (3, 0)]
+            got <- hblankStartDot ps
+            got `shouldBe` roundUpM (80 + 172)
+
         it "after a full scanline, LY := 1, Mode 2" $ do
             ps <- freshOn
             _ <- advance 114 ps
@@ -599,6 +718,48 @@ spec = do
             v <- read8 0xFF41 ps
             v `shouldBe` 0x86
 
+        {- The coincidence bit is a latch the comparison clock writes, not something
+        recomputed when the CPU reads STAT. With the LCD off that clock is stopped, so
+        the latch holds and a write to LYC cannot move it. All four rounds of mooneye
+        @ppu/stat_lyc_onoff@ turn on this distinction.
+        -}
+        it "retains the LY=LYC flag while the LCD is off, ignoring LYC writes" $ do
+            ps <- vblankMatching
+            write8 0xFF45 144 ps -- LYC = LY, so the flag sets while the clock runs
+            onMatched <- read8 0xFF41 ps
+            write8 0xFF40 0x11 ps -- LCD off
+            offRetained <- read8 0xFF41 ps
+            write8 0xFF45 1 ps -- clock stopped, so this must not clear the flag
+            offAfterLyc <- read8 0xFF41 ps
+            map (`testBit` 2) [onMatched, offRetained, offAfterLyc]
+                `shouldBe` [True, True, True]
+
+        it "re-runs the comparison against LY=0 when the LCD comes back on" $ do
+            -- Round 4: the flag is clear across the LCD-off period and the enable itself
+            -- sets it, which is a rising edge on the STAT line and so an interrupt.
+            ps <- vblankMatching
+            write8 0xFF45 0 ps -- LYC=0 against LY=144: no match
+            write8 0xFF40 0x11 ps
+            _ <- takePendingStatIrq ps
+            write8 0xFF40 0x91 ps -- enable: the comparison is now LY=0 vs LYC=0
+            irq <- takePendingStatIrq ps
+            stat <- read8 0xFF41 ps
+            (irq, testBit stat 2) `shouldBe` (True, True)
+
+        it "raises no IRQ when the LCD comes back on with the flag already set" $ do
+            -- Round 2: LY=144 vs LYC=144 sets the flag, the LCD goes off holding it, and
+            -- the enable moves the comparison to LY=0 vs LYC=0, which also matches. The
+            -- interrupt line never falls, so there is no edge to report.
+            ps <- vblankMatching
+            write8 0xFF45 144 ps
+            write8 0xFF40 0x11 ps
+            write8 0xFF45 0 ps
+            _ <- takePendingStatIrq ps
+            write8 0xFF40 0x91 ps
+            irq <- takePendingStatIrq ps
+            stat <- read8 0xFF41 ps
+            (irq, testBit stat 2) `shouldBe` (False, True)
+
         it "LY is read-only" $ do
             ps <- freshOn
             writeIORef (ppuLy ps) 0x10
@@ -661,7 +822,7 @@ spec = do
             writeIORef (ppuLcdc ps) 0x93
             writeIORef (ppuObp0 ps) 0xE4
             writeIORef (ppuBgp ps) 0xE4
-            _ <- advance ((80 + 172) `div` 4) ps
+            advanceThroughDraw ps
             fb <- framebuffer ps
             fb V.! 8 `shouldBe` 0x03
             fb V.! 15 `shouldBe` 0x03
@@ -674,7 +835,7 @@ spec = do
             writeIORef (ppuLcdc ps) 0x91
             writeIORef (ppuObp0 ps) 0xE4
             writeIORef (ppuBgp ps) 0xE4
-            _ <- advance ((80 + 172) `div` 4) ps
+            advanceThroughDraw ps
             fb <- framebuffer ps
             fb V.! 8 `shouldBe` 0x00
 
@@ -685,7 +846,7 @@ spec = do
             writeIORef (ppuLcdc ps) 0x93
             writeIORef (ppuObp0 ps) 0xE4
             writeIORef (ppuBgp ps) 0xE4
-            _ <- advance ((80 + 172) `div` 4) ps
+            advanceThroughDraw ps
             fb <- framebuffer ps
             fb V.! 0 `shouldBe` 0x01
 
@@ -728,7 +889,7 @@ spec = do
             writeIORef (ppuLcdc ps) 0x93
             writeIORef (ppuObp0 ps) 0xE4 -- Identity
             writeIORef (ppuBgp ps) 0xE4
-            _ <- advance ((80 + 172) `div` 4) ps
+            advanceThroughDraw ps
             fb <- framebuffer ps
             -- Pixel 14 is covered by all three sprites. With leftmost-X priority,
             -- OAM 2 (X=8, tile 3 -> color 3) must win.

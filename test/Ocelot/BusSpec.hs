@@ -97,35 +97,103 @@ spec = do
             v `shouldBe` 0x00
 
     describe "PPU access gating" $ do
-        it "blocks CPU VRAM reads and writes during mode 3" $ do
-            b <- emptyBus
-            let ppu = Bus.busPpu b
-            writeIORef (Ppu.ppuLcdc ppu) 0x80
-            write8 0x8000 0x12 b
-            writeIORef (Ppu.ppuMode ppu) Ppu.ModeDrawing
-            blocked <- read8 0x8000 b
-            write8 0x8000 0x34 b
-            writeIORef (Ppu.ppuMode ppu) Ppu.ModeHBlank
-            visible <- read8 0x8000 b
-            blocked `shouldBe` 0xFF
-            visible `shouldBe` 0x12
+        {- The windows are driven by the dot, not by the mode, because they line up with
+        neither mode boundary. OAM shuts one dot before STAT reports mode 2, VRAM four dots
+        before STAT reports mode 3, and both reopen with the mode-0 report, four dots after
+        mode 3 has internally ended. mooneye @ppu/lcdon_timing-GS@ pins all three edges.
 
-        it "blocks CPU OAM reads and writes during mode 2 and mode 3" $ do
+        'resyncMode3End' puts mode 3 at dots 80..251 here (no fine scroll, window, or
+        objects), so the windows reopen at dot 256.
+        -}
+        let openLine ppu = do
+                writeIORef (Ppu.ppuLcdc ppu) 0x80
+                writeIORef (Ppu.ppuLy ppu) 0
+                writeIORef (Ppu.ppuLcdOnFirstLine ppu) False
+                Ppu.resyncMode3End ppu
+
+        {- Reads and writes do not share edges either, so each window is probed on its own.
+        Blocking is observed by reading back @0xFF@; write blocking by writing a fresh
+        value and finding the old one still there once the window reopens.
+        -}
+        let readableAt ppu dot addr b = do
+                writeIORef (Ppu.ppuDot ppu) dot
+                (/= 0xFF) <$> read8 addr b
+            writableAt ppu dot addr b = do
+                orig <- writeIORef (Ppu.ppuDot ppu) 300 >> read8 addr b
+                writeIORef (Ppu.ppuDot ppu) dot
+                write8 addr (orig + 1) b
+                writeIORef (Ppu.ppuDot ppu) 300
+                now <- read8 addr b
+                pure (now == orig + 1)
+
+        it "blocks CPU VRAM reads from the internal mode 3 through the report tail" $ do
             b <- emptyBus
             let ppu = Bus.busPpu b
-            writeIORef (Ppu.ppuLcdc ppu) 0x80
-            writeIORef (Ppu.ppuMode ppu) Ppu.ModeHBlank
-            write8 0xFE00 0x55 b
-            writeIORef (Ppu.ppuMode ppu) Ppu.ModeOamScan
-            blockedMode2 <- read8 0xFE00 b
-            write8 0xFE00 0x66 b
-            writeIORef (Ppu.ppuMode ppu) Ppu.ModeDrawing
-            blockedMode3 <- read8 0xFE00 b
-            writeIORef (Ppu.ppuMode ppu) Ppu.ModeHBlank
-            visible <- read8 0xFE00 b
-            blockedMode2 `shouldBe` 0xFF
-            blockedMode3 `shouldBe` 0xFF
-            visible `shouldBe` 0x55
+            openLine ppu
+            -- Mode 2, internal mode 3, the report tail past mode 3, and reopened.
+            mapM_
+                ( \(dot, want) -> do
+                    got <- readableAt ppu dot 0x8000 b
+                    (dot, got) `shouldBe` (dot, want)
+                )
+                [(0, True), (79, True), (80, False), (252, False), (256, True)]
+
+        it "blocks CPU VRAM writes only from the reported mode 3, four dots later" $ do
+            b <- emptyBus
+            let ppu = Bus.busPpu b
+            openLine ppu
+            mapM_
+                ( \(dot, want) -> do
+                    got <- writableAt ppu dot 0x8000 b
+                    (dot, got) `shouldBe` (dot, want)
+                )
+                -- Dots 80..83 read back 0xFF yet still accept writes.
+                [(0, True), (80, True), (83, True), (84, False), (252, False), (256, True)]
+
+        it "blocks CPU OAM reads from dot 3 through the mode 3 report tail" $ do
+            b <- emptyBus
+            let ppu = Bus.busPpu b
+            openLine ppu
+            mapM_
+                ( \(dot, want) -> do
+                    got <- readableAt ppu dot 0xFE00 b
+                    (dot, got) `shouldBe` (dot, want)
+                )
+                [(0, True), (2, True), (3, False), (100, False), (252, False), (256, True)]
+
+        it "blocks CPU OAM writes from dot 4, reopening for the gap before mode 3" $ do
+            b <- emptyBus
+            let ppu = Bus.busPpu b
+            openLine ppu
+            mapM_
+                ( \(dot, want) -> do
+                    got <- writableAt ppu dot 0xFE00 b
+                    (dot, got) `shouldBe` (dot, want)
+                )
+                -- Dot 3 still writes though it no longer reads, and dots 80..83 write
+                -- again in the gap between the end of mode 2 and the mode 3 report.
+                [ (0, True)
+                , (3, True)
+                , (4, False)
+                , (79, False)
+                , (80, True)
+                , (83, True)
+                , (84, False)
+                , (252, False)
+                , (256, True)
+                ]
+
+        it "leaves OAM and VRAM open throughout VBlank" $ do
+            b <- emptyBus
+            let ppu = Bus.busPpu b
+            openLine ppu
+            writeIORef (Ppu.ppuLy ppu) 144
+            writeIORef (Ppu.ppuDot ppu) 100 -- would be mode 3 on a visible line
+            write8 0xFE00 0x77 b
+            write8 0x8000 0x88 b
+            oam <- read8 0xFE00 b
+            vram <- read8 0x8000 b
+            (oam, vram) `shouldBe` (0x77, 0x88)
 
     describe "serial-port capture" $ do
         it "writing 0x81 to SC after staging SB latches a byte to drainSerial" $ do
@@ -148,10 +216,11 @@ spec = do
             write8 0xFF01 0x41 b
             write8 0xFF02 0x81 b
             during <- read8 0xFF02 b
-            -- An internal-clock transfer shifts 8 bits at 8192 Hz, i.e. 512
-            -- T-cycles = 128 M-cycles. Until then SC bit 7 stays set.
+            -- 8192 Hz is the bit rate, so a byte is 8 * 512 = 4096 T-cycles =
+            -- 1024 M-cycles. A fresh bus starts with the divider at 0, which
+            -- puts the first shift edge a full period in.
             (during .&. 0x80) `shouldBe` 0x80
-            advance 127 b
+            advance 1023 b
             justBefore <- read8 0xFF02 b
             (justBefore .&. 0x80) `shouldBe` 0x80
             advance 1 b
@@ -167,31 +236,50 @@ spec = do
             write8 0xFF02 0x81 b
             during <- read8 0xFF0F b
             (during .&. 0x08) `shouldBe` 0x00
-            advance 128 b
+            advance 1024 b
             after <- read8 0xFF0F b
             (after .&. 0x08) `shouldBe` 0x08
+
+        {- The shift clock is a division of the DIV divider, so its edges sit at
+        fixed divider phases and a transfer armed part-way through a period gets a
+        short first bit. This is the whole point of mooneye
+        @acceptance/serial/boot_sclk_align-dmgABCmgb@.
+        -}
+        it "aligns the first shift edge to the divider, not to the SC write" $ do
+            b <- emptyBus
+            -- Arm at divider 2032, four M-cycles shy of the boundary at 2048, so the
+            -- first bit lands almost at once and the byte finishes nearly a period
+            -- early: 16 + 7 * 512 = 3600 T-cycles, i.e. 900 M rather than 1024.
+            advance 508 b
+            write8 0xFF01 0x41 b
+            write8 0xFF02 0x81 b
+            advance 899 b
+            justBefore <- read8 0xFF0F b
+            advance 1 b
+            after <- read8 0xFF0F b
+            (justBefore .&. 0x08, after .&. 0x08) `shouldBe` (0x00, 0x08)
 
         it "reads back 0xFF from SB after a transfer with no link peer" $ do
             b <- emptyBus
             write8 0xFF01 0x41 b
             write8 0xFF02 0x81 b
-            advance 128 b
+            advance 1024 b
             sb <- read8 0xFF01 b
             sb `shouldBe` 0xFF
 
         it "takes the same CPU M-cycle count in double-speed mode" $ do
-            -- The serial shift clock hangs off the CPU clock, so like OAM DMA
-            -- it sits on the CPU side of the speed divider: a transfer still
-            -- costs 128 CPU M-cycles (half the wall-clock time) in double
-            -- speed. Ticking it at the halved peripheral rate would stall a
-            -- CGB game that busy-waits ~128 cycles for its transfer.
+            -- The shift clock divides the divider, and the divider is clocked from
+            -- the CPU side of the speed switch, so a transfer still costs 1024 CPU
+            -- M-cycles (half the wall-clock time) in double speed. Ticking it at the
+            -- halved peripheral rate would stall a CGB game that busy-waits for its
+            -- transfer.
             b <- cgbBus
             write8 0xFF4D 0x01 b -- Arm the KEY1 speed switch
             switched <- Bus.triggerSpeedSwitch b
             switched `shouldBe` True
             write8 0xFF01 0x41 b
             write8 0xFF02 0x81 b
-            advance 127 b
+            advance 1023 b
             mid <- read8 0xFF0F b
             (mid .&. 0x08) `shouldBe` 0x00
             advance 1 b

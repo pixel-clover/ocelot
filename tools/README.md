@@ -305,10 +305,12 @@ last time it could not be: the acid2 hashes are unchanged and no ROM regressed, 
 LYC-interrupt shift the naive version caused. A test pins the stop specifically (disable it and the
 STAT IRQ arrives at the mode boundary instead), separately from the tests covering the register view.
 
-No ROM verdict moved yet, because the LYC window was only one of the offsets. The remaining ones now
-have somewhere to go: `LY` written +2 into the line, the per-boundary STAT mode-bit offsets, the
-enable-line report at +76, and the per-dot `oam_write_blocked` transitions the OAM bug needs. Each is
-an event dot plus a handler, added and measured one at a time.
+The LYC window moved no ROM verdict on its own, being one offset among several. The others have since
+been dealt with a different way, and mostly without needing new event dots: the STAT mode-bit lag turned
+out to be per-*line* rather than per-boundary (`statModeDelayFor`, zero on the enable line), and the
+memory-window edges are read straight off the dot in `withWindowPhase` rather than latched at events.
+See "Resolved: Five PPU Timing ROMs" below. What is still outstanding here is `LY` written +2 into the
+line, and the per-dot `oam_write_blocked` transitions the OAM bug wants.
 
 ### Why the PPU Line Model Has to Change, Not Its Constants
 
@@ -334,58 +336,56 @@ also that `dmg-acid2` and `cgb-acid2` pend through their own `pendingWith` rathe
 rendering change shows up as a changed hash and **not** as a `REGRESSION` — check them explicitly when
 touching interrupt timing.
 
-### Open: The STAT Mode-Bit Delay Is Not One Constant
+### Resolved: Five PPU Timing ROMs, and Why Tracing Was the Wrong Tool for Them
 
-`statModeDelay = 4` is right on balance but is not right at every boundary, and the two ROMs still failing in this family both trip on it.
-`ppu/stat_lyc_onoff` and `ppu/intr_2_oam_ok_timing` diverge identically: at equal `pc` and `cyc`, SameBoy reads mode 3 where Ocelot still reads mode 2, so
-Ocelot's mode 2 -> 3 report is about a dot late.
+Three sections used to sit here: two "Open" write-ups and one "Superseded" one, all built on
+differential traces against SameBoy. All five ROMs they covered now pass, and **not one was fixed by
+the thing the traces pointed at**. Kept as the standing lesson about when to reach for the tracer.
 
-Lowering the constant to 3 does not help, it hurts: the first divergence moves from line 78 to line **9** on `stat_lyc_onoff` and from 35 to 9 on
-`intr_2_oam_ok_timing`, and at line 9 Ocelot then reports mode 3 where SameBoy reads mode 0. So one boundary wants a shorter delay while another wants the
-longer one, which is the same shape as the VBlank case already carved out as `statVblankModeDelay = 5`. The fix is per-boundary offsets read out of
-SameBoy's `GB_STAT_update` call sites, not a single tuned number. Both values are now pinned by dot-precise tests, so a change either way will show up.
+What the traces said, and what was actually wrong:
 
-### Open: The Enable Line Needs Its STAT Report Decoupled From Its Mode 3 Start
-
-This supersedes the section below, which recorded the sweep as showing "no change". That was wrong, and
-wrong for a known reason: `make tools` relinks against the *installed* library, so a `sed` on
-`src/Ocelot/Ppu.hs` followed by `make tools` traces the **old** code. Always `stack build` first.
-
-Redone properly, `lcdOnPreDrawDots` does move the observable, and the result rules the value out rather
-than in:
-
-| `lcdOnPreDrawDots` | enable STAT mode 3 | first divergence on `lcdon_timing-GS` |
+| ROM | Trace verdict | Actual cause |
 |---|---|---|
-| 78 (current) | +84 dots (SameBoy: +76) | line 83829 |
-| 70 | **+76, exact match** | line **26** (`ly=1` vs `ly=0` at cyc 280) |
+| `stat_lyc_onoff` | mode 2 -> 3 STAT report a dot late | Never measures that report. STAT bit 2 is a *latch* the comparison clock drives, and it must freeze while the LCD is off. |
+| `intr_2_oam_ok_timing` | same, "diverge identically" | OAM read blocking ended at the internal end of mode 3 instead of at the mode-0 report. |
+| `lcdon_timing-GS` | needed `lcdOnPreDrawDots` decoupled from the STAT report | Half right: the enable line carries *no* mode-bit lag. Plus the same OAM/VRAM window bug. |
+| `lcdon_write_timing-GS` | not diagnosed | OAM and VRAM writes have their own window edges, one and four dots off the read edges. |
+| `intr_2_mode0_timing_sprites` | (never traced) | Object penalties were not modelled at all. |
 
-So 70 fixes the STAT report and breaks the LY phase far earlier; 78 does the reverse. No ROM verdict
-distinguishes them and the acid2 hashes survive both. The two constraints are coupled through one
-constant, which is the actual finding: on the enable line, *the dot at which STAT reports mode 3* and
-*the dot at which mode 3 actually starts* are not related by `statModeDelay`. `visibleModeBits` derives
-the former from the latter, so no single value can satisfy both.
+Why the traces misled. A trace reports the *first* instruction where two emulators disagree on some
+sampled column, which is only the bug when the bug is upstream of everything else. For four of these
+the first divergence was an unrelated downstream symptom, and "at equal `pc` and `cyc`, SameBoy reads
+mode 3 where Ocelot reads mode 2" was a true statement about a dot that no assertion in the ROM ever
+looks at. Two whole sections of measurement, including a constant sweep, were spent on it.
 
-The next step is therefore a separate event for the STAT mode-3 report on the enable line, independent
-of the internal mode-3 start, which is what the sub-line event mechanism was built for. Note also the
-reference-point caveat when re-measuring: `cycleWrite` ticks the bus and *then* writes, on both sides,
-so the dot at which `lcdc` first reads enabled is dot 0 and `+N` really is dot N.
+**Read the ROM's source first — mooneye's `.s` files state the expected values as literal tables.**
+That is what closed all five, and it is cheap. `intr_2_mode0_timing_sprites` carries a table of ~100
+object layouts with their expected mode 3 lengths, which is enough to derive the penalty rule outright
+(6 dots per object plus one fetch abort per background *tile*, not per object) and to *reject* the
+per-object reading of Pandocs' formula, which is off by 45 dots on ten stacked objects.
+`lcdon_timing-GS` and `lcdon_write_timing-GS` between them pin all four memory-window edges from 38
+expectations. `stat_lyc_onoff` states its whole model in comments.
 
-### Superseded: The Enable-Line STAT Mode 3 Report Is 8 Dots Late
+Two things made the ROM sources directly usable:
 
-Measured, not inferred, and recorded because the plausible-looking fix does **not** work. On `lcdon_timing-GS.gb`, taking the instruction where `lcdc`
-first reads enabled as the reference, SameBoy reports STAT mode 3 at **+76** dots and Ocelot at **+84**. Both read mode 0 at +68, which bounds SameBoy's
-transition to `(68, 76]` against Ocelot's 83 (its internal mode-3 start of 79 plus `statModeDelay`).
+- **The ROM records its own results in HRAM.** `lcdon_timing-GS` keeps 24 readings at `$FF80` plus
+  `fail_round` / `fail_expect` / `fail_actual` at `$FF98`; `lcdon_write_timing-GS` puts its
+  `fail_round` triple at `$FF80`. A throwaway `stack runghc` script that runs the ROM and dumps that
+  range names the failing entry exactly, with no tracer and no SameBoy build. Note the two ROMs use
+  *different* HRAM layouts, so read each `.ramsection` rather than assuming.
+- **The 449-dot enable line is what makes odd dots observable.** DMG's post-enable line is not a
+  multiple of 4, so every later line is sampled at dots 3 mod 4 instead of 0 mod 4. That is the only
+  reason a one-dot window like "OAM reads stop at dot 3 but writes continue to dot 4" is reachable
+  from an M-cycle-granular CPU at all, and it is why these ROMs can pin edges finer than Ocelot's
+  4-dot PPU step would suggest.
 
-The obvious reading is that `lcdOnPreDrawDots` double-counts the 4-dot STAT delay, since 78 came from SameBoy's STAT-visible dot while it feeds Ocelot's
-*internal* start. That reading is not sufficient: setting it to 70, which should land the report at 75, moved the internal start as intended (the
-dot-precise unit tests flipped) and left the traced transition at +84, unchanged. So the mapping from that constant to the observed report is not a simple
-`start + statModeDelay`, and the mechanism is not yet understood. Reverted rather than guessed at.
+SameBoy's source stayed valuable throughout; it was the *tracer* that was the wrong tool. Reading
+`display.c` dot by dot is what supplied the four window edges and the enable-line `STAT |= 3` dot once
+the ROM had said which dot to go look at.
 
-Three notes for whoever picks it up. `lcdon_timing-GS` wants the report at or before +76, while blargg `oam_bug/1-lcd_sync` *failed* when this constant
-was 76 and passes at 78, so one constant appears unable to satisfy both. SameBoy separates the STAT mode-3 report (its dot 78) from the pixel-fetch start
-(`mode_3_start`, its dot 83) and Ocelot collapses the two into one boundary, which is the most likely reason those oracles pull opposite ways. And the
-`+N` figures are cycles from the *observation* point rather than PPU dots: the LCDC write lands mid-instruction, leaving an unmeasured offset of up to one
-instruction, so do not read `+76` as "dot 76".
+Still true, and still the reason to be careful here: `dmg-acid2` and `cgb-acid2` pend through their
+own `pendingWith` rather than the ratchet, so a rendering change shows up as a changed hash and **not**
+as a `REGRESSION`. Check them explicitly when touching PPU timing.
 
 ### Resolved: LY Boundaries on `mem_timing.gb`
 

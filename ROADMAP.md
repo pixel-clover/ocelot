@@ -68,9 +68,11 @@ This document outlines the features implemented in the Ocelot emulator, and the 
   rather than after the 4 T-cycle reload delay the divider-driven edge uses: a register write lands part-way through its M-cycle on hardware, so `IF`
   is up by the instruction boundary, whereas `cycleWrite` ticks and then writes and leaves no cycle to run the reload state machine in. Mooneye timer
   category: 13/13.
-- [x] Serial transfer (SB/SC) with a timed internal clock: 8 bits over 128 CPU M-cycles, then SB reads 0xFF (line idles high with no peer),
-  SC bit 7 clears, and IF bit 3 is raised. The outgoing byte is also captured to a buffer for blargg test ROM output. External-clock
-  transfers never complete, since there is no peer to supply the clock.
+- [x] Serial transfer (SB/SC) with a divider-derived internal clock: 8 bits at one bit per 512 T-cycles (8192 Hz is the bit rate, so a whole byte is
+  4096 T-cycles), then SB reads 0xFF (line idles high with no peer), SC bit 7 clears, and IF bit 3 is raised. The shift clock is a division of the same
+  16-bit divider DIV runs off rather than a countdown from the SC write, so its edges sit at the phase held since reset and a transfer's first bit lands
+  on the next edge however soon that is. The outgoing byte is also captured to a buffer for blargg test ROM output. External-clock transfers never
+  complete, since there is no peer to supply the clock. Passes mooneye `acceptance/serial/boot_sclk_align-dmgABCmgb`.
 - [ ] Link cable peer mode (deferred; see Future Goals)
 
 ### Picture Processing Unit
@@ -90,19 +92,22 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] STAT interrupt sources (LYC, mode 0/1/2) with edge-triggered IF latch
 - [x] Variable mode 3 length: the `SCX mod 8` fine-scroll discard and the 6-dot window-activation restart extend mode 3, and mode 0 absorbs
   the difference so the scanline stays 456 dots. Passes mooneye `acceptance/ppu/hblank_ly_scx_timing-GS`.
-- [ ] Per-object fetcher stall in mode 3 length (6-11 dots each); lines with sprites currently report their sprite-free length, which is what
-  leaves mooneye `acceptance/ppu/intr_2_mode0_timing_sprites` pending
+- [x] Per-object fetcher stall in mode 3 length: 6 dots per object, plus one fetch abort of `max(0, 5 - ((x + SCX) mod 8))` dots per background tile
+  holding objects, which puts the maximum at the documented 289 dots. Charging the abort per object instead is the reading Pandocs' formula invites and
+  the ROM rejects it. Passes mooneye `acceptance/ppu/intr_2_mode0_timing_sprites`
 - [ ] Mid-scanline LCDC/SCX/WX changes reflected in mode 3 length (the length is latched when mode 3 begins)
 - [ ] Background pixel FIFO and sprite pixel FIFO with mid-line stalls
 - [x] CGB BG and OBJ palette RAM (BCPS/BCPD/OCPS/OCPD) with auto-increment
 - [x] CGB BG attribute byte (priority, V/H flip, VRAM bank, palette)
 - [x] CGB sprite priority resolution (master priority bit, BG-to-OAM, OAM-order)
 - [x] RGB framebuffer alongside the palette-index framebuffer (DMG via fixed shade palette, CGB via BG/OBJ palette RAM with RGB555 decoding)
-- [ ] LCD on/off transitions and STAT/LY behavior on reset. LCD-off freeze is implemented, and the first scanline after the LCD is enabled is modelled:
-  no mode 2 at all (STAT reports mode 0 with OAM and VRAM unblocked), drawing starting at dot 78, and a 448-dot line, each gaining one dot on DMG. That
-  makes LY agree with SameBoy across every sampled instruction on `mem_timing`. The rest of the enable sequence is not audited: mooneye
-  `acceptance/ppu/lcdon_timing-GS` and `lcdon_write_timing-GS` still fail. Both trip on the enable-line STAT mode 3 report, which lands 8 dots later
-  than SameBoy's; `tools/README.md` records the measurement and the fix that was tried and rejected
+- [x] LCD on/off transitions and STAT/LY behavior on reset. The first scanline after an enable has no mode 2 at all (STAT reports mode 0 with OAM and
+  VRAM unblocked), starts drawing at dot 78, runs 448 dots, and gains one dot on each figure on DMG; it also carries no STAT mode-bit lag and compares
+  LY as 0 for its whole length. LCD-off freezes the PPU and holds both the coincidence latch and the STAT interrupt line rather than clearing them.
+  Passes mooneye `acceptance/ppu/lcdon_timing-GS`, `lcdon_write_timing-GS`, and `stat_lyc_onoff`
+- [x] OAM and VRAM blocking windows on their own dot edges rather than the mode boundaries: OAM reads close at dot 3 and writes at dot 4, OAM writes
+  reopen for dots 80-83, VRAM reads close at dot 80 and writes at dot 84, and all four reopen with the mode-0 report. Passes mooneye
+  `acceptance/ppu/intr_2_oam_ok_timing`
 - [x] Validation: dmg-acid2 golden frame hash (FNV-1a baseline locked; cross-check vs reference image at https://github.com/mattcurrie/dmg-acid2 to
   claim conformance)
 - [x] Validation: cgb-acid2 golden frame hash (same caveat; baseline locked from current PPU output)
@@ -190,7 +195,10 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Blargg cgb_sound fully passes (12/12 sub-ROMs)
 - [x] Blargg oam_bug wired in (8 sub-ROMs, aspirational; 6 currently pass: 1-lcd_sync, 2-causes, 3-non_causes, 4-scanline_timing,
   5-timing_bug, 6-timing_no_bug). The DMG OAM bug is implemented; 7-timing_effect and 8-instr_effect still need the separate
-  read-side corruption patterns (SameBoy's `GB_trigger_oam_bug_read`).
+  read-side corruption patterns (SameBoy's `GB_trigger_oam_bug_read`), which are a different kind of work from the rest of this list: four
+  distinct glitch formulas selected by `accessed_oam_row & 0x18`, chosen by chip revision and in places by individual chip, with SameBoy's own
+  comments calling them "extremely revision and instance specific" and one path non-deterministic. 7-timing_effect additionally reaches no
+  verdict at all inside the instruction cap, which is unexplained and probably separate.
 - [x] Blargg halt_bug and interrupt_time both pass (interrupt_time started passing once the timer stopped being halved in CGB double-speed mode)
 - [ ] Promote aspirational blargg ROMs to strict run-to-pass as accuracy is added
 - [x] Mooneye magic-breakpoint runner in `GoldenSpec.hs`: observes BCDEHL after each chunk for the Fibonacci pass tuple or all-`0x42` failure tuple
