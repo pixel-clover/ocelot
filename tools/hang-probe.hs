@@ -26,7 +26,8 @@ module Main (main) where
 
 import Control.Exception (SomeException, displayException, try)
 import qualified Data.ByteString as BS
-import Data.Bits (xor, (.&.))
+import qualified Data.ByteString.Char8 as BSC
+import Data.Bits (xor)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (sortOn)
 import qualified Data.Map.Strict as M
@@ -35,10 +36,10 @@ import qualified Ocelot.Bus as Bus
 import qualified Ocelot.Cartridge as Cartridge
 import qualified Ocelot.Snapshot as Snapshot
 import Ocelot.Cpu.Execute (runUntilFrame)
+import Ocelot.Joypad (Button (..))
 import Ocelot.Cpu.Registers (regPC)
 import Ocelot.Cpu.State (CpuState (..))
-import Ocelot.Joypad (Button (..))
-import Ocelot.Machine (Machine (..), machineFromCartridge)
+import Ocelot.Machine (Machine (..), debugSummary, machineFromCartridge)
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.IO (BufferMode (..), hSetBuffering, stdout)
@@ -174,33 +175,14 @@ run m frames seed = do
                     mapM_ (\(pc, c) -> printf "    pc=%04X  %d\n" pc c) top
             reportState m
 
-{- | Registers worth seeing at a stall. An interrupt the guest is spinning on that never
-arrives shows up as @IF .&. IE == 0@ with the CPU halted; an LCD held off shows up as
-LCDC bit 7 clear, which also explains a capped frame count.
+{- | Machine state at the stall, via the same 'Ocelot.Machine.debugSummary' the web
+watchdog reports, so a report from this tool and one pasted out of the browser console
+have identical fields.
 -}
 reportState :: Machine -> IO ()
 reportState m = do
-    cpu <- readIORef (machineCpu m)
-    let b = machineBus m
-    iflag <- Bus.read8 0xFF0F b
-    ie <- Bus.read8 0xFFFF b
-    lcdc <- Bus.read8 0xFF40 b
-    stat <- Bus.read8 0xFF41 b
-    ly <- Bus.read8 0xFF44 b
-    hdma5 <- Bus.read8 0xFF55 b
-    ds <- Bus.isDoubleSpeed b
-    printf
-        "  pc=%04X halted=%s ime=%s if=%02X ie=%02X (pending=%02X) lcdc=%02X stat=%02X ly=%d hdma5=%02X double=%s\n"
-        (regPC (cpuRegs cpu))
-        (show (cpuHalted cpu))
-        (show (cpuIme cpu))
-        iflag
-        ie
-        (iflag .&. ie)
-        lcdc
-        stat
-        ly
-        hdma5
-        (show ds)
+    summary <- debugSummary m
+    putStrLn ("  " <> BSC.unpack summary)
+
 fnv1a :: BS.ByteString -> Word32
 fnv1a = BS.foldl' (\h b -> (h `xor` fromIntegral b) * 16777619) 2166136261

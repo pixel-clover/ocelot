@@ -26,17 +26,22 @@ module Ocelot.Machine (
     putCpu,
     mapCpu,
     mapCpuRegs,
+    debugSummary,
 ) where
 
+import Data.Bits ((.&.))
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word16, Word8)
 import Ocelot.Bus (Bus)
 import qualified Ocelot.Bus as Bus
 import Ocelot.Cartridge (Cartridge, cartridgeHeader)
+import qualified Ocelot.Cartridge as Cartridge
 import qualified Ocelot.Cartridge.Header as Header
-import Ocelot.Cpu.Registers (Registers)
+import Ocelot.Cpu.Registers (Registers, regA, regF, regH, regL, regPC, regSP)
 import Ocelot.Cpu.State (
     CpuState (..),
     cgbAPostBootCpu,
@@ -51,6 +56,7 @@ import Ocelot.Cpu.State (
  )
 import qualified Ocelot.Ppu as Ppu
 import qualified Ocelot.Timer as Timer
+import Text.Printf (printf)
 
 data Machine = Machine
     { machineCpu :: !(IORef CpuState)
@@ -267,6 +273,56 @@ machineFromCartridgeWithBoot mBoot c = do
         Nothing -> pure ()
     internalAdvance <- newIORef 0
     pure (Machine cpuRef bus internalAdvance)
+
+{- | One-line snapshot of machine state, for diagnostics.
+
+This exists so a host can report *why* a game appears frozen without reaching into
+CPU registers itself: reading 'regPC' and friends from outside "Ocelot.Cpu" is a
+testing-only liberty, and a frontend watchdog is production code. 'Machine' is the
+one place that legitimately sees both the CPU and the bus, so the summary is built
+here and handed out as text.
+
+The fields are chosen for diagnosing a wedged guest. @pending@ is @IF .&. IE@: a
+guest spinning on an interrupt that can never arrive shows 0 there, while
+@halted=True@ with @pending=0@ is a hang the guest cannot exit at all. @lcdc@ bit 7
+clear means the LCD is off, which explains a frozen picture on its own. @mbc@ is the
+cartridge's bank-select state, since a mis-banked ROM is the usual reason a guest
+runs off into unmapped space.
+-}
+debugSummary :: Machine -> IO ByteString
+debugSummary m = do
+    cpu <- readIORef (machineCpu m)
+    let b = machineBus m
+        r = cpuRegs cpu
+    iflag <- Bus.read8 0xFF0F b
+    ie <- Bus.read8 0xFFFF b
+    lcdc <- Bus.read8 0xFF40 b
+    stat <- Bus.read8 0xFF41 b
+    ly <- Bus.read8 0xFF44 b
+    lyc <- Bus.read8 0xFF45 b
+    hdma5 <- Bus.read8 0xFF55 b
+    double <- Bus.isDoubleSpeed b
+    mbc <- Cartridge.dumpMbc (Bus.busCart b)
+    pure . BSC.pack $
+        printf
+            "pc=%04X sp=%04X a=%02X f=%02X hl=%04X halted=%s ime=%s if=%02X ie=%02X pending=%02X lcdc=%02X stat=%02X ly=%d lyc=%d hdma5=%02X double=%s mbc=%s"
+            (regPC r)
+            (regSP r)
+            (regA r)
+            (regF r)
+            ((fromIntegral (regH r) * 256 + fromIntegral (regL r)) :: Int)
+            (show (cpuHalted cpu))
+            (show (cpuIme cpu))
+            iflag
+            ie
+            (iflag .&. ie)
+            lcdc
+            stat
+            ly
+            lyc
+            hdma5
+            (show double)
+            (concatMap (printf "%02X") (BS.unpack mbc) :: String)
 
 readMem :: Word16 -> Machine -> IO Word8
 {-# INLINE readMem #-}

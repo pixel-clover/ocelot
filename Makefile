@@ -206,3 +206,4 @@ web-build: ## Build the browser host and wasm module (needs wasm32-wasi-cabal)
 		echo "Skipping wasm-opt; install Binaryen for an optimized web artifact."; \
 	fi
 	@echo "Web build ready in $(WEB_OUT). Serve that directory over HTTP."
+

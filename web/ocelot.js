@@ -336,6 +336,17 @@ function onWorkerMessage(ev) {
             break;
         }
 
+        case "stallReport":
+            // Not an error: a title screen or pause menu legitimately holds a still
+            // frame. Logged rather than shown, so it is there to copy into a bug report
+            // without interrupting someone who is just sitting on a menu.
+            console.warn(
+                "[ocelot] picture unchanged for " + msg.frames + " frames. " +
+                "If the game is actually frozen, please include this state:\n" +
+                (msg.detail || "(state capture unavailable)")
+            );
+            break;
+
         case "frameError":
             showError(msg.message || "Emulation error");
             stopFrameLoop();

@@ -35,6 +35,7 @@ data SessionHandle = SessionHandle
     , shAudioLen :: !(IORef Int)
     , shStateBuffer :: !(IORef (Ptr Word8, Int))
     , shSaveBuffer :: !(IORef (Ptr Word8, Int))
+    , shDebugBuffer :: !(IORef (Ptr Word8, Int))
     }
 
 data Runtime = Runtime
@@ -129,6 +130,7 @@ destroyHandle handle = do
     when (shAudioPtr handle /= nullPtr) (free (shAudioPtr handle))
     freeBufferRef (shStateBuffer handle)
     freeBufferRef (shSaveBuffer handle)
+    freeBufferRef (shDebugBuffer handle)
 
 drainAudioIntoHandle :: SessionHandle -> IO ()
 drainAudioIntoHandle handle = do
@@ -166,6 +168,7 @@ makeHandle session = do
     audioLen <- newIORef 0
     stateBuffer <- newIORef (nullPtr, 0)
     saveBuffer <- newIORef (nullPtr, 0)
+    debugBuffer <- newIORef (nullPtr, 0)
     pure
         SessionHandle
             { shSession = session
@@ -177,6 +180,7 @@ makeHandle session = do
             , shAudioLen = audioLen
             , shStateBuffer = stateBuffer
             , shSaveBuffer = saveBuffer
+            , shDebugBuffer = debugBuffer
             }
 
 ocelot_alloc :: CSize -> IO (Ptr Word8)
@@ -264,6 +268,52 @@ ocelot_clear_audio_buffer :: CInt -> IO ()
 ocelot_clear_audio_buffer sid = do
     _ <- withSession sid (\handle -> writeIORef (shAudioLen handle) 0)
     pure ()
+
+{- | Consecutive frames whose picture has not changed.
+
+Cheap enough for the host to poll every frame: it is a counter read, no hashing. The
+host watches for it to cross 'ocelot_stall_threshold' and only then asks for
+'ocelot_debug_state', so a stall is reported once rather than once per frame.
+-}
+ocelot_stalled_frames :: CInt -> IO CInt
+ocelot_stalled_frames sid = do
+    found <- lookupSession sid
+    case found of
+        Nothing -> pure 0
+        Just handle -> fromIntegral <$> Web.stalledFrames (shSession handle)
+
+-- | Frame count at which the host should treat an unchanging picture as worth reporting.
+ocelot_stall_threshold :: IO CInt
+ocelot_stall_threshold = pure (fromIntegral Web.stallThreshold)
+
+{- | Capture machine state as text, for the host to show or log. Returns 1 on success.
+
+A frozen picture on its own says nothing about why. This is the difference between an
+unactionable "it hangs" and a report naming the PC, the pending interrupts, the LCD
+state, and the cartridge's bank selects.
+-}
+ocelot_debug_state :: CInt -> IO CInt
+ocelot_debug_state sid = do
+    result <- withSession sid $ \handle -> do
+        captured <- try (Web.debugState (shSession handle)) :: IO (Either SomeException BS.ByteString)
+        case captured of
+            Left err -> setLastError (displayException err) >> pure 0
+            Right text -> replaceBuffer (shDebugBuffer handle) text >> clearLastError >> pure 1
+    pure (fromMaybe 0 result)
+
+ocelot_debug_state_ptr :: CInt -> IO (Ptr Word8)
+ocelot_debug_state_ptr sid = do
+    found <- lookupSession sid
+    case found of
+        Nothing -> pure nullPtr
+        Just handle -> fst <$> readIORef (shDebugBuffer handle)
+
+ocelot_debug_state_len :: CInt -> IO CSize
+ocelot_debug_state_len sid = do
+    found <- lookupSession sid
+    case found of
+        Nothing -> pure 0
+        Just handle -> fromIntegral . snd <$> readIORef (shDebugBuffer handle)
 
 ocelot_save_state :: CInt -> IO CInt
 ocelot_save_state sid = do
@@ -391,6 +441,11 @@ foreign export ccall ocelot_framebuffer_len :: CInt -> IO CSize
 foreign export ccall ocelot_audio_buffer_ptr :: CInt -> IO (Ptr Int16)
 foreign export ccall ocelot_audio_buffer_len :: CInt -> IO CSize
 foreign export ccall ocelot_clear_audio_buffer :: CInt -> IO ()
+foreign export ccall ocelot_stalled_frames :: CInt -> IO CInt
+foreign export ccall ocelot_stall_threshold :: IO CInt
+foreign export ccall ocelot_debug_state :: CInt -> IO CInt
+foreign export ccall ocelot_debug_state_ptr :: CInt -> IO (Ptr Word8)
+foreign export ccall ocelot_debug_state_len :: CInt -> IO CSize
 foreign export ccall ocelot_save_state :: CInt -> IO CInt
 foreign export ccall ocelot_save_state_ptr :: CInt -> IO (Ptr Word8)
 foreign export ccall ocelot_save_state_len :: CInt -> IO CSize

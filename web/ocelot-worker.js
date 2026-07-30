@@ -6,6 +6,10 @@ let running = false;
 const FRAME_INTERVAL = 1000 / 59.7275;
 const FRAME_BYTES = 160 * 144 * 4;
 let lastFrameTime = 0;
+// Set once the watchdog has reported the current stall, cleared when the picture moves
+// again, so one frozen stretch produces one report rather than one per frame.
+let stallReported = false;
+let stallThresholdFrames = 0;
 let tickTimer = null;
 const bufferPool = [];
 const audioBufferPool = [];
@@ -320,6 +324,8 @@ function runFrame() {
         postMessage({type: "audio", buffer: audioBuf, samples: sampleCount, queryLevel}, [audioBuf]);
     }
 
+    checkStallWatchdog(e);
+
     const frameEnd = performance.now();
     lastTiming = {
         runMs: afterRun - frameStart,
@@ -336,6 +342,36 @@ The loop stops itself whenever it is not running rather than idling on a 16 ms
 poll: a paused or ROM-less tab woke the Worker ~60 times a second to do
 nothing. Every path that sets 'running' back to true restarts it, so the
 invariant to preserve is "running implies tickTimer is armed". */
+/*
+ * A frozen picture is the one failure the emulator cannot report by itself: no
+ * exception is thrown and no trap fires, so `ocelot_run_frame` keeps returning
+ * success while the guest sits in a loop that never progresses. This polls a counter
+ * the core maintains (a plain integer read, no hashing on this side) and, when it
+ * crosses the core's threshold, asks for a one-line state capture and forwards it.
+ *
+ * A still picture is NOT an error. Title screens, pause menus, and anything waiting
+ * on input hold a frame indefinitely, which is why this reports diagnostics instead of
+ * stopping the emulator, and why `running` is left alone.
+ */
+function checkStallWatchdog(e) {
+    if (!e.ocelot_stalled_frames) return; // older wasm build without the watchdog
+    if (!stallThresholdFrames) {
+        stallThresholdFrames = e.ocelot_stall_threshold() || 600;
+    }
+    const stalled = e.ocelot_stalled_frames(emu);
+    if (stalled < stallThresholdFrames) {
+        stallReported = false;
+        return;
+    }
+    if (stallReported) return;
+    stallReported = true;
+    let detail = "";
+    if (e.ocelot_debug_state(emu)) {
+        detail = readString(e.ocelot_debug_state_ptr(emu), e.ocelot_debug_state_len(emu));
+    }
+    postMessage({type: "stallReport", frames: stalled, detail});
+}
+
 function workerTick() {
     tickTimer = null;
     if (!running || !emu) return;

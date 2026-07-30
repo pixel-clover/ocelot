@@ -1,3 +1,5 @@
+{-# LANGUAGE BangPatterns #-}
+
 {- | Browser-friendly emulator session helpers.
 
 This module keeps the desktop SDL frontend out of the loop and exposes the
@@ -9,6 +11,9 @@ module Ocelot.Web (
     WebSession,
     loadSession,
     runFrame,
+    stalledFrames,
+    stallThreshold,
+    debugState,
     setButton,
     framebufferRgb,
     framebufferRgbBytes,
@@ -31,19 +36,23 @@ module Ocelot.Web (
     audioSampleRate,
 ) where
 
+import Data.Bits (xor)
 import Data.ByteString (ByteString)
+import qualified Data.ByteString.Char8 as BSC
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Int (Int16)
 import Data.Text (Text)
 import qualified Data.Vector.Unboxed as V
-import Data.Word (Word8)
+import Data.Word (Word32, Word8)
 import Foreign.Ptr (Ptr)
+import Foreign.Storable (peekByteOff)
 import qualified Ocelot.Apu as Apu
 import qualified Ocelot.Bus as Bus
 import qualified Ocelot.Cartridge as Cartridge
 import qualified Ocelot.Cartridge.Header as Header
 import Ocelot.Cpu.Execute (runUntilFrame)
 import Ocelot.Joypad (Button)
-import Ocelot.Machine (Machine (..), machineFromCartridge)
+import Ocelot.Machine (Machine (..), debugSummary, machineFromCartridge)
 import qualified Ocelot.Ppu as Ppu
 import qualified Ocelot.Snapshot as Snapshot
 
@@ -52,6 +61,8 @@ data WebSession = WebSession
     , wsCartridge :: !Cartridge.Cartridge
     , wsTitle :: !Text
     , wsHasBattery :: !Bool
+    , wsFbFingerprint :: !(IORef Word32)
+    , wsStalledFrames :: !(IORef Int)
     }
 
 loadSession :: ByteString -> IO (Either Cartridge.CartridgeError WebSession)
@@ -61,6 +72,8 @@ loadSession romBytes = do
         Left err -> pure (Left err)
         Right cart -> do
             machine <- machineFromCartridge cart
+            fingerprint <- newIORef 0
+            stalled <- newIORef 0
             pure $
                 Right
                     WebSession
@@ -68,13 +81,84 @@ loadSession romBytes = do
                         , wsCartridge = cart
                         , wsTitle = Header.hdrTitle (Cartridge.cartridgeHeader cart)
                         , wsHasBattery = Cartridge.cartridgeHasBattery cart
+                        , wsFbFingerprint = fingerprint
+                        , wsStalledFrames = stalled
                         }
 
 runFrame :: WebSession -> IO ()
 runFrame session = do
     frameCycles <- Bus.cpuMCyclesPerLcdFrame (machineBus (wsMachine session))
     _ <- runUntilFrame (frameCycles + 32) (wsMachine session)
-    pure ()
+    updateStallWatchdog session
+
+{- | Consecutive frames whose picture was byte-identical to the frame before.
+
+A host polls this once per frame; it is a plain counter read, so it costs nothing to
+check. Crossing 'stallThreshold' is the cue to fetch 'debugState' and report it. The
+counter resets to 0 the moment the picture changes, so a host that reports on the
+crossing reports once per stall episode rather than once per frame.
+-}
+stalledFrames :: WebSession -> IO Int
+stalledFrames = readIORef . wsStalledFrames
+
+{- | Frames of unchanging picture that count as a stall: about ten seconds.
+
+Deliberately generous, because a static picture is not the same thing as a hang. A
+title screen, a pause menu, or any game waiting on input holds a still frame
+indefinitely and is perfectly healthy, so this cannot be treated as an error; it is
+a cue to gather diagnostics. Ten seconds is long enough that normal menus rarely
+trip it and short enough to catch a freeze while the user is still watching.
+-}
+stallThreshold :: Int
+stallThreshold = 600
+
+{- | Machine state plus how long the picture has been still, as reportable text.
+
+Pairs 'Ocelot.Machine.debugSummary' with the watchdog's own counter. Intended to be
+handed to the user verbatim: it is the difference between "it froze" and a bug report
+someone can act on.
+-}
+debugState :: WebSession -> IO ByteString
+debugState session = do
+    summary <- debugSummary (wsMachine session)
+    stalled <- readIORef (wsStalledFrames session)
+    pure (summary <> BSC.pack (" stalledFrames=" <> show stalled))
+
+{- | Fold this frame's picture into the stall counter.
+
+The fingerprint samples the RGBA framebuffer rather than hashing all 92160 bytes,
+which keeps the per-frame cost negligible. 'fingerprintStride' is coprime with the
+4-byte pixel stride so the samples walk across all four channels instead of landing
+on the same one every time.
+
+This reads the RGBA buffer, so it only tracks a host that has left 'FbRgba' or
+'FbBoth' selected. A host that switches to 'FbRgb' alone leaves RGBA frozen and would
+see a permanent false stall; the web host sets RGBA, which is what this is for.
+-}
+updateStallWatchdog :: WebSession -> IO ()
+updateStallWatchdog session = do
+    current <- fingerprintFramebuffer session
+    previous <- readIORef (wsFbFingerprint session)
+    writeIORef (wsFbFingerprint session) current
+    if current == previous
+        then do
+            n <- readIORef (wsStalledFrames session)
+            writeIORef (wsStalledFrames session) (n + 1)
+        else writeIORef (wsStalledFrames session) 0
+
+fingerprintStride :: Int
+fingerprintStride = 61
+
+fingerprintFramebuffer :: WebSession -> IO Word32
+fingerprintFramebuffer session = go 0 2166136261
+  where
+    ptr = framebufferRgbaPtr session
+    total = framebufferWidth * framebufferHeight * 4
+    go !i !h
+        | i >= total = pure h
+        | otherwise = do
+            byte <- peekByteOff ptr i :: IO Word8
+            go (i + fingerprintStride) ((h `xor` fromIntegral byte) * 16777619)
 
 setButton :: Button -> Bool -> WebSession -> IO ()
 setButton button pressed session =
