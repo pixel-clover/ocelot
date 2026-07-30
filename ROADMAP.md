@@ -188,7 +188,9 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Blargg mem_timing wired in (3 sub-ROMs, aspirational; reveals memory timing gaps via error codes)
 - [x] Blargg dmg_sound fully passes (12/12 sub-ROMs)
 - [x] Blargg cgb_sound fully passes (12/12 sub-ROMs)
-- [x] Blargg oam_bug wired in (8 sub-ROMs, aspirational; ~2 currently pass: 3-non_causes, 6-timing_no_bug)
+- [x] Blargg oam_bug wired in (8 sub-ROMs, aspirational; 6 currently pass: 1-lcd_sync, 2-causes, 3-non_causes, 4-scanline_timing,
+  5-timing_bug, 6-timing_no_bug). The DMG OAM bug is implemented; 7-timing_effect and 8-instr_effect still need the separate
+  read-side corruption patterns (SameBoy's `GB_trigger_oam_bug_read`).
 - [x] Blargg halt_bug and interrupt_time both pass (interrupt_time started passing once the timer stopped being halved in CGB double-speed mode)
 - [ ] Promote aspirational blargg ROMs to strict run-to-pass as accuracy is added
 - [x] Mooneye magic-breakpoint runner in `GoldenSpec.hs`: observes BCDEHL after each chunk for the Fibonacci pass tuple or all-`0x42` failure tuple

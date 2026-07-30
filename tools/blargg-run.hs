@@ -41,8 +41,8 @@ import System.IO (BufferMode (..), hSetBuffering, stdout)
 
 -- | Matches 'GoldenSpec.blarggCap' and 'GoldenSpec.pollChunk' so a verdict here
 -- means the same thing as a verdict in the test suite.
-cap :: Int
-cap = 80_000_000
+defaultCap :: Int
+defaultCap = 80_000_000
 
 pollChunk :: Int
 pollChunk = 1_000_000
@@ -50,11 +50,14 @@ pollChunk = 1_000_000
 main :: IO ()
 main = do
     args <- getArgs
-    (host, path) <- case args of
-        ["--dmg", p] -> pure (Just False, p)
-        ["--cgb", p] -> pure (Just True, p)
-        [p] -> pure (Nothing, p)
-        _ -> putStrLn "usage: blargg-run [--dmg|--cgb] <rom>" >> exitFailure
+    (host, path, cap) <- case args of
+        ["--dmg", p] -> pure (Just False, p, defaultCap)
+        ["--cgb", p] -> pure (Just True, p, defaultCap)
+        ["--dmg", p, c] -> pure (Just False, p, read c)
+        ["--cgb", p, c] -> pure (Just True, p, read c)
+        [p] -> pure (Nothing, p, defaultCap)
+        [p, c] -> pure (Nothing, p, read c)
+        _ -> putStrLn "usage: blargg-run [--dmg|--cgb] <rom> [m-cycle-cap]" >> exitFailure
     hSetBuffering stdout LineBuffering
     bytes <- BS.readFile path
     r <- Cartridge.loadRom bytes
@@ -65,7 +68,7 @@ main = do
                 Just True -> machineFromCartridgeForcedCgb cart
                 Just False -> machineFromCartridgeForcedDmg cart
                 Nothing -> machineFromCartridge cart
-            (serial, code, ran) <- run m
+            (serial, code, ran) <- run cap m
             putStrLn "--- serial ---"
             putStrLn (BSC.unpack serial)
             putStrLn "--- result ---"
@@ -76,8 +79,8 @@ main = do
 reports a verdict. Mirrors 'GoldenSpec.runUntilMemOrSerialVerdict', except that
 it accumulates and returns the serial text rather than reducing it to a Bool.
 -}
-run :: Machine -> IO (BS.ByteString, Word8, Int)
-run m = go 0 BS.empty
+run :: Int -> Machine -> IO (BS.ByteString, Word8, Int)
+run cap m = go 0 BS.empty
   where
     go !n !serial
         | n >= cap = do

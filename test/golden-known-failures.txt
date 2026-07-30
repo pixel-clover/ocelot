@@ -49,8 +49,5 @@ test/testroms/mooneye/misc/ppu/vblank_stat_intr-C.gb
 #
 # The DMG OAM corruption bug is not modelled at all.
 # ---------------------------------------------------------------------------
-external/gb-test-roms/oam_bug/rom_singles/2-causes.gb
-external/gb-test-roms/oam_bug/rom_singles/4-scanline_timing.gb
-external/gb-test-roms/oam_bug/rom_singles/5-timing_bug.gb
 external/gb-test-roms/oam_bug/rom_singles/7-timing_effect.gb
 external/gb-test-roms/oam_bug/rom_singles/8-instr_effect.gb

@@ -17,6 +17,9 @@ use, so any state divergence they surface is the same divergence production code
 - `probe-ocps.hs` — dumps CGB OBJ palette RAM through the OCPS/OCPD index register.
 - `bench.hs` — throughput benchmark. Drives the SDL frontend's per-frame path and reports the multiple of real hardware speed. See
   "Benchmarking" below.
+- `hang-probe.hs` — runs a commercial ROM through the *web* frontend's exact frame loop and reports where it stops making
+  progress: any exception, plus the first frame after which the picture went static, with a PC histogram. Takes scripted input
+  (`[input-seed]`) and can resume from a save state (`--state FILE`). See "Diagnosing a Game That Freezes" below.
 - `blargg-run.hs` — runs a blargg test ROM and prints its serial text and `0xA000` result code verbatim. The golden suite reduces a blargg ROM to
   pass/fail, which discards the subtest number the ROM itself reports. See "Read the ROM's Own Verdict First" below.
 - `ocelot-trace.hs` and `sameboy-trace.c` — the two halves of the SameBoy differential tracer. See "Differential tracing" below.
@@ -163,6 +166,77 @@ only on a multiple of 4 T-cycles, and fetch times are always even. That makes a 
 8, and a window of 2 indistinguishable from 1. Mutating each constant in *both* directions is what surfaces this: the first pair of
 tests written here passed with the delay set to 2 and to 10, and with the window set to 1, which made them nearly worthless as a
 guard. Check both directions and record which mutants survive, or the ratchet is the only thing actually holding the behavior.
+
+### The DMG OAM Bug Was a Phase Bug, Not a Sub-Cycle Model
+
+This was written off twice as blocked on a per-T-cycle PPU model. It was not. Wiring
+`Ppu.triggerOamBug` into `Bus.read8`/`write8` for `0xFE00-0xFEFF` and into
+`Cpu.Execute`'s address-bus instructions, then moving the scan window 4 dots earlier,
+took blargg `oam_bug` from 3/8 to 6/8 with no regressions anywhere.
+
+What unblocked it was reading `4-scanline_timing.s`, which states the window in
+M-cycles instead of leaving it to be inferred: a trigger at `delay 70224-3` must not
+corrupt, `-2` through `-2+18` must, and `+19` must not. That is a 19 M-cycle (76 dot)
+window inside an 80-dot mode 2. The old model already had the right *width*, because
+`accessedOamRow` returned row 0 for the first 4 dots and `triggerOamBug` ignores rows
+below 8; only the phase was wrong, by exactly one M-cycle. `4-scanline_timing` says
+which way: it passed "just before" and failed "at first corruption", so the window was
+late.
+
+The 76 dots are not a tuned constant. SameBoy's row index is `(index & ~1) * 4 + 8`,
+so it starts at row 8 (row 0 is never scanned, and the glitch needs two rows above it)
+and reaches 160 in the scan's last 4 dots, past OAM's final row at 152. Those 4 dots
+name no row, so nothing there can be corrupted.
+
+The earlier attempt was also judged against a moving target. It regressed
+`6-timing_no_bug`, which passes trivially while nothing corrupts, so "wiring costs a
+ROM" conflated a real regression with the loss of a test that was passing for the wrong
+reason. The enable-line fix that made `1-lcd_sync` pass had also not landed yet, and
+that ROM is exactly the one validating LCD-on-to-scanline sync, which this window hangs
+off. Re-testing a blocked item after a related fix is cheap; assuming the blocker still
+holds is not.
+
+Two subtests remain. `8-instr_effect` fails subtest 3, "POP rp pattern is wrong", after
+subtest 2's INC/DEC pattern started passing: reads need SameBoy's
+`GB_trigger_oam_bug_read` secondary/tertiary/quaternary patterns, which are
+unimplemented, so a read currently gets the write pattern. `7-timing_effect` does not
+settle even at ten times the golden suite's cycle cap. It prints a full OAM dump on
+every iteration where corruption occurred, so it does far more work now than when
+nothing corrupted, but 10x the budget rules out slowness as the whole story and it
+should be treated as an unexplained non-termination rather than a timeout.
+
+One more repeat of an already-documented trap: `make tools` relinks against the
+*installed* library, so a `stack build` alone leaves `bin/tools/*` stale. This bit the
+first measurement of this very change, which reported all eight ROMs unmoved.
+
+### Diagnosing a Game That Freezes
+
+`hang-probe` drives a ROM through the same loop the browser does, `runUntilFrame (cpuMCyclesPerLcdFrame + 32)`, while keeping the
+`Machine` handle that `Ocelot.Web.WebSession` hides. Use it before reaching for the differential tracer, which needs a target
+instruction to bisect towards.
+
+**Scripted input is not optional.** The first version of this tool pressed no buttons, and reported Super Mario Bros. Deluxe,
+Wario Land II, and Final Fantasy Adventure as stalled. All three were fine: disassembling the loops showed each sitting in its
+normal per-frame VBlank sync (`XOR A; LDH (FF91),A; HALT; poll FF91` in SMB Deluxe, whose handler at `0x0C2D` sets `FF91` at
+`0x0CBE`), waiting for a button that never came. A static picture is not a hang. With input, all four CGB titles in `roms/` ran
+10800 frames on two seeds with no stall and no exception.
+
+Where a freeze can come from, and what has been ruled out by reading the code:
+
+* **A Haskell exception.** The web build catches these: `ocelot_run_frame` wraps the frame in `try`, records the message in
+  `ocelot_last_error`, and returns 0; `ocelot-worker.js` posts `frameError` and sets `running = false`; `ocelot.js` calls
+  `showError`. So an exception freezes the picture *permanently* and does show a message. If a freeze has no message, it is not
+  this. `hang-probe` reports the same exception directly.
+* **The frame loop itself.** Not possible: the cap is a hard bound, there is no early return on `cpuHalted`, and
+  `cpuMCyclesPerLcdFrame` doubles in CGB double-speed. A game holding the LCD off just consumes the cap, which the tool counts
+  and reports.
+* **An unmapped ROM bank.** Both ROM read paths bounds-check and return `0xFF`, so a bad bank cannot throw.
+* **The audio queue growing without bound.** `drainSampleQueueInto` calls `clearSampleQueue` unconditionally, so samples that do
+  not fit the host buffer are dropped rather than retained. A suspended `AudioContext` costs audio, not memory.
+
+A stale `dist/web/ocelot.wasm` deserves ruling out first of all, since nothing in the repo tracks it and `make web-build` is a
+separate step from `make build`. A wasm artifact predating a batch of core fixes behaves exactly like "the web build is worse
+than the desktop build".
 
 ### A Measured Dead End on the VBlank IF Latch
 

@@ -74,8 +74,10 @@ spec = do
         'GB_trigger_oam_bug' glitches the row's first word against the two rows above it with
         @((a^c) & (b^c)) ^ c@ and then copies bytes 2..7 down from the previous row.
 
-        'accessedOamRow' walks 0 for the first 4 dots and then 8 bytes every 4 dots, reaching 152 by
-        the end of mode 2, matching SameBoy advancing it once per pair of objects.
+        'accessedOamRow' names row 8 for the scan's first 4 dots and 8 bytes more every 4 dots after,
+        matching SameBoy advancing it once per pair of objects. Row 0 is never scanned, and the last 4
+        dots of the scan compute a row past the end of OAM, so the corruption window is 76 of the
+        scan's 80 dots. blargg 'oam_bug/4-scanline_timing' measures both of those edges.
         -}
         describe "DMG OAM bug" $ do
             let oamAt ps = mapM (MV.read (ppuOam ps))
@@ -85,10 +87,15 @@ spec = do
                     writeIORef (ppuDot ps) d
                     pure ps
 
-            it "walks the scanned row 8 bytes every 4 dots" $ do
+            it "walks the scanned row 8 bytes every 4 dots, starting at row 8" $ do
                 ps <- inMode2At 0
-                rows <- mapM (\d -> writeIORef (ppuDot ps) d >> accessedOamRow ps) [0, 3, 4, 7, 8, 12, 76]
-                rows `shouldBe` [0, 0, 8, 8, 16, 24, 152]
+                rows <- mapM (\d -> writeIORef (ppuDot ps) d >> accessedOamRow ps) [0, 3, 4, 7, 8, 12, 72]
+                rows `shouldBe` [8, 8, 16, 16, 24, 32, 152]
+
+            it "reports no row for the last 4 dots of the scan, which address past OAM" $ do
+                ps <- inMode2At 0
+                rows <- mapM (\d -> writeIORef (ppuDot ps) d >> accessedOamRow ps) [76, 79]
+                rows `shouldBe` [-1, -1]
 
             it "reports no row outside OAM scan" $ do
                 ps <- freshOn
@@ -98,7 +105,7 @@ spec = do
                 r `shouldBe` (-1)
 
             it "glitches the scanned row's first word and copies bytes 2..7 down" $ do
-                ps <- inMode2At 4 -- row 8
+                ps <- inMode2At 0 -- row 8
                 -- Row 0 spans bytes 0..7, so the word at row-4 (bytes 4,5) is also part of the copy
                 -- source. Keep those two zero so the glitch input stays easy to read off:
                 -- word 0 = 0x00FF, word 4 = 0x0000, word 8 = 0xFF00, all little-endian.
@@ -124,25 +131,25 @@ spec = do
                 copied `shouldBe` source
 
             it "leaves OAM alone for an address outside 0xFE00-0xFEFF" $ do
-                ps <- inMode2At 4
+                ps <- inMode2At 0
                 mapM_ (uncurry (MV.write (ppuOam ps))) [(8, 0x11), (9, 0x22)]
                 triggerOamBug 0xC000 ps
                 v <- oamAt ps [8, 9]
                 v `shouldBe` [0x11, 0x22]
 
             it "leaves OAM alone on CGB" $ do
-                ps <- inMode2At 4
+                ps <- inMode2At 0
                 setCgbMode True ps
                 mapM_ (uncurry (MV.write (ppuOam ps))) [(8, 0x11), (9, 0x22)]
                 triggerOamBug 0xFE00 ps
                 v <- oamAt ps [8, 9]
                 v `shouldBe` [0x11, 0x22]
 
-            it "leaves OAM alone while scanning row 0, which has nothing above it" $ do
-                ps <- inMode2At 0
-                mapM_ (uncurry (MV.write (ppuOam ps))) [(0, 0x11), (1, 0x22)]
+            it "leaves OAM alone in the last 4 dots of the scan, which name no row" $ do
+                ps <- inMode2At 76
+                mapM_ (uncurry (MV.write (ppuOam ps))) [(152, 0x11), (153, 0x22)]
                 triggerOamBug 0xFE00 ps
-                v <- oamAt ps [0, 1]
+                v <- oamAt ps [152, 153]
                 v `shouldBe` [0x11, 0x22]
 
         {- The LY=LYC comparison does not use LY directly. SameBoy keeps a separate

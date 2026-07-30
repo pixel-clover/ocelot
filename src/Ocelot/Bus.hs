@@ -58,6 +58,7 @@ module Ocelot.Bus (
     resetTimerDiv,
     takeStallCycles,
     flushApu,
+    triggerOamBug,
     discardApuDebt,
     installBootRom,
 ) where
@@ -534,9 +535,10 @@ read8Raw addr b
     | addr <= 0xDFFF = readUpperWram addr b
     | addr <= 0xFDFF = readEcho addr b
     | addr <= 0xFE9F = do
+        Ppu.triggerOamBug addr (busPpu b)
         accessible <- ppuCpuCanAccessOam b
         if accessible then Ppu.read8 addr (busPpu b) else pure 0xFF
-    | addr <= 0xFEFF = pure 0xFF
+    | addr <= 0xFEFF = Ppu.triggerOamBug addr (busPpu b) >> pure 0xFF
     | addr == 0xFF00 = Joypad.readP1 (busJoypad b)
     -- IF (0xFF0F): only the low 5 bits are real interrupt flags; the
     -- upper 3 bits always read as 1.
@@ -650,9 +652,10 @@ write8Raw addr !v b
     | addr <= 0xDFFF = writeUpperWram addr v b
     | addr <= 0xFDFF = writeEcho addr v b
     | addr <= 0xFE9F = do
+        Ppu.triggerOamBug addr (busPpu b)
         accessible <- ppuCpuCanAccessOam b
         when accessible (Ppu.write8 addr v (busPpu b))
-    | addr <= 0xFEFF = pure ()
+    | addr <= 0xFEFF = Ppu.triggerOamBug addr (busPpu b)
     | addr == 0xFF00 = Joypad.writeP1 v (busJoypad b)
     | addr == 0xFF02 = handleSerialControl v b
     | addr == 0xFF04 = resetDivider b
@@ -893,6 +896,17 @@ let the debt (and the queued samples it will produce) grow without limit.
 Roughly 1 ms of emulated time: far below one frame, and far above the
 batch size at which the per-call overhead stops mattering.
 -}
+
+{- | Forward a CPU address-bus touch of the OAM range to the PPU's DMG OAM-bug
+model. The PPU decides whether it applies (DMG only, and only while it is scanning
+OAM), so callers pass the address unconditionally.
+
+This exists so 'Ocelot.Cpu.Execute' can report the address-bus instructions that
+corrupt OAM without importing 'Ocelot.Ppu'.
+-}
+triggerOamBug :: Word16 -> Bus -> IO ()
+triggerOamBug addr b = Ppu.triggerOamBug addr (busPpu b)
+
 apuDebtHorizon :: Int
 apuDebtHorizon = 1024
 
@@ -1101,7 +1115,24 @@ startOrStopHdma v b = do
         else do
             writeIORef (busHdmaLen b) lenBytes
             if hblank
-                then writeIORef (busHdmaActive b) True
+                then do
+                    writeIORef (busHdmaActive b) True
+                    -- Hardware does not wait for the next HBlank *entry* when the PPU is
+                    -- already in mode 0: the first chunk goes immediately. SameBoy
+                    -- @Core/memory.c:1729@ sets @hdma_on@ right here when
+                    -- @(STAT & 3) == 0@. Waiting for the entry edge instead left every
+                    -- transfer armed during an HBlank running one chunk behind, which
+                    -- matters because CGB games drive HDMA once per scanline.
+                    --
+                    -- This reads the STAT *register* view, delayed mode bits included,
+                    -- because that is the value SameBoy tests. With the LCD off the mode
+                    -- bits read 0, so a transfer armed then also starts immediately, and
+                    -- then stalls for want of further HBlanks exactly as hardware does.
+                    --
+                    -- SameBoy also excludes its @display_state == 7@, a sub-mode Ocelot's
+                    -- line model has no equivalent for; that edge stays unmodelled.
+                    stat <- Ppu.read8 0xFF41 (busPpu b)
+                    when (stat .&. 0x03 == 0) (stepHdmaHBlank b)
                 else do
                     writeIORef (busHdmaActive b) False
                     runGeneralHdma b

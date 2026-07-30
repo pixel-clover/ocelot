@@ -586,13 +586,24 @@ seedLcdc v ps = do
 -- DMG OAM bug
 ----------------------------------------------------------------------
 
-{- | Byte offset of the OAM row the PPU is currently scanning, or @-1@ when it is
-not scanning.
+{- | Byte offset of the OAM row the PPU is currently scanning, or @-1@ when there is
+no such row.
 
-SameBoy advances @accessed_oam_row@ once per *pair* of objects during mode 2: it
-starts at 0, and after each 2-dot step sets it to @(index & ~1) * 4 + 8@. That
-works out to 0 for the first 4 dots and then 8 more bytes every 4 dots, reaching
-152 by the end of the 80-dot scan, which is the last of OAM's 20 eight-byte rows.
+SameBoy advances @accessed_oam_row@ once per *pair* of objects during mode 2, setting
+it to @(index & ~1) * 4 + 8@. Across the 80-dot scan that is row 8 for the first four
+dots and 8 bytes more every four dots after, so the last row it can name is 152, OAM's
+twentieth and final eight-byte row, reached at dot 72.
+
+Two consequences fall out of that formula, and together they are what make the
+corruption window 76 dots rather than the full 80:
+
+* Row 0 is never scanned, so the first row is 8. The row's first word decays towards
+  the two rows above it, which is why there has to be a row above it at all.
+* The last four dots (76-79) compute row 160, past the end of OAM. They name no row,
+  so nothing can be corrupted there, and this returns @-1@ as it does outside mode 2.
+
+blargg @oam_bug\/4-scanline_timing@ measures both edges directly: a trigger one M-cycle
+before the window must not corrupt, the next 19 must, and the one after must not.
 -}
 accessedOamRow :: PpuState -> IO Int
 accessedOamRow ps = do
@@ -602,10 +613,8 @@ accessedOamRow ps = do
         then pure (-1)
         else do
             dot <- readIORef (ppuDot ps)
-            pure $
-                if dot < 4
-                    then 0
-                    else min 152 (8 * (1 + ((dot - 4) `div` 4)))
+            let !row = 8 * (1 + (dot `div` 4))
+            pure (if row > 152 then -1 else row)
 
 {- | SameBoy's @bitwise_glitch@: how the scanned row's first word decays when the
 CPU touches the OAM address range mid-scan.
@@ -620,17 +629,17 @@ row being scanned, even though the access itself reads @0xFF@. The row's first w
 is glitched against the two rows above it and bytes 2..7 are copied down from the
 previous row. CGB has no OAM bug, and row 0 has nothing above it to decay towards.
 
-__Not wired into the bus or the CPU yet, deliberately.__ This is the write-side
-pattern (SameBoy's @GB_trigger_oam_bug@), and it is correct as far as it goes: with
-it on OAM writes and on the address-bus instructions (16-bit @INC@\/@DEC@, @PUSH@,
-@POP@, @LD SP, HL@) blargg @oam_bug\/2-causes@ passes. But the same wiring breaks
-@6-timing_no_bug@, which checks the cases where the bug must *not* appear, because
-the trigger window here is derived from mode 2 rather than from SameBoy's per-dot
-@oam_write_blocked@ transitions. Reads also need @GB_trigger_oam_bug_read@'s
-separate secondary\/tertiary\/quaternary patterns, which are unimplemented.
+This is SameBoy's @GB_trigger_oam_bug@ write-side pattern. It is wired in two places:
+'Ocelot.Bus' calls it for CPU reads and writes anywhere in @0xFE00-0xFEFF@, and
+'Ocelot.Cpu.Execute' calls it through @Bus.triggerOamBug@ for the address-bus
+instructions that never issue a bus access at all (16-bit @INC@\/@DEC@ and @PUSH@).
+Together those pass blargg @oam_bug@ 2-causes, 4-scanline_timing, and 5-timing_bug
+while keeping 3-non_causes and 6-timing_no_bug green.
 
-So this is groundwork with its own tests, waiting on the per-dot line model. Wiring
-it as-is is a net loss of one ROM; see @tools\/README.md@.
+Still failing: @7-timing_effect@ and @8-instr_effect@. Reads need
+@GB_trigger_oam_bug_read@'s separate secondary\/tertiary\/quaternary corruption
+patterns, which are unimplemented, so a read's effect is currently modelled with the
+write pattern. That is the likely cause of both.
 -}
 triggerOamBug :: Word16 -> PpuState -> IO ()
 triggerOamBug addr ps

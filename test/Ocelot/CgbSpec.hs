@@ -602,14 +602,17 @@ spec = do
             Bus.write8 0xFF52 0x00 b
             Bus.write8 0xFF53 0x10 b
             Bus.write8 0xFF54 0x00 b
-            -- Start HBlank DMA, 2 chunks: HDMA5 = 0x80 | (n-1) = 0x81.
-            Bus.write8 0xFF55 0x81 b
-            -- LCD on, in OamScan, line 0; we will hit HBlank as we advance.
+            -- LCD on, in OamScan, line 0; we will hit HBlank as we advance. This has to be
+            -- set up *before* arming the transfer: arming it while the PPU is in mode 0
+            -- starts the first chunk immediately, which is a different case (covered by
+            -- the next example).
             let ps = Bus.busPpu b
             writeIORef (Ppu.ppuLcdc ps) 0x91
             writeIORef (Ppu.ppuMode ps) Ppu.ModeOamScan
             writeIORef (Ppu.ppuDot ps) 0
             writeIORef (Ppu.ppuLy ps) 0
+            -- Start HBlank DMA, 2 chunks: HDMA5 = 0x80 | (n-1) = 0x81.
+            Bus.write8 0xFF55 0x81 b
             -- Step exactly one full scanline -> one HBlank entry -> one chunk.
             Bus.advance 114 b
             chunk1 <- mapM (\i -> Bus.read8 (0x9000 + fromIntegral i) b) [0 .. 15 :: Int]
@@ -626,6 +629,31 @@ spec = do
             chunk2 `shouldBe` map (+ 0x10) [16 .. 31]
             done <- Bus.read8 0xFF55 b
             done `shouldBe` 0xFF
+
+        it "HDMA HBlank-mode copies the first chunk immediately when armed during HBlank" $ do
+            {- SameBoy 'Core/memory.c:1729' starts the transfer on the spot when HDMA5 is
+            written while (STAT & 3) == 0, rather than waiting for the next HBlank entry
+            edge. Ocelot used to always wait, so a transfer armed inside an HBlank ran a
+            full scanline behind. -}
+            b <- mkBus mkCgbRom
+            mapM_ (\i -> Bus.write8 (0xC000 + fromIntegral i) (fromIntegral i + 0x10) b) [0 .. 31 :: Int]
+            Bus.write8 0xFF51 0xC0 b
+            Bus.write8 0xFF52 0x00 b
+            Bus.write8 0xFF53 0x10 b
+            Bus.write8 0xFF54 0x00 b
+            let ps = Bus.busPpu b
+            writeIORef (Ppu.ppuLcdc ps) 0x91
+            writeIORef (Ppu.ppuMode ps) Ppu.ModeHBlank
+            -- Past 'statModeDelay', so the STAT register already reports mode 0.
+            writeIORef (Ppu.ppuDot ps) 300
+            writeIORef (Ppu.ppuLy ps) 0
+            Bus.write8 0xFF55 0x81 b -- 2 chunks, HBlank mode
+            -- No Bus.advance: the first chunk must already be in VRAM.
+            chunk1 <- mapM (\i -> Bus.read8 (0x9000 + fromIntegral i) b) [0 .. 15 :: Int]
+            chunk1 `shouldBe` map (+ 0x10) [0 .. 15]
+            -- One chunk left, still active (bit 7 clear).
+            mid <- Bus.read8 0xFF55 b
+            mid `shouldBe` 0x00
 
         it "CGB sprite priority follows OAM order, not X position" $ do
             b <- mkBus mkCgbRom
