@@ -238,27 +238,39 @@ A stale `dist/web/ocelot.wasm` deserves ruling out first of all, since nothing i
 separate step from `make build`. A wasm artifact predating a batch of core fixes behaves exactly like "the web build is worse
 than the desktop build".
 
-### A Measured Dead End on the VBlank IF Latch
+### Resolved: The VBlank IF Latch Was the Wrong Lever Entirely
 
-Worth recording so it is not re-attempted blind. On `misc/ppu/vblank_stat_intr-C.gb` the ROM `HALT`s waiting for VBlank; SameBoy enters the handler
-at `cyc=65516` and Ocelot at `cyc=65508`, so Ocelot services it 8 T-cycles early. SameBoy's `display.c` lines 2152-2178 raise it at dot 5 of line 144
-(`LY := 144` two dots in, `IF |= 1` three dots after that), against Ocelot's dot 0; the halt loop only samples pending interrupts on M-cycle
-boundaries, which turns that 5-dot offset into the observed 8.
+`misc/ppu/vblank_stat_intr-C.gb` now passes, and the dead end recorded here is worth keeping because
+the measurement was sound and the conclusion drawn from it was not.
 
-Moving the raise to dot 5 on its own is **wrong**: it breaks `acceptance/ppu/vblank_stat_intr-GS`, which passes today, and does not fix the CGB
-variant it was aimed at. Five ROMs constrain this timing while passing (`blargg interrupt_time`, `vblank_stat_intr-GS`, `intr_1_2_timing-GS`,
-`intr_2_0_timing`, and `stat_irq_blocking`), so the raise dot cannot be moved in isolation.
+What was measured: SameBoy enters the VBlank handler at `cyc=65516` against Ocelot's `cyc=65508`, so
+Ocelot services it 8 T-cycles early, and SameBoy's `display.c` raises `IF |= 1` at dot 5 of line 144
+against Ocelot's dot 0. All true. Moving Ocelot's raise to dot 5 then broke
+`acceptance/ppu/vblank_stat_intr-GS` and fixed nothing, and five passing ROMs pin that dot
+(`blargg interrupt_time`, `vblank_stat_intr-GS`, `intr_1_2_timing-GS`, `intr_2_0_timing`,
+`stat_irq_blocking`). The conclusion drawn was that the raise dot could not move, so the ROM was
+blocked.
 
-Two leads that were not followed up:
+**The raise dot never needed to move.** Reading the ROM source settles it in a couple of minutes:
+the test does not measure when VBlank is raised, it measures the *gap* between the VBlank interrupt
+and the mode-2 STAT interrupt that entering VBlank also raises. The `-C` and `-GS` variants are the
+same test with one number changed — `nops 53/54` against `nops 54/55` — so CGB puts the STAT source
+one M-cycle ahead of the VBlank flag and DMG fires them together. Reproducing that means adding an
+*earlier STAT edge*, which leaves the VBlank dot those five ROMs constrain exactly where it was. See
+`vblankOamStatLeadDots`; four dots earlier is enough, because an M-cycle is all the CPU can resolve.
 
-- SameBoy also delays `LY` itself to dot 2 and the STAT mode bits to dot 5. The STAT half is now modelled (`statVblankModeDelay`), which moved no ROM
-  either way; `LY` still flips at dot 0. Delaying the `LY` register alone was tried separately and reverted (it fixed `oam_bug/1-lcd_sync` but broke
-  `hblank_ly_scx_timing-GS`), so the remaining question is whether the two have to move together.
-- The same SameBoy block raises the *OAM* STAT source on entering VBlank (`display.c:2160` and `:2177`, "Entering VBlank state triggers the OAM
-  interrupt"). That quirk is a plausible reading of what the failing `-C` variant is actually testing, and is unrelated to the raise dot.
+The lead this section already listed as "not followed up" — "the same SameBoy block raises the *OAM*
+STAT source on entering VBlank, and that is a plausible reading of what the `-C` variant is testing"
+— was the answer, sitting one paragraph below a conclusion that said the ROM was blocked. Chase the
+cheap lead before writing off the ROM.
 
-Instruction-granular sampling is still the remaining limit: the callback fires at instruction starts, so a boundary that falls *inside* an
-instruction is only bracketed, not pinpointed. The bracketing above is the way around it.
+Still open from the original two leads: SameBoy delays `LY` itself to dot 2 of line 144, where Ocelot
+flips it at dot 0. Delaying `LY` alone was tried and reverted (it fixed `oam_bug/1-lcd_sync` but broke
+`hblank_ly_scx_timing-GS`), so whether it has to move together with something else is unanswered. No
+ROM currently needs it.
+
+Instruction-granular sampling remains the tracer's limit: the callback fires at instruction starts, so
+a boundary falling *inside* an instruction is bracketed rather than pinpointed.
 
 ### Start With `trace-pc` When a ROM Times Out
 

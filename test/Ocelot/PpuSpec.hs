@@ -601,6 +601,38 @@ spec = do
             got <- hblankStartDot ps
             got `shouldBe` roundUpM (80 + 172)
 
+        {- Entering VBlank asserts the mode-2 STAT source as well as the VBlank flag, and on
+        CGB the STAT source comes first. SameBoy raises it at dot 2 of line 144 and the
+        VBlank flag at dot 5, a gap that straddles an M-cycle boundary and so reads as
+        exactly one cycle to the CPU. mooneye has one test per behaviour, differing by a
+        single @nop@: @acceptance/ppu/vblank_stat_intr-GS@ expects them together,
+        @misc/ppu/vblank_stat_intr-C@ expects STAT one cycle earlier.
+        -}
+        describe "mode-2 STAT source on entry to VBlank" $ do
+            let endOfLine143 cgb = do
+                    ps <- initialPpu
+                    setCgbMode cgb ps
+                    writeIORef (ppuLcdc ps) 0x91
+                    writeIORef (ppuStat ps) 0x20 -- OAM/mode-2 source enabled
+                    writeIORef (ppuMode ps) ModeHBlank
+                    writeIORef (ppuLy ps) 143
+                    writeIORef (ppuDot ps) 448
+                    writeIORef (ppuPrevStatLine ps) False
+                    pure ps
+
+            it "fires one M-cycle before the VBlank flag on CGB" $ do
+                ps <- endOfLine143 True
+                first <- advance 1 ps -- dots 448..452, crossing the early STAT dot
+                second <- advance 1 ps -- line 144 begins and raises VBlank
+                (first .&. 0x02, second .&. 0x01, second .&. 0x02)
+                    `shouldBe` (0x02, 0x01, 0x00)
+
+            it "fires together with the VBlank flag on DMG" $ do
+                ps <- endOfLine143 False
+                first <- advance 1 ps
+                second <- advance 1 ps
+                (first, second .&. 0x01, second .&. 0x02) `shouldBe` (0, 0x01, 0x02)
+
         it "after a full scanline, LY := 1, Mode 2" $ do
             ps <- freshOn
             _ <- advance 114 ps

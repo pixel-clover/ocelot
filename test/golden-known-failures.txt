@@ -36,13 +36,20 @@
 
 # ---------------------------------------------------------------------------
 # mooneye acceptance and misc: other
+#
+# vblank_stat_intr-C used to live here, recorded as a measured dead end because moving the VBlank
+# raise dot broke five passing ROMs. The raise dot was the wrong lever: entering VBlank asserts the
+# mode-2 STAT source too, and on CGB that source comes one M-cycle *first*. Adding an earlier STAT
+# edge leaves the VBlank dot those five ROMs pin exactly where it was. See 'vblankOamStatLeadDots'.
 # ---------------------------------------------------------------------------
 # boot_sclk_align-dmgABCmgb used to live here. Two faults, not one: the internal serial clock ran
 # eight times too fast (8192 Hz is the bit rate, so a byte is 4096 T-cycles, not 512), and it was
 # counted from the SC write rather than divided off the DIV divider, which is what fixes its edges
 # to the phase held since reset. See 'Bus.stepSerial'.
-test/testroms/mooneye/acceptance/oam_dma_start.gb
-test/testroms/mooneye/misc/ppu/vblank_stat_intr-C.gb
+# oam_dma_start used to live here, and was written off as needing sub-T-cycle DMA alignment. It did
+# not: a fresh transfer leaves OAM readable for one M-cycle before its first byte lands, but a
+# transfer retriggered on top of a running one must not, because the transfer it interrupts still
+# holds the bus. See 'busOamDmaRestarting'.
 
 # ---------------------------------------------------------------------------
 # blargg: APU

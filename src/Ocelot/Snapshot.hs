@@ -23,7 +23,7 @@ Format (all little-endian):
 > Bus IE            u8
 > Bus CGB block     u8 wbk + u8 key1
 > Bus HDMA block    u16 src + u16 dst + u32 len + 3x bool
-> Bus OAM DMA       u8 active + u8 starting + u16 src + u8 index
+> Bus OAM DMA       u8 active + u8 starting + u8 restarting + u16 src + u8 index
 > Cart RAM+RTC blob 1x length-prefixed (output of 'extractSave')
 > Cart MBC blob     1x length-prefixed (output of 'dumpMbc')
 
@@ -86,11 +86,14 @@ short-first-line-after-LCD-on latch and realigns the constant with those labels
 in one step. Any blob on disk predating this is a 2 and is rejected, which is
 correct: its PPU section is a byte shorter.
 
+Version 10 adds the OAM-DMA restart latch to the bus section, one byte longer
+again, so a version 9 blob is rejected for the same reason.
+
 Keep this history current. A section change without a bump is what produced the
 gap in the first place.
 -}
 currentVersion :: Word32
-currentVersion = 9
+currentVersion = 10
 
 ----------------------------------------------------------------------
 -- Save
@@ -255,6 +258,7 @@ busSnapshot b = do
     -- captured but never finishing the remaining bytes.
     oamActive <- readIORef (Bus.busOamDmaActive b)
     oamStarting <- readIORef (Bus.busOamDmaStarting b)
+    oamRestarting <- readIORef (Bus.busOamDmaRestarting b)
     oamSrc <- readIORef (Bus.busOamDmaSrc b)
     oamIndex <- readIORef (Bus.busOamDmaIndex b)
     pure $
@@ -273,6 +277,7 @@ busSnapshot b = do
             -- v7: OAM DMA state.
             <> Snap.putBool oamActive
             <> Snap.putBool oamStarting
+            <> Snap.putBool oamRestarting
             <> Snap.putU16 oamSrc
             <> Snap.putU8 (fromIntegral oamIndex)
 
@@ -334,7 +339,7 @@ data BusData = BusData
     , bdHdmaLen :: !Int
     , bdHdmaActive, bdDoubleSpeed :: !Bool
     , bdDoubleSpeedAcc :: !Int
-    , bdOamActive, bdOamStarting :: !Bool
+    , bdOamActive, bdOamStarting, bdOamRestarting :: !Bool
     , bdOamSrc :: !Word16
     , bdOamIndex :: !Int
     }
@@ -505,6 +510,7 @@ decodeBus = do
     dsAcc <- Snap.getU8
     oamActive <- Snap.getBool
     oamStarting <- Snap.getBool
+    oamRestarting <- Snap.getBool
     oamSrc <- Snap.getU16
     oamIndex <- Snap.getU8
     pure
@@ -523,6 +529,7 @@ decodeBus = do
             , bdDoubleSpeedAcc = fromIntegral dsAcc
             , bdOamActive = oamActive
             , bdOamStarting = oamStarting
+            , bdOamRestarting = oamRestarting
             , bdOamSrc = oamSrc
             , bdOamIndex = fromIntegral oamIndex
             }
@@ -587,6 +594,7 @@ applySnapshot sd m = do
     writeIORef (Bus.busDoubleSpeedAcc bus) (bdDoubleSpeedAcc bd)
     writeIORef (Bus.busOamDmaActive bus) (bdOamActive bd)
     writeIORef (Bus.busOamDmaStarting bus) (bdOamStarting bd)
+    writeIORef (Bus.busOamDmaRestarting bus) (bdOamRestarting bd)
     writeIORef (Bus.busOamDmaSrc bus) (bdOamSrc bd)
     writeIORef (Bus.busOamDmaIndex bus) (bdOamIndex bd)
     Cart.loadSave (sdCartRam sd) (Bus.busCart bus)

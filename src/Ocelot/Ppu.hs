@@ -1159,12 +1159,64 @@ boundaryFor ModeOamScan ps = do
         Nothing -> oamScanDotsFor ps
 boundaryFor ModeHBlank ps = do
     preDraw <- inLcdOnPreDrawWindow ps
-    if preDraw then oamScanDotsFor ps else scanlineDotsFor ps
+    if preDraw
+        then oamScanDotsFor ps
+        else do
+            early <- nextEarlyVblankOamDot ps
+            case early of
+                Just d -> pure d
+                Nothing -> scanlineDotsFor ps
 boundaryFor ModeVBlank ps = do
     next <- nextLycEventDot ps
     case next of
         Just d -> pure d
         Nothing -> scanlineDotsFor ps
+
+{- | Dots before the end of line 143 at which a CGB asserts the mode-2 STAT source for
+the VBlank line that is about to start.
+
+Entering VBlank raises that source as well as the VBlank flag, and on CGB it comes first.
+SameBoy raises it at dot 2 of line 144 and the VBlank flag at dot 5 (@display.c:2160@
+against @:2176@). Ocelot raises VBlank at dot 0 of line 144 instead, a line-phase
+difference that five passing ROMs pin down, so the separation is reproduced by moving the
+STAT source earlier rather than the VBlank flag later. Four dots earlier puts it in the
+previous M-cycle, and an M-cycle is the whole of what the CPU can resolve.
+
+DMG raises both together. mooneye carries one test per behaviour and they differ by a
+single @nop@: @acceptance\/ppu\/vblank_stat_intr-GS@ expects the STAT interrupt at the same
+count as the VBlank one, @misc\/ppu\/vblank_stat_intr-C@ one count earlier.
+-}
+vblankOamStatLeadDots :: Int
+vblankOamStatLeadDots = 4
+
+{- | The dot on this line at which 'vblankOamStatLeadDots' opens, if the walk has not
+reached it yet. 'Nothing' on DMG, off line 143, or once it is past.
+-}
+nextEarlyVblankOamDot :: PpuState -> IO (Maybe Int)
+{-# INLINE nextEarlyVblankOamDot #-}
+nextEarlyVblankOamDot ps = do
+    cgb <- readIORef (ppuCgbMode ps)
+    ly <- readIORef (ppuLy ps)
+    if not cgb || ly /= 143
+        then pure Nothing
+        else do
+            dot <- readIORef (ppuDot ps)
+            lineDots <- scanlineDotsFor ps
+            let !d = lineDots - vblankOamStatLeadDots
+            pure (if dot < d then Just d else Nothing)
+
+-- | Whether the early CGB VBlank mode-2 STAT window is already open. Always False on DMG.
+inEarlyVblankOamWindow :: PpuState -> IO Bool
+{-# INLINE inEarlyVblankOamWindow #-}
+inEarlyVblankOamWindow ps = do
+    cgb <- readIORef (ppuCgbMode ps)
+    ly <- readIORef (ppuLy ps)
+    if not cgb || ly /= 143
+        then pure False
+        else do
+            dot <- readIORef (ppuDot ps)
+            lineDots <- scanlineDotsFor ps
+            pure (dot >= lineDots - vblankOamStatLeadDots)
 
 {- | Whether the PPU is in the mode-0-looking window that opens the first
 scanline after the LCD is enabled, before drawing starts.
@@ -1341,7 +1393,15 @@ transition mode ps = case mode of
         pure (s .|. 0x04) -- Bit 2: HBlank entered (consumed by Bus for HDMA).
     ModeHBlank -> do
         preDraw <- inLcdOnPreDrawWindow ps
-        if preDraw then lcdOnPreDrawEnd ps else hblankLineEnd ps
+        if preDraw
+            then lcdOnPreDrawEnd ps
+            else do
+                -- The early CGB VBlank mode-2 source is a sub-line event: it only moves the
+                -- dot and re-samples STAT, exactly as 'lycCompareEvent' does.
+                early <- nextEarlyVblankOamDot ps
+                case early of
+                    Just d -> writeIORef (ppuDot ps) d >> statEdge ps
+                    Nothing -> hblankLineEnd ps
     ModeVBlank -> do
         atLyc <- atLycCompareDot ps
         if atLyc then lycCompareEvent ps else vblankLineEnd ps
@@ -1486,8 +1546,11 @@ computeStatLine ps = do
             -- The OAM-scan STAT source (bit 5) is also asserted on the
             -- first scanline of VBlank (LY=144), per the documented DMG
             -- quirk. Subsequent VBlank lines (145-153) only see bit 4.
+            -- On CGB the mode-2 source for line 144 opens a few dots before line 143 ends,
+            -- so it is asserted here while the mode is still HBlank.
+            earlyVblankOam <- inEarlyVblankOamWindow ps
             let modeSrc = case mode of
-                    ModeHBlank -> testBit stat 3
+                    ModeHBlank -> testBit stat 3 || (earlyVblankOam && testBit stat 5)
                     ModeVBlank ->
                         testBit stat 4 || (ly == 144 && testBit stat 5)
                     ModeOamScan -> testBit stat 5

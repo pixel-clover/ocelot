@@ -36,7 +36,9 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Echo RAM mirroring (`0xE000-0xFDFF` -> `0xC000-0xDDFF`)
 - [x] OAM DMA (`0xFF46`) leaves OAM itself readable for exactly the one cycle before the first byte lands, matching SameBoy blocking only while
   `dma_current_dest /= 0` (that counter is a sentinel on the trigger cycle and wraps to 0 just before byte 0). Holding OAM for the whole transfer made a
-  ROM executing from OAM fetch `0xFF` and derail into `RST 38h`
+  ROM executing from OAM fetch `0xFF` and derail into `RST 38h`. That readable cycle belongs to a *fresh* transfer only: retriggering `0xFF46` mid-
+  transfer leaves the interrupted transfer holding the bus through the new one's warm-up, so OAM never opens (`busOamDmaRestarting`, SameBoy's
+  `dma_restarting`). Passes mooneye `acceptance/oam_dma_start`, which executes out of OAM to separate the two cases
 - [x] OAM DMA (`0xFF46`) stepped one byte per M-cycle for 160 M-cycles, with a 1-cycle startup delay matching real hardware and a per-bus CPU lockout
   while the transfer is active: the DMA occupies one internal bus (main, VRAM, or CGB WRAM), so a VRAM-sourced transfer leaves the main bus readable,
   and the DMA's own source address and its echo alias read back normally. Passes the nine mooneye instruction-timing ROMs, which a blanket
@@ -89,7 +91,9 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Background rendering (SCX fine-scroll discard still deferred)
 - [x] Window rendering with a window-line counter
 - [x] Sprite rendering (8x8 and 8x16) with DMG sort-by-X priority
-- [x] STAT interrupt sources (LYC, mode 0/1/2) with edge-triggered IF latch
+- [x] STAT interrupt sources (LYC, mode 0/1/2) with edge-triggered IF latch. Entering VBlank asserts the mode-2 source as well as the VBlank flag, and
+  on CGB that source leads by one M-cycle where DMG fires both together (`vblankOamStatLeadDots`). Passes mooneye `acceptance/ppu/vblank_stat_intr-GS`
+  and `misc/ppu/vblank_stat_intr-C`, which are the same test differing by one `nop`
 - [x] Variable mode 3 length: the `SCX mod 8` fine-scroll discard and the 6-dot window-activation restart extend mode 3, and mode 0 absorbs
   the difference so the scanline stays 456 dots. Passes mooneye `acceptance/ppu/hblank_ly_scx_timing-GS`.
 - [x] Per-object fetcher stall in mode 3 length: 6 dots per object, plus one fetch abort of `max(0, 5 - ((x + SCX) mod 8))` dots per background tile
@@ -194,10 +198,12 @@ This document outlines the features implemented in the Ocelot emulator, and the 
 - [x] Blargg dmg_sound fully passes (12/12 sub-ROMs)
 - [x] Blargg cgb_sound fully passes (12/12 sub-ROMs)
 - [x] Blargg oam_bug wired in (8 sub-ROMs, aspirational; 6 currently pass: 1-lcd_sync, 2-causes, 3-non_causes, 4-scanline_timing,
-  5-timing_bug, 6-timing_no_bug). The DMG OAM bug is implemented; 7-timing_effect and 8-instr_effect still need the separate
-  read-side corruption patterns (SameBoy's `GB_trigger_oam_bug_read`), which are a different kind of work from the rest of this list: four
-  distinct glitch formulas selected by `accessed_oam_row & 0x18`, chosen by chip revision and in places by individual chip, with SameBoy's own
-  comments calling them "extremely revision and instance specific" and one path non-deterministic. 7-timing_effect additionally reaches no
+  5-timing_bug, 6-timing_no_bug). The DMG OAM bug is implemented for the address-bus (write) side; a CPU *read* of OAM currently applies that same
+  write-side pattern, where hardware applies a different one. `8-instr_effect` fails at its subtest 3 (`POP rp`, i.e. a read) with subtest 2
+  (`INC/DEC rp`, the write side) passing, so what is left is SameBoy's `GB_trigger_oam_bug_read`. That is a different kind of work from the rest of
+  this list: four distinct glitch formulas selected by `accessed_oam_row & 0x18`, branching on chip revision and in places on the individual chip,
+  with SameBoy's own comments calling them "extremely revision and instance specific" and one path non-deterministic. Wiring it in risks the five
+  read-exercising ROMs that pass today, and a previous full port had to be reverted for a net loss of one. `7-timing_effect` additionally reaches no
   verdict at all inside the instruction cap, which is unexplained and probably separate.
 - [x] Blargg halt_bug and interrupt_time both pass (interrupt_time started passing once the timer stopped being halved in CGB double-speed mode)
 - [ ] Promote aspirational blargg ROMs to strict run-to-pass as accuracy is added

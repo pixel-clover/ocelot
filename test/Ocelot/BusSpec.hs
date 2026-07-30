@@ -474,6 +474,24 @@ spec = do
             v <- read8 0xFE00 b
             v `shouldBe` 0x5A
 
+        {- That readable cycle belongs to a fresh transfer only. Retriggering 0xFF46 while a
+        transfer is running leaves the old one holding the bus through the new one's warm-up, so
+        OAM never opens. mooneye @acceptance/oam_dma_start@ runs both cases back to back and
+        separates them by executing out of OAM: the fresh one gets one @INC B@ in, the restarted
+        one gets none.
+        -}
+        it "keeps OAM blocked through the warm-up of a restarted transfer" $ do
+            b <- emptyBus
+            write8 0xFF40 0x00 b
+            Ppu.write8 0xFE00 0x5A (Bus.busPpu b)
+            write8 0xFF46 0xC0 b
+            advance 1 b -- first transfer: startup consumed
+            advance 1 b -- byte 0 landed, so it owns OAM
+            write8 0xFF46 0xC0 b -- restart on top of it
+            advance 1 b -- would be the readable cycle for a fresh transfer
+            v <- read8 0xFE00 b
+            v `shouldBe` 0xFF
+
         it "blocks OAM again once the first byte has landed" $ do
             b <- emptyBus
             write8 0xFF40 0x00 b

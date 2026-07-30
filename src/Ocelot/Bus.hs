@@ -165,6 +165,12 @@ data Bus = Bus
     -- ^ Latched source base address (the FF46 byte shifted left by 8).
     , busOamDmaIndex :: !(IORef Int)
     -- ^ Next OAM offset to copy, 0..160. Reaching 160 deactivates DMA.
+    , busOamDmaRestarting :: !(IORef Bool)
+    -- ^ Whether the in-flight transfer was triggered on top of one already
+    -- running. SameBoy's @dma_restarting@: it keeps OAM closed through the new
+    -- transfer's warm-up, where a fresh transfer leaves one readable M-cycle.
+    -- Stays set for the rest of the transfer, which costs nothing because a
+    -- non-zero index closes OAM anyway.
     , busOamDmaStarting :: !(IORef Bool)
     -- ^ True for one M-cycle between the FF46 write and the first byte
     -- copy. Models the documented "DMA starts after the cycle in which
@@ -284,6 +290,7 @@ fromCartridgeOnHost host bootMode c = do
     oamDmaSrc <- newIORef 0
     oamDmaIndex <- newIORef 0
     oamDmaStarting <- newIORef False
+    oamDmaRestarting <- newIORef False
     apuDebt <- newIORef 0
     stallCycles <- newIORef 0
     let cgbCart = case Header.hdrCgbFlag (Cartridge.cartridgeHeader c) of
@@ -383,6 +390,7 @@ fromCartridgeOnHost host bootMode c = do
             , busOamDmaSrc = oamDmaSrc
             , busOamDmaIndex = oamDmaIndex
             , busOamDmaStarting = oamDmaStarting
+            , busOamDmaRestarting = oamDmaRestarting
             , busApuDebt = apuDebt
             , busStallCycles = stallCycles
             }
@@ -476,11 +484,17 @@ addrInDmaUse addr b
                         -- OAM for the whole transfer made a ROM executing from OAM fetch 0xFF and
                         -- derail into RST 38h, which is what mooneye 'oam_dma_start' catches.
                         --
-                        -- SameBoy also blocks when @dma_restarting@; Ocelot does not model a distinct
-                        -- restart flag, so a DMA retriggered mid-transfer gets the readable cycle again.
+                        -- That readable cycle belongs to a *fresh* transfer only. Retriggering
+                        -- 0xFF46 mid-transfer leaves the previous DMA running through the new
+                        -- one's warm-up, so OAM never opens: mooneye 'oam_dma_start' documents
+                        -- the restart case as "M = 0, 1: previous DMA is running (OAM *not*
+                        -- accessible)" against the fresh case's readable M = 1, and it executes
+                        -- from OAM to tell them apart. 'busOamDmaRestarting' is SameBoy's
+                        -- @dma_restarting@.
                         starting <- readIORef (busOamDmaStarting b)
+                        restarting <- readIORef (busOamDmaRestarting b)
                         idx <- readIORef (busOamDmaIndex b)
-                        pure (starting || idx /= 0)
+                        pure (starting || restarting || idx /= 0)
                     else do
                         -- 'busOamDmaStarting' is Ocelot's startup delay: the DMA has been requested
                         -- but has not taken the bus yet, which is SameBoy's warm-up.
@@ -1247,6 +1261,11 @@ triggered" behavior.
 -}
 oamDma :: Word8 -> Bus -> IO ()
 oamDma srcHi b = do
+    -- A write landing on an already-running transfer is a restart, and the transfer
+    -- it interrupts keeps the OAM bus through the new one's warm-up. Latched here
+    -- because resetting the index below erases the only other trace of it.
+    wasActive <- readIORef (busOamDmaActive b)
+    writeIORef (busOamDmaRestarting b) wasActive
     -- Latch the source byte so reads of FF46 return the value last
     -- written (mooneye oam_dma/reg_read). The latch happens immediately
     -- and is unaffected by DMA being already in progress (a second write
