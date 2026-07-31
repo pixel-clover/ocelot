@@ -257,8 +257,16 @@ async function init() {
     canvas.addEventListener("click", togglePause);
     document.getElementById("rom-input").addEventListener("change", onFileSelected);
     document.getElementById("recent-roms").addEventListener("change", (ev) => {
-        if (ev.target.value) loadRecentRom(ev.target.value);
+        const value = ev.target.value;
+        // Reset before dispatching: loading is async, and leaving the picked entry
+        // selected would misreport what is running once it finishes.
         ev.target.selectedIndex = 0;
+        if (!value) return;
+        if (value.startsWith(BUNDLED_VALUE_PREFIX)) {
+            loadBundledRom(value.slice(BUNDLED_VALUE_PREFIX.length));
+        } else {
+            loadRecentRom(value);
+        }
     });
     document.getElementById("audio-toggle").addEventListener("click", toggleAudio);
     document.getElementById("master-volume").addEventListener("input", onMasterVolumeChange);
@@ -345,7 +353,11 @@ async function init() {
         if (ev.dataTransfer.files.length > 0) loadRom(ev.dataTransfer.files[0]);
     });
 
-    setUpBundledDemo();
+    // Probe and render before the database opens. The bundled entries do not depend on
+    // storage, so showing them here means no path can leave them out, whether the
+    // database is empty, slow, or unavailable.
+    await probeBundledRoms();
+    renderRomList([]);
 
     try {
         db = await openDB();
@@ -782,11 +794,10 @@ function resumeAfterOverlay() {
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
 
+/* Drop the stored entries when persistent storage goes away, keeping the bundled games,
+which do not come from storage and stay playable without it. */
 function hideRecentRoms() {
-    const select = document.getElementById("recent-roms");
-    if (!select) return;
-    while (select.options.length > 1) select.remove(1);
-    select.style.display = "none";
+    renderRomList([]);
 }
 
 function disableStorage(message, err) {
@@ -936,11 +947,40 @@ async function getRecentRoms() {
     }
 }
 
-async function populateRecentRoms() {
+/* Render the ROM list: the bundled games first, then whatever the browser stored.
+
+Bundled entries are unconditional, which is why this is separate from the database read.
+They have to survive an empty database and storage being switched off entirely, and both
+of those paths used to hide the whole control. */
+function renderRomList(storedEntries) {
     const select = document.getElementById("recent-roms");
+    if (!select) return;
     while (select.options.length > 1) select.remove(1);
+
+    for (const rom of availableBundledRoms) {
+        const opt = document.createElement("option");
+        opt.value = BUNDLED_VALUE_PREFIX + rom.path;
+        opt.textContent = rom.label;
+        select.appendChild(opt);
+    }
+
+    // A bundled game the visitor has already played is also in the database under the
+    // same name, so drop that copy rather than listing it twice.
+    const bundledNames = new Set(availableBundledRoms.map((r) => r.name));
+    const stored = storedEntries.filter((e) => !bundledNames.has(e.name));
+    for (const entry of stored.slice(0, 10)) {
+        const opt = document.createElement("option");
+        opt.value = entry.key || entry.name;
+        opt.textContent = entry.name;
+        select.appendChild(opt);
+    }
+
+    select.style.display = select.options.length > 1 ? "" : "none";
+}
+
+async function populateRecentRoms() {
     if (!db) {
-        select.style.display = "none";
+        renderRomList([]);
         return;
     }
     const allEntries = await getRecentRoms();
@@ -951,17 +991,7 @@ async function populateRecentRoms() {
         seen.add(e.name);
         return true;
     });
-    if (entries.length === 0) {
-        select.style.display = "none";
-        return;
-    }
-    for (const entry of entries.slice(0, 10)) {
-        const opt = document.createElement("option");
-        opt.value = entry.key || entry.name;
-        opt.textContent = entry.name;
-        select.appendChild(opt);
-    }
-    select.style.display = "";
+    renderRomList(entries);
 }
 
 async function loadRecentRom(key) {
@@ -1111,76 +1141,59 @@ async function decompressIfNeeded(file) {
     return unzipFirstRom(file);
 }
 
-/* A freely licensed game shipped alongside the emulator, so a first-time visitor has
-something to run without owning a ROM.
+/* Freely licensed games shipped alongside the emulator, so a first-time visitor has
+something to run without owning a ROM. They appear as permanent entries at the top of
+the ROM list, before whatever the browser has stored.
 
-Only games whose licence permits redistribution belong here; see web/games/README.md.
-The credit line is a licence condition of the CC BY 4.0 assets, not decoration, so it
-renders from this same table and cannot drift away from the ROM it describes. */
-const BUNDLED_DEMO = {
-    path: "games/tobudx.gb",
-    name: "Tobu Tobu Girl Deluxe.gb",
-    title: "Tobu Tobu Girl Deluxe",
-    author: "Tangram Games",
-    source: "https://github.com/SimonLarsen/tobutobugirl-dx",
-    licenceNote: "code MIT, assets CC BY 4.0",
-    licenceUrl: "https://creativecommons.org/licenses/by/4.0/"
-};
+Only games whose licence permits redistribution belong here. Attribution lives in
+web/games/README.md, which ships next to the ROM, and in the repository README.
+See web/games/README.md before adding another one. */
+const BUNDLED_ROMS = [
+    {path: "games/tobudx.gb", name: "Tobu Tobu Girl Deluxe.gb", label: "Tobu Tobu Girl Deluxe"}
+];
 
-/* Reveal the demo button only once the ROM is known to be fetchable.
+/* Marks a select value as a bundled path rather than an IndexedDB key, so the one
+change handler can tell a fetch from a database read. */
+const BUNDLED_VALUE_PREFIX = "bundled:";
 
-A HEAD request settles it without pulling 256 KiB on every page load, and a build that
-omitted the ROM then shows no button at all rather than one that fails when clicked. */
-async function setUpBundledDemo() {
-    const group = document.getElementById("demo-group");
-    const button = document.getElementById("btn-demo");
-    const credit = document.getElementById("demo-credit");
-    if (!group || !button || !credit) return;
+// Populated at startup with the subset of BUNDLED_ROMS the server actually has.
+let availableBundledRoms = [];
 
-    try {
-        const probe = await fetch(BUNDLED_DEMO.path, {method: "HEAD"});
-        if (!probe.ok) return;
-    } catch {
-        return; // Offline, or served from a host that refuses HEAD. Stay hidden.
-    }
+/* Confirm which bundled ROMs are fetchable before offering them.
 
-    button.textContent = `Play ${BUNDLED_DEMO.title}`;
-    const link = (href, text) => {
-        const a = document.createElement("a");
-        a.href = href;
-        a.rel = "noopener noreferrer";
-        a.target = "_blank";
-        a.textContent = text;
-        return a;
-    };
-    credit.replaceChildren(
-        document.createTextNode(`${BUNDLED_DEMO.title} by ${BUNDLED_DEMO.author}, `),
-        link(BUNDLED_DEMO.licenceUrl, BUNDLED_DEMO.licenceNote),
-        document.createTextNode(", redistributed unmodified. "),
-        link(BUNDLED_DEMO.source, "Source")
-    );
-    group.style.display = "";
-
-    button.addEventListener("click", async () => {
-        button.disabled = true;
+A HEAD request settles it without pulling the ROM on every page load, so a build that
+shipped without one lists nothing rather than an entry that fails when picked. */
+async function probeBundledRoms() {
+    const found = [];
+    for (const rom of BUNDLED_ROMS) {
         try {
-            const response = await fetch(BUNDLED_DEMO.path);
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            const bytes = new Uint8Array(await response.arrayBuffer());
-            // loadRom only needs a name and arrayBuffer(), which is how the
-            // recent-ROMs path feeds it an IndexedDB entry too.
-            await loadRom({
-                name: BUNDLED_DEMO.name,
-                arrayBuffer: () => Promise.resolve(
-                    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
-                )
-            });
-        } catch (err) {
-            showError(`Could not load ${BUNDLED_DEMO.title}: ${err.message || err}`);
-        } finally {
-            button.disabled = false;
+            const probe = await fetch(rom.path, {method: "HEAD"});
+            if (probe.ok) found.push(rom);
+        } catch {
+            // Offline, or a host that refuses HEAD. Leave it out.
         }
-    });
+    }
+    availableBundledRoms = found;
+}
+
+async function loadBundledRom(path) {
+    const rom = availableBundledRoms.find((r) => r.path === path);
+    if (!rom) return;
+    try {
+        const response = await fetch(rom.path);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        // loadRom only needs a name and arrayBuffer(), which is how the stored-ROM
+        // path feeds it an IndexedDB entry too.
+        await loadRom({
+            name: rom.name,
+            arrayBuffer: () => Promise.resolve(
+                bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+            )
+        });
+    } catch (err) {
+        showError(`Could not load ${rom.label}: ${err.message || err}`);
+    }
 }
 
 async function loadRom(file) {

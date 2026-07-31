@@ -204,38 +204,6 @@
             display: none;
         }
 
-        #demo-group {
-            margin-top: 10px;
-        }
-
-        #btn-demo {
-            padding: 5px 12px;
-            background: var(--bg-panel);
-            color: var(--text);
-            border: 1px solid var(--border);
-            border-radius: var(--radius-sm);
-            font: inherit;
-            font-size: 0.8rem;
-            cursor: pointer;
-        }
-
-        #btn-demo:hover {
-            color: var(--text-heading);
-        }
-
-        /* The CC BY 4.0 assets licence requires visible attribution, so this line is
-           not decoration and must stay next to the button that loads the game. */
-        #demo-credit {
-            margin-top: 6px;
-            font-size: 0.7rem;
-            line-height: 1.4;
-            opacity: 0.75;
-        }
-
-        #demo-credit a {
-            color: inherit;
-        }
-
         #recent-roms {
             margin-top: 8px;
             padding: 4px 8px;
@@ -974,12 +942,6 @@
         <select id="recent-roms" style="display:none">
             <option value="">Recent ROMs</option>
         </select>
-    </div>
-    <!-- Hidden until the bundled ROM is confirmed present, so a build without it
-         shows nothing rather than a button that fails. -->
-    <div id="demo-group" style="display:none">
-        <button id="btn-demo" type="button">Play the bundled demo</button>
-        <div id="demo-credit"></div>
     </div>
 </div>
 
