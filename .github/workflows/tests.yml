@@ -8,12 +8,14 @@ on:
   push:
     branches:
       - main
+      - develop
     paths-ignore:
       - '**.md'
       - 'docs/**'
   pull_request:
     branches:
       - main
+      - develop
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -57,10 +59,24 @@ jobs:
       - name: Install tools
         run: stack install hpc-codecov
 
+      - name: Cache downloaded test ROMs
+        uses: actions/cache@v4
+        with:
+          path: test/testroms
+          key: ${{ runner.os }}-testroms-${{ hashFiles('Makefile') }}
+          restore-keys: |
+            ${{ runner.os }}-testroms-
+
+      - name: Fetch mooneye and acid2 test ROMs
+        continue-on-error: true
+        run: make test-roms
+
       - name: Build project
         run: make build
 
       - name: Run tests with coverage
+        env:
+          OCELOT_GOLDEN: '1'
         run: stack test --coverage
 
       - name: Generate coverage report

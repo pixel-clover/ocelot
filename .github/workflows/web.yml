@@ -22,6 +22,10 @@ permissions:
   pages: write
   id-token: write
 
+env:
+  WASM_FLAVOUR: '9.12'
+  WASM_META_REV: ce99eb6bc65d935ee5cb0e7563deb893793dc947
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -42,20 +46,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq unzip zstd
 
-      # FLAVOUR 9.6 is off the table: its wasm code generator miscompiled the
-      # CPU core (INC (HL) lost the Z flag on the 0xFF wrap, among others), so
-      # every native test passed while the deployed emulator drifted off the
-      # hardware timeline. The blargg check below guards against a relapse.
       - name: Cache GHC wasm toolchain
         id: cache-wasm
         uses: actions/cache@v4
         with:
           path: ~/.ghc-wasm
-          key: ${{ runner.os }}-ghc-wasm-9.12-${{ hashFiles('.github/workflows/web.yml') }}
+          key: ${{ runner.os }}-ghc-wasm-${{ env.WASM_FLAVOUR }}-${{ env.WASM_META_REV }}
 
       - name: Install GHC wasm toolchain
         if: steps.cache-wasm.outputs.cache-hit != 'true'
-        run: curl https://gitlab.haskell.org/haskell-wasm/ghc-wasm-meta/-/raw/master/bootstrap.sh | FLAVOUR=9.12 sh
+        run: |
+          curl -sSf "https://gitlab.haskell.org/haskell-wasm/ghc-wasm-meta/-/raw/${WASM_META_REV}/bootstrap.sh" \
+            | FLAVOUR="$WASM_FLAVOUR" sh
 
       - name: Expose GHC wasm toolchain
         run: ~/.ghc-wasm/add_to_github_path.sh
@@ -66,9 +68,6 @@ jobs:
       - name: Fetch blargg test ROMs
         run: git submodule update --init external/gb-test-roms
 
-      # Run the CPU test ROMs against the actual wasm artifact. The desktop
-      # test suite only ever exercises the native build; this is the gate that
-      # catches a wasm-backend miscompilation before it deploys.
       - name: Check the wasm CPU against blargg ROMs
         run: node tools/wasm-cpu-check.mjs dist/web/ocelot.wasm external/gb-test-roms/cpu_instrs/individual/*.gb
 

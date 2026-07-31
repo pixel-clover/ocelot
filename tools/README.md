@@ -24,10 +24,17 @@ use, so any state divergence they surface is the same divergence production code
   pass/fail, which discards the subtest number the ROM itself reports. See "Read the ROM's Own Verdict First" below.
 - `ocelot-trace.hs` and `sameboy-trace.c` — the two halves of the SameBoy differential tracer. See "Differential tracing" below.
 - `wasm-cpu-check.mjs` — runs blargg CPU test ROMs against a built `ocelot.wasm` under Node and reads each ROM's own verdict
-  from its serial output (the `cpu_instrs` carts declare no RAM, so serial is their only reporting channel). The stack test suite exercises the native build only, and the wasm build is a different compiler
-  backend: the GHC 9.6 wasm flavour shipped a CPU whose `INC (HL)` lost the Z flag on the `0xFF` wrap while every native test
-  stayed green. The web deploy workflow runs this check on the artifact before publishing. Usage:
+  from its serial output (the `cpu_instrs` carts declare no RAM, so serial is their only reporting channel). The stack test suite exercises the native
+  build only, and the wasm build is a different compiler backend: the GHC wasm code generator mis-lowers a `Word8` add that the Cmm sinking pass has
+  folded into the consuming block, which cost `INC (HL)` its Z flag on the `0xFF` wrap while every native test stayed green. Both the 9.6 and the 9.12
+  flavours do it, so the workaround is `-fno-cmm-sink` under `arch(wasm32)` rather than a flavour choice, and this check is what would catch its
+  removal. Both publishing paths run it on the artifact: `web.yml` before the Pages deploy, `release.yml` before the container image push. Usage:
   `node tools/wasm-cpu-check.mjs dist/web/ocelot.wasm external/gb-test-roms/cpu_instrs/individual/*.gb`.
+
+  The sensitivity is measured, not assumed. Rebuilding with sinking switched back on
+  (`wasm32-wasi-cabal build exe:ocelot-web -f -desktop -f wasm-reactor --ghc-options=-fcmm-sink`) fails all eleven ROMs and exits non-zero, while the
+  shipped artifact passes all eleven. Expect the failure to read `no verdict ... serial: ""` rather than `Failed`: a CPU this broken wedges before the
+  ROM prints anything, so an empty serial string is the signature, not a sign that the check itself is misconfigured.
 
 ### Differential tracing against SameBoy
 

@@ -180,6 +180,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Fetch blargg test ROMs
+        run: git submodule update --init external/gb-test-roms
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -195,18 +203,32 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/ocelot-web
-          # `latest` is reserved for actual tag pushes; manual workflow_dispatch
-          # runs publish under `develop` instead so they cannot overwrite a
-          # released image.
           tags: |
             type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
             type=raw,value=develop,enable=${{ github.event_name == 'workflow_dispatch' }}
             type=ref,event=tag
 
-      - name: Build and push
+      - name: Build image
         uses: docker/build-push-action@v5
         with:
           context: .
-          push: true
+          load: true
+          push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Check the wasm CPU against blargg ROMs
+        run: |
+          set -euo pipefail
+          image="$(echo '${{ steps.meta.outputs.tags }}' | head -n1)"
+          if [ -z "$image" ]; then
+            echo "No image tag was produced, so there is nothing to check." >&2
+            exit 1
+          fi
+          cid="$(docker create "$image")"
+          trap 'docker rm -f "$cid" >/dev/null' EXIT
+          docker cp "$cid:/usr/share/nginx/html/ocelot.wasm" ./ocelot.wasm
+          node tools/wasm-cpu-check.mjs ./ocelot.wasm external/gb-test-roms/cpu_instrs/individual/*.gb
+
+      - name: Push image
+        run: echo '${{ steps.meta.outputs.tags }}' | xargs -r -n1 docker push

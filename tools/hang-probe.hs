@@ -25,6 +25,7 @@ otherwise, so the count of capped frames is reported too.
 module Main (main) where
 
 import Control.Exception (SomeException, displayException, try)
+import Control.Monad (when)
 import Data.Bits (shiftR, testBit, xor, (.&.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
@@ -340,7 +341,7 @@ run m frames seed inputFn = do
                     Left err -> pure (Just (i, displayException err))
                     Right used -> do
                         -- Hitting the cap means no VBlank edge arrived this frame.
-                        if used >= cap then modifyCount capped else pure ()
+                        when (used >= cap) (modifyCount capped)
                         fb <- Bus.framebufferRgbBytes (machineBus m)
                         let !h = fnv1a fb
                         prev <- readIORef lastHash
@@ -353,9 +354,7 @@ run m frames seed inputFn = do
                         case stalled of
                             Just _ -> samplePc
                             Nothing ->
-                                if n' >= stallFrames
-                                    then writeIORef stallAt (Just (i - n')) >> samplePc
-                                    else pure ()
+                                when (n' >= stallFrames) (writeIORef stallAt (Just (i - n')) >> samplePc)
                         go (i + 1)
         samplePc = do
             cpu <- readIORef (machineCpu m)
@@ -381,7 +380,7 @@ run m frames seed inputFn = do
                     let top = take 12 (sortOn (negate . snd) (M.toList hist))
                         total = sum (M.elems hist)
                     printf "  distinct PCs sampled while stalled: %d over %d samples\n" (M.size hist) total
-                    mapM_ (\(pc, c) -> printf "    pc=%04X  %d\n" pc c) top
+                    mapM_ (uncurry (printf "    pc=%04X  %d\n")) top
             reportState m
 
 {- | Machine state at the stall, via the same 'Ocelot.Machine.debugSummary' the web

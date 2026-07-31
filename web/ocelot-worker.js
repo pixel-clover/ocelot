@@ -23,6 +23,13 @@ let framesSinceSnapshot = 0;
 // Together with the rolling snapshot this makes a freeze replayable: resume from the
 // snapshot's frame and apply the same events at the same frame boundaries. Entries
 // older than the older snapshot are pruned at each rotation.
+//
+// INPUT_LOG_MAX is a backstop for the case rotation cannot cover: snapshots are
+// skipped while the picture is still, so pruning stops for as long as a stall lasts.
+// Someone pressing buttons at a static title screen would otherwise grow this without
+// bound. The cap is far above the ~1200 frames of history a report can carry, so it
+// only ever discards entries no report could have used.
+const INPUT_LOG_MAX = 4096;
 let frameIndex = 0;
 let inputLog = [];
 let tickTimer = null;
@@ -579,6 +586,10 @@ self.onmessage = function (ev) {
                     // 'frameIndex' frames have fully run, so this event takes effect
                     // before frame 'frameIndex' does; replay applies it at the same spot.
                     inputLog.push([frameIndex, msg.button, msg.down ? 1 : 0]);
+                    // Oldest first: those are the ones already outside any replay window.
+                    if (inputLog.length > INPUT_LOG_MAX) {
+                        inputLog.splice(0, inputLog.length - INPUT_LOG_MAX);
+                    }
                     wasm.instance.exports.ocelot_set_button(emu, msg.button, msg.down ? 1 : 0);
                 }
                 break;

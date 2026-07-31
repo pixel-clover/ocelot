@@ -132,7 +132,7 @@ Run `ocelot --help` to see the list of available command-line options.
 Example output:
 
 ```
-Ocelot 0.2.0.0 (develop@85510dc) - Game Boy (DMG) and Game Boy Color (CGB) emulator in Haskell
+Ocelot 0.3.1.0 (develop@65185a7) - Game Boy (DMG) and Game Boy Color (CGB) emulator in Haskell
 
 Usage: ocelot [-V|--version] COMMAND
 

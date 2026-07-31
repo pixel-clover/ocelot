@@ -29,18 +29,19 @@ import Numeric (showHex)
 import qualified Ocelot.Bus as Bus
 import qualified Ocelot.Cartridge as Cartridge
 import Ocelot.Cpu.Execute (runFor)
-import Ocelot.Machine
-    ( Machine (..)
-    , machineFromCartridge
-    , machineFromCartridgeForcedCgb
-    , machineFromCartridgeForcedDmg
-    )
+import Ocelot.Machine (
+    Machine (..),
+    machineFromCartridge,
+    machineFromCartridgeForcedCgb,
+    machineFromCartridgeForcedDmg,
+ )
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.IO (BufferMode (..), hSetBuffering, stdout)
 
--- | Matches 'GoldenSpec.blarggCap' and 'GoldenSpec.pollChunk' so a verdict here
--- means the same thing as a verdict in the test suite.
+{- | Matches 'GoldenSpec.blarggCap' and 'GoldenSpec.pollChunk' so a verdict here
+means the same thing as a verdict in the test suite.
+-}
 defaultCap :: Int
 defaultCap = 80_000_000
 

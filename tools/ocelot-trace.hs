@@ -1,3 +1,8 @@
+-- BangPatterns is stated rather than inherited. `make tools` builds these files with a
+-- bare `stack ghc`, whose default language is GHC2021 and so already enables it, but the
+-- cabal components all use Haskell2010, and fourmolu reads no cabal file for this
+-- directory. Without the pragma `make format` cannot parse the `drive` worker below.
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 {- | Per-instruction CPU trace, format-matched with @sameboy-trace@, for finding the first
@@ -29,18 +34,18 @@ import Data.Word (Word16, Word64, Word8)
 import qualified Ocelot.Bus as Bus
 import qualified Ocelot.Cartridge as Cartridge
 import Ocelot.Cpu.Execute (step)
-import Ocelot.Cpu.Registers
-    ( regA
-    , regB
-    , regC
-    , regD
-    , regE
-    , regF
-    , regH
-    , regL
-    , regPC
-    , regSP
-    )
+import Ocelot.Cpu.Registers (
+    regA,
+    regB,
+    regC,
+    regD,
+    regE,
+    regF,
+    regH,
+    regL,
+    regPC,
+    regSP,
+ )
 import Ocelot.Cpu.State (CpuState (..))
 import Ocelot.Machine (Machine (..), machineFromCartridgeWithBoot)
 import System.Environment (getArgs)

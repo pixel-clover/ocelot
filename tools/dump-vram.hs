@@ -36,7 +36,7 @@ main = do
 
     let vram = Ppu.ppuVram ppu
     putStrLn "Tile data 0x8000-0x803F (first four tiles, bank 0):"
-    bs1 <- mapM (\i -> MV.read vram i) [0 .. 0x3F]
+    bs1 <- mapM (MV.read vram) [0 .. 0x3F]
     printChunked 16 0x8000 bs1
 
     putStrLn "BG tilemap 0x9800 (first 64 entries, bank 0):"
@@ -49,12 +49,12 @@ main = do
 
     putStrLn "BG palette RAM (8 palettes x 4 colors x 2 bytes):"
     let bgPal = Ppu.ppuBgPalRam ppu
-    bs4 <- mapM (\i -> MV.read bgPal i) [0 .. 63]
+    bs4 <- mapM (MV.read bgPal) [0 .. 63]
     printChunked 8 0 bs4
 
     putStrLn "OBJ palette RAM (8 palettes x 4 colors x 2 bytes):"
     let objPal = Ppu.ppuObjPalRam ppu
-    bs5 <- mapM (\i -> MV.read objPal i) [0 .. 63]
+    bs5 <- mapM (MV.read objPal) [0 .. 63]
     printChunked 8 0 bs5
 
 printChunked :: Int -> Int -> [Word8] -> IO ()
@@ -62,7 +62,9 @@ printChunked w base bs =
     mapM_
         ( \(off, line) ->
             putStrLn $
-                "  0x" <> showHex (base + off * w) "" <> ": "
+                "  0x"
+                    <> showHex (base + off * w) ""
+                    <> ": "
                     <> unwords [showHex b "" | b <- line]
         )
         (zip [0 ..] (chunks w bs))

@@ -23,7 +23,7 @@ if (!wasmPath || romPaths.length === 0) {
     process.exit(2);
 }
 
-const MAX_FRAMES = 7200; // two emulated minutes; the slowest CPU ROM needs far less
+const MAX_FRAMES = 1800;
 const POLL_FRAMES = 60;
 
 function makeWasi(getMemory) {
@@ -101,6 +101,13 @@ for (const romPath of romPaths) {
     const e = await loadEmulator();
     const rom = readFileSync(romPath);
     const rp = e.ocelot_alloc(rom.length);
+    // A null return means the allocation failed; writing there would scribble over
+    // address 0 and turn an out-of-memory into an unrelated-looking wrong verdict.
+    if (!rp) {
+        console.log(`FAIL ${basename(romPath)}: ocelot_alloc(${rom.length}) returned null`);
+        failures++;
+        continue;
+    }
     bytesOf(e, rp, rom.length).set(rom);
     const emu = e.ocelot_create(rp, rom.length);
     e.ocelot_free(rp, rom.length);
