@@ -295,7 +295,6 @@ async function init() {
         saveSettings();
     });
     document.getElementById("error-dismiss").addEventListener("click", hideError);
-    document.getElementById("stall-download").addEventListener("click", () => window.ocelotStall());
 
     document.getElementById("help-overlay").addEventListener("click", (ev) => {
         if (ev.target === ev.currentTarget) toggleHelp();
@@ -401,10 +400,6 @@ function onWorkerMessage(ev) {
                 inputs: msg.inputs || [],
                 romName: currentRomName,
             };
-            {
-                const group = document.getElementById("stall-group");
-                if (group) group.style.display = "";
-            }
             console.warn(
                 "[ocelot] " + (currentRomTitle || currentRomName || "ROM") +
                 ": picture unchanged for " + msg.frames + " frames. " +

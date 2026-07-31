@@ -5,7 +5,7 @@ cabal-version: 1.12
 -- see: https://github.com/sol/hpack
 
 name:           ocelot
-version:        0.2.0.0
+version:        0.3.1.0
 synopsis:       A Game Boy and Game Boy Color emulator in Haskell
 description:    Please see the README on GitHub at <https://github.com/pixel-clover/ocelot#readme>
 category:       Emulator

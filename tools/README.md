@@ -290,8 +290,8 @@ grep -l TRAP /tmp/probe-*.log
 Scripted input cannot reach everywhere a person playing well can, so the web frontend captures its own reproduction artifacts.
 The Worker keeps a rolling save state, refreshed every ten seconds only while the picture is changing, and records every
 button event with the number of frames run. The stall report carries the pre-freeze state, the wedged state, and the input
-log since the pre-freeze state. Clicking the Download Report button that appears after a freeze (or running `ocelotStall()`
-in the browser console) downloads all of them.
+log since the pre-freeze state. Running `ocelotStall()` in the browser console after a freeze downloads all of them; the
+console line the watchdog prints says so, and keeping the trigger console-only means players never see debug UI.
 
 The input log makes the freeze deterministic rather than merely nearby:
 
