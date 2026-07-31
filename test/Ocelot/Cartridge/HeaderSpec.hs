@@ -78,6 +78,76 @@ spec = do
                 Right h -> hdrCgbFlag h `shouldBe` CgbOnly
                 Left e -> expectationFailure (show e)
 
+    {- The cartridge type byte is what picks the MBC implementation, so a wrong row
+    here silently runs a game on the wrong bank controller. The whole documented table
+    is listed rather than sampled, because the rows are independent data and a typo in
+    one says nothing about its neighbours. -}
+    describe "cartridge type table" $ do
+        let caps = Capabilities
+            expected =
+                [ (0x00, NoMbc, caps False False False False)
+                , (0x08, NoMbc, caps True False False False)
+                , (0x09, NoMbc, caps True True False False)
+                , (0x01, Mbc1, caps False False False False)
+                , (0x02, Mbc1, caps True False False False)
+                , (0x03, Mbc1, caps True True False False)
+                , (0x05, Mbc2, caps False False False False)
+                , (0x06, Mbc2, caps False True False False)
+                , (0x0F, Mbc3, caps False True True False)
+                , (0x10, Mbc3, caps True True True False)
+                , (0x11, Mbc3, caps False False False False)
+                , (0x12, Mbc3, caps True False False False)
+                , (0x13, Mbc3, caps True True False False)
+                , (0x19, Mbc5, caps False False False False)
+                , (0x1A, Mbc5, caps True False False False)
+                , (0x1B, Mbc5, caps True True False False)
+                , (0x1C, Mbc5, caps False False False True)
+                , (0x1D, Mbc5, caps True False False True)
+                , (0x1E, Mbc5, caps True True False True)
+                , (0xFF, HuC1, caps True True False False)
+                ]
+
+        mapM_
+            ( \(byte, kind, cap) ->
+                it ("decodes cartridge type " ++ show byte ++ " as " ++ show kind) $ do
+                    -- RAM code 0x02 keeps every row parseable, including the ones that
+                    -- declare no RAM; the capability bits come from the type byte alone.
+                    let rom = mkSyntheticRom byte 0x00 0x02 "TYPE"
+                    case parseHeader rom of
+                        Right h -> (hdrMbcKind h, hdrCaps h) `shouldBe` (kind, cap)
+                        Left e -> expectationFailure (show e)
+            )
+            expected
+
+        it "reports an unrecognised type byte as UnknownMbc with no capabilities" $ do
+            -- 0x22 is MBC7 on real hardware, which Ocelot does not implement. Surfacing
+            -- the raw byte is what lets a frontend say which cart it could not run.
+            let rom = mkSyntheticRom 0x22 0x00 0x02 "MBC7"
+            case parseHeader rom of
+                Right h -> do
+                    hdrMbcKind h `shouldBe` UnknownMbc 0x22
+                    hdrCaps h `shouldBe` Capabilities False False False False
+                Left e -> expectationFailure (show e)
+
+    describe "RAM size table" $ do
+        let sizes =
+                [ (0x00, 0)
+                , (0x01, 2 * 1024)
+                , (0x02, 8 * 1024)
+                , (0x03, 32 * 1024)
+                , (0x04, 128 * 1024)
+                , (0x05, 64 * 1024)
+                ]
+        mapM_
+            ( \(code, bytes) ->
+                it ("decodes RAM size code " ++ show code ++ " as " ++ show bytes ++ " bytes") $ do
+                    let rom = mkSyntheticRom 0x03 0x00 code "RAM"
+                    case parseHeader rom of
+                        Right h -> hdrRamBytes h `shouldBe` bytes
+                        Left e -> expectationFailure (show e)
+            )
+            sizes
+
 {- | Build a 32 KiB ROM with the requested header fields. The header checksum byte at 0x014D is
 computed from the surrounding bytes so the resulting ROM always parses cleanly. ROM size code is
 restricted to 0x00 (32 KiB) to keep the helper small; tests that need larger ROMs can patch and

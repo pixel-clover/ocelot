@@ -223,6 +223,130 @@ spec = do
                 v <- oamAt ps [152, 153]
                 v `shouldBe` [0x11, 0x22]
 
+            {- Which read pattern applies is chosen by @row mod 32@, and each branch also
+            copies the glitched row to a different set of rows. The four tests below drive
+            one branch each.
+
+            Inputs are picked so the transcribed formula must change the target word from
+            0x0000 to 0xFFFF, and the expected bytes are worked out from the formula by hand
+            rather than by calling it, so these pin the transcription instead of restating
+            it. A bus read at dot @d@ works on row @8 * (d div 4)@, one row behind the
+            address bus. -}
+            let fillOam ps = mapM_ (uncurry (MV.write (ppuOam ps)))
+                rowOf ps r = oamAt ps [r .. r + 7]
+
+            it "row 0x10 takes the secondary pattern and lands on rows 0x00, 0x08, and 0x10" $ do
+                -- secondary a b c d = (b .&. (a .|. c .|. d)) .|. (a .&. c .&. d)
+                -- a = word 0x00, b = word 0x08 (the target), c = word 0x10, d = word 0x0C.
+                -- With b = 0 and a = c = d = 0xFFFF the result is 0xFFFF.
+                ps <- inMode2At 8
+                fillOam
+                    ps
+                    [ (0x00, 0xFF)
+                    , (0x01, 0xFF)
+                    , (0x0C, 0xFF)
+                    , (0x0D, 0xFF)
+                    , (0x10, 0xFF)
+                    , (0x11, 0xFF)
+                    , (0x0A, 0xAA)
+                    , (0x0B, 0xBB)
+                    , (0x0E, 0xCC)
+                    , (0x0F, 0xDD)
+                    ]
+                triggerOamBugRead 0xFE00 ps
+                let expected = [0xFF, 0xFF, 0xAA, 0xBB, 0xFF, 0xFF, 0xCC, 0xDD]
+                rowOf ps 0x08 `shouldReturn` expected
+                rowOf ps 0x00 `shouldReturn` expected
+                rowOf ps 0x10 `shouldReturn` expected
+
+            it "row 0x20 takes the second tertiary pattern and also lands on row 0x00" $ do
+                -- tertiary2 a b c d e = (c .&. (a .|. b .|. d .|. e)) .|. (a .&. b .&. d .&. e)
+                -- applied as (cur, mid, above, above2, above4)
+                --          = (word 0x20, word 0x1C, word 0x18, word 0x10, word 0x00).
+                ps <- inMode2At 16
+                fillOam
+                    ps
+                    [ (0x20, 0xFF)
+                    , (0x21, 0xFF)
+                    , (0x1C, 0xFF)
+                    , (0x1D, 0xFF)
+                    , (0x10, 0xFF)
+                    , (0x11, 0xFF)
+                    , (0x00, 0xFF)
+                    , (0x01, 0xFF)
+                    , (0x1A, 0x9A)
+                    , (0x1B, 0x9B)
+                    , (0x1E, 0x9C)
+                    , (0x1F, 0x9D)
+                    ]
+                triggerOamBugRead 0xFE00 ps
+                let expected = [0xFF, 0xFF, 0x9A, 0x9B, 0xFF, 0xFF, 0x9C, 0x9D]
+                rowOf ps 0x18 `shouldReturn` expected
+                rowOf ps 0x10 `shouldReturn` expected
+                rowOf ps 0x00 `shouldReturn` expected
+                rowOf ps 0x20 `shouldReturn` expected
+
+            it "row 0x40 takes the DMG quaternary pattern over eight words" $ do
+                -- quaternaryDmg _a b c d e f g h
+                --   = (e .&. (h .|. g .|. (complement d .&. f) .|. c .|. b)) .|. (c .&. g .&. h)
+                -- e = word 0x38 (the target), c = word 0x3C, g = word 0x30, h = word 0x20.
+                -- With e = 0 the first term vanishes and c .&. g .&. h = 0xFFFF carries it.
+                ps <- inMode2At 32
+                fillOam
+                    ps
+                    [ (0x3C, 0xFF)
+                    , (0x3D, 0xFF)
+                    , (0x30, 0xFF)
+                    , (0x31, 0xFF)
+                    , (0x20, 0xFF)
+                    , (0x21, 0xFF)
+                    , (0x3A, 0x11)
+                    , (0x3B, 0x22)
+                    , (0x3E, 0x33)
+                    , (0x3F, 0x44)
+                    ]
+                triggerOamBugRead 0xFE00 ps
+                let expected = [0xFF, 0xFF, 0x11, 0x22, 0xFF, 0xFF, 0x33, 0x44]
+                rowOf ps 0x38 `shouldReturn` expected
+                rowOf ps 0x30 `shouldReturn` expected
+                rowOf ps 0x20 `shouldReturn` expected
+                rowOf ps 0x40 `shouldReturn` expected
+
+            it "row 0x80 takes the first tertiary pattern and copies itself over row 0" $ do
+                -- tertiary1 a b c d e = c .|. (a .&. b .&. d .&. e), applied as
+                -- (cur, mid, above, above2, above4)
+                --   = (word 0x80, word 0x7C, word 0x78, word 0x70, word 0x60).
+                -- The extra copy to row 0 is specific to row 0x80.
+                ps <- inMode2At 64
+                fillOam
+                    ps
+                    [ (0x80, 0xFF)
+                    , (0x81, 0xFF)
+                    , (0x7C, 0xFF)
+                    , (0x7D, 0xFF)
+                    , (0x70, 0xFF)
+                    , (0x71, 0xFF)
+                    , (0x60, 0xFF)
+                    , (0x61, 0xFF)
+                    , (0x7A, 0x55)
+                    , (0x7B, 0x66)
+                    , (0x7E, 0x77)
+                    , (0x7F, 0x88)
+                    ]
+                triggerOamBugRead 0xFE00 ps
+                let expected = [0xFF, 0xFF, 0x55, 0x66, 0xFF, 0xFF, 0x77, 0x88]
+                rowOf ps 0x78 `shouldReturn` expected
+                rowOf ps 0x70 `shouldReturn` expected
+                rowOf ps 0x60 `shouldReturn` expected
+                rowOf ps 0x80 `shouldReturn` expected
+                rowOf ps 0x00 `shouldReturn` expected
+
+            it "leaves OAM alone for a read outside 0xFE00-0xFEFF" $ do
+                ps <- inMode2At 8
+                fillOam ps [(0x08, 0x11), (0x09, 0x22)]
+                triggerOamBugRead 0xC000 ps
+                oamAt ps [0x08, 0x09] `shouldReturn` [0x11, 0x22]
+
         {- The LY=LYC comparison does not use LY directly. SameBoy keeps a separate
         @ly_for_comparison@ that is -1 (no match possible) at the head of a line and only becomes the
         line number a dot or so later, and 'GB_STAT_update' drives both the STAT bit-2 flag and the
@@ -778,6 +902,21 @@ spec = do
             let copied = BSI.fromForeignPtr fp 0 (framebufferWidth * framebufferHeight * 4)
             withForeignPtr fp $ \ptr -> copyFramebufferRgba ptr ps
             BS.unpack copied `shouldBe` rgbaFromRgb (V.toList rgb)
+
+        {- The padded path above is what an SDL texture actually uses, but a pitch that
+        happens to equal the row width takes a separate branch that delegates to
+        'copyFramebufferRgb' wholesale. That branch had no coverage. -}
+        it "a pitch equal to the row width copies exactly like the unpadded path" $ do
+            ps <- freshOn
+            writeVram ps [(0, 0xFF), (1, 0x00)]
+            _ <- advance ((80 + 172) `div` 4) ps
+            let rowBytes = framebufferWidth * 3
+                total = rowBytes * framebufferHeight
+            fp <- BSI.mallocByteString total
+            let copied = BSI.fromForeignPtr fp 0 total
+            withForeignPtr fp $ \ptr -> copyFramebufferRgbWithPitch ptr rowBytes ps
+            rgb <- framebufferRgb ps
+            BS.unpack copied `shouldBe` V.toList rgb
 
     describe "register I/O" $ do
         it "STAT read returns mode bits 0..1 from the current mode" $ do

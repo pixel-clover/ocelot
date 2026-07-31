@@ -71,6 +71,43 @@ romCyclingPalette =
         , 0x01 -- JP 0x0150
         ]
 
+{- | Sends @H@ then @I@ over the link port, waiting for the first transfer to
+finish before starting the second.
+
+The wait matters. The outgoing byte is queued the moment @SC@ bit 7 is set, so a
+program that fired both transfers back to back would pass even if the shift timing
+were broken. Polling @SC@ bit 7 until hardware clears it means the second write
+cannot happen unless the first transfer actually completed.
+-}
+romSerialHi :: BS.ByteString
+romSerialHi =
+    mkRomWithProgram
+        [ 0x3E
+        , 0x48 -- LD A,'H'
+        , 0xE0
+        , 0x01 -- LDH (FF01),A   ; SB
+        , 0x3E
+        , 0x81 -- LD A,0x81      ; start + internal clock
+        , 0xE0
+        , 0x02 -- LDH (FF02),A   ; SC
+        , 0xF0
+        , 0x02 -- LDH A,(FF02)   ; wait:
+        , 0xE6
+        , 0x80 -- AND 0x80
+        , 0x20
+        , 0xFA -- JR NZ,-6       ; until SC bit 7 clears
+        , 0x3E
+        , 0x49 -- LD A,'I'
+        , 0xE0
+        , 0x01 -- LDH (FF01),A
+        , 0x3E
+        , 0x81 -- LD A,0x81
+        , 0xE0
+        , 0x02 -- LDH (FF02),A
+        , 0x18
+        , 0xFE -- JR -2          ; park here
+        ]
+
 spec :: Spec
 spec = do
     describe "loadSession" $ do
@@ -174,6 +211,32 @@ spec = do
             samples <- Web.drainAudioSamplesVector session
             V.length samples `shouldSatisfy` (>= 0)
             Web.drainAudioSamples session `shouldReturn` []
+
+    describe "serial output" $ do
+        {- This is the verdict channel for the blargg ROMs that declare no cartridge
+        RAM, and 'tools/wasm-cpu-check.mjs' reads the whole wasm CPU gate through it.
+        A silent regression here would make that gate report "no verdict" for every
+        ROM, which looks like a broken harness rather than a broken emulator. -}
+        it "collects the bytes a guest shifts out of the link port" $ do
+            Right session <- Web.loadSession romSerialHi
+            mapM_ (const (Web.runFrame session)) [1 .. 2 :: Int]
+            out <- Web.drainSerialBytes session
+            out `shouldBe` "HI"
+
+        it "empties the queue, so a second drain returns nothing" $ do
+            Right session <- Web.loadSession romSerialHi
+            mapM_ (const (Web.runFrame session)) [1 .. 2 :: Int]
+            first <- Web.drainSerialBytes session
+            BS.null first `shouldBe` False
+            second <- Web.drainSerialBytes session
+            second `shouldBe` BS.empty
+
+        it "returns nothing for a guest that never touches the link port" $ do
+            let rom = synthNoMbcRom BS.empty
+            Right session <- Web.loadSession rom
+            Web.runFrame session
+            out <- Web.drainSerialBytes session
+            out `shouldBe` BS.empty
 
 isLeft :: Either a b -> Bool
 isLeft (Left _) = True

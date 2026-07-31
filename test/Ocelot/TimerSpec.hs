@@ -1,10 +1,43 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 module Ocelot.TimerSpec (spec) where
 
 import Data.Word (Word8)
 import Ocelot.Timer
 import Test.Hspec
+import Test.Hspec.QuickCheck (prop)
+import Test.QuickCheck
+
+{- | Reference implementation of a multi-cycle advance: @n@ separate one-M-cycle
+advances, OR-ing the overflow flags the way 'Ocelot.Bus.advance' does.
+-}
+advanceStepwise :: Int -> TimerState -> (TimerState, Bool)
+advanceStepwise n ts0 = go n ts0 False
+  where
+    go 0 ts ov = (ts, ov)
+    go k ts ov =
+        let (ts', f) = advance 1 ts
+         in go (k - 1) ts' (ov || f)
+
+{- | M-cycle counts in the range a single instruction can consume. Large counts
+would only make the stepwise reference slow without reaching new behaviour.
+-}
+mCycles :: Gen Int
+mCycles = choose (0, 40)
+
+instance Arbitrary TimerState where
+    arbitrary = do
+        divider <- arbitrary
+        tima <- arbitrary
+        tma <- arbitrary
+        tac <- arbitrary
+        prevAnd <- arbitrary
+        -- Both reload windows are 4 T-cycle countdowns. Generating arbitrary Ints
+        -- here would only exercise states the timer can never be in.
+        reloadCounter <- choose (0, 4)
+        reloadedCounter <- choose (0, 4)
+        pure (TimerState divider tima tma tac prevAnd reloadCounter reloadedCounter)
 
 {- | State-only wrappers. 'writeDiv' and 'writeTac' report whether the edge they
 produce overflowed TIMA, because the bus has to latch @IF@ for a write-driven
@@ -158,3 +191,32 @@ spec = do
         it "readTac reads back unused bits as 1 even when written as 0" $ do
             let ts = writeTacS 0x00 initialTimer
             readTac ts `shouldBe` 0xF8
+
+    {- 'advance' is on the per-instruction hot path, so it is a standing candidate for
+    being rewritten to compute the divider in closed form instead of stepping T-cycle
+    by T-cycle. These properties are the guard rail for that: they pin batching to the
+    one-cycle-at-a-time reference, which is the behaviour every TIMA edge test in this
+    file implicitly assumes. 'Ocelot.ApuSpec' guards the APU the same way. -}
+    describe "advance batching" $ do
+        prop "advancing n M-cycles equals n separate one-cycle advances" $
+            \ts -> forAll mCycles $ \n ->
+                advance n ts === advanceStepwise n ts
+
+        prop "advancing is additive across any split" $
+            \ts -> forAll mCycles $ \a -> forAll mCycles $ \b ->
+                let (tsA, ovA) = advance a ts
+                    (tsAB, ovB) = advance b tsA
+                 in advance (a + b) ts === (tsAB, ovA || ovB)
+
+        prop "advancing zero cycles changes nothing and reports no overflow" $
+            \ts -> advance 0 ts === (ts, False)
+
+        prop "the divider gains exactly four T-cycles per M-cycle" $
+            \ts -> forAll mCycles $ \n ->
+                timDivider (fst (advance n ts))
+                    === timDivider ts + fromIntegral (4 * n)
+
+        prop "TMA and TAC are never modified by advancing" $
+            \ts -> forAll mCycles $ \n ->
+                let ts' = fst (advance n ts)
+                 in (timTma ts', timTac ts') === (timTma ts, timTac ts)
