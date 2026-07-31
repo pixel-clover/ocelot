@@ -10,6 +10,15 @@ let lastFrameTime = 0;
 // again, so one frozen stretch produces one report rather than one per frame.
 let stallReported = false;
 let stallThresholdFrames = 0;
+// Rolling pre-freeze save states. 'snapCur' is refreshed every SNAPSHOT_INTERVAL_FRAMES
+// while the picture is still changing, so when a stall fires it holds machine state
+// from before the freeze; 'snapPrev' reaches further back for crashes whose cause
+// predates the picture going still. Both ride along on the stall report, which turns
+// "it froze" into a state file a headless tool can resume from.
+const SNAPSHOT_INTERVAL_FRAMES = 600;
+let snapCur = null;
+let snapPrev = null;
+let framesSinceSnapshot = 0;
 let tickTimer = null;
 const bufferPool = [];
 const audioBufferPool = [];
@@ -324,6 +333,7 @@ function runFrame() {
         postMessage({type: "audio", buffer: audioBuf, samples: sampleCount, queryLevel}, [audioBuf]);
     }
 
+    updateRollingSnapshot(e);
     checkStallWatchdog(e);
 
     const frameEnd = performance.now();
@@ -353,6 +363,33 @@ invariant to preserve is "running implies tickTimer is armed". */
  * on input hold a frame indefinitely, which is why this reports diagnostics instead of
  * stopping the emulator, and why `running` is left alone.
  */
+function captureState(e) {
+    if (!e.ocelot_save_state || !e.ocelot_save_state(emu)) return null;
+    const ptr = e.ocelot_save_state_ptr(emu);
+    const len = e.ocelot_save_state_len(emu);
+    if (!ptr || !len) return null;
+    const buf = new ArrayBuffer(len);
+    new Uint8Array(buf).set(readMemory(ptr, len));
+    return buf;
+}
+
+/* Refresh the rolling pre-freeze snapshot.
+
+Skipped while the stall counter is non-zero: a capture taken with the picture already
+frozen would be post-crash state, and the point of the pair is to have state from
+before the corruption. */
+function updateRollingSnapshot(e) {
+    if (!e.ocelot_save_state || !e.ocelot_stalled_frames) return;
+    if (++framesSinceSnapshot < SNAPSHOT_INTERVAL_FRAMES) return;
+    if (e.ocelot_stalled_frames(emu) !== 0) return;
+    framesSinceSnapshot = 0;
+    const buf = captureState(e);
+    if (buf) {
+        snapPrev = snapCur;
+        snapCur = buf;
+    }
+}
+
 function checkStallWatchdog(e) {
     if (!e.ocelot_stalled_frames) return; // older wasm build without the watchdog
     if (!stallThresholdFrames) {
@@ -369,7 +406,21 @@ function checkStallWatchdog(e) {
     if (e.ocelot_debug_state(emu)) {
         detail = readString(e.ocelot_debug_state_ptr(emu), e.ocelot_debug_state_len(emu));
     }
-    postMessage({type: "stallReport", frames: stalled, detail});
+    // Ship the rolling pre-freeze states and the wedged state with the report. The
+    // buffers are transferred, so the rolling pair is cleared; it rebuilds within two
+    // snapshot intervals if the game recovers.
+    const postState = captureState(e);
+    const preState = snapPrev || snapCur;
+    const preStateAgeFrames = preState
+        ? (snapPrev ? SNAPSHOT_INTERVAL_FRAMES + framesSinceSnapshot : framesSinceSnapshot) + stalled
+        : 0;
+    snapCur = null;
+    snapPrev = null;
+    framesSinceSnapshot = 0;
+    const transfers = [];
+    if (preState) transfers.push(preState);
+    if (postState) transfers.push(postState);
+    postMessage({type: "stallReport", frames: stalled, detail, preState, postState, preStateAgeFrames}, transfers);
 }
 
 function workerTick() {
@@ -441,6 +492,10 @@ self.onmessage = function (ev) {
         switch (type) {
             case "loadRom": {
                 running = false;
+                snapCur = null;
+                snapPrev = null;
+                framesSinceSnapshot = 0;
+                stallReported = false;
                 if (emu) {
                     wasm.instance.exports.ocelot_destroy(emu);
                     emu = 0;
@@ -490,6 +545,10 @@ self.onmessage = function (ev) {
             case "destroyRom": {
                 running = false;
                 stopTicking();
+                snapCur = null;
+                snapPrev = null;
+                framesSinceSnapshot = 0;
+                stallReported = false;
                 if (emu) {
                     wasm.instance.exports.ocelot_destroy(emu);
                     emu = 0;

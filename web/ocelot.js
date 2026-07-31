@@ -65,6 +65,46 @@ let overlayDepth = 0;
 let wasRunningBeforeOverlay = false;
 let pausedByVisibility = false;
 
+// ─── Stall diagnostics ────────────────────────────────────────────────────────
+
+// The last stall report from the Worker, including pre-freeze and at-freeze save
+// states when the build provides them. Downloaded on demand via 'ocelotStall()'.
+let lastStallDiagnostics = null;
+
+function downloadBlob(bytes, name) {
+    const url = URL.createObjectURL(new Blob([bytes], {type: "application/octet-stream"}));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+/* Download the save states attached to the last stall report.
+
+Console-invoked on purpose: the watchdog trips on every title screen and pause menu,
+so anything visible would cry wolf. Someone chasing a real freeze is already in the
+console reading the report, and this puts the reproduction files one call away. */
+window.ocelotStall = function () {
+    if (!lastStallDiagnostics) {
+        console.log("[ocelot] no stall has been reported this session");
+        return;
+    }
+    const d = lastStallDiagnostics;
+    const stem = (d.romName || "rom").replace(/\.[^.]*$/, "");
+    if (d.preState) {
+        downloadBlob(d.preState, `${stem}-pre-freeze.state`);
+        console.log(
+            `[ocelot] pre-freeze state (~${Math.round(d.preStateAgeFrames / 60)}s before the report): ` +
+            `load it with bin/tools/hang-probe --state <file> to search for the crash from just before it.`
+        );
+    }
+    if (d.postState) downloadBlob(d.postState, `${stem}-at-freeze.state`);
+    if (!d.preState && !d.postState) {
+        console.log("[ocelot] the report carried no save states (older build?); detail:\n" + d.detail);
+    }
+};
+
 // ─── Perf HUD ─────────────────────────────────────────────────────────────────
 
 let perfVisible = false;
@@ -343,10 +383,22 @@ function onWorkerMessage(ev) {
             // Not an error: a title screen or pause menu legitimately holds a still
             // frame. Logged rather than shown, so it is there to copy into a bug report
             // without interrupting someone who is just sitting on a menu.
+            lastStallDiagnostics = {
+                detail: msg.detail || "",
+                frames: msg.frames,
+                preState: msg.preState || null,
+                postState: msg.postState || null,
+                preStateAgeFrames: msg.preStateAgeFrames || 0,
+                romName: currentRomName,
+            };
             console.warn(
                 "[ocelot] picture unchanged for " + msg.frames + " frames. " +
                 "If the game is actually frozen, please include this state:\n" +
-                (msg.detail || "(state capture unavailable)")
+                (msg.detail || "(state capture unavailable)") + "\n" +
+                (msg.preState || msg.postState
+                    ? "Run ocelotStall() in this console to download save states from " +
+                      "before and at the freeze; they make the report reproducible."
+                    : "")
             );
             break;
 

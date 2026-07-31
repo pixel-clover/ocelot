@@ -25,22 +25,23 @@ otherwise, so the count of capped frames is reported too.
 module Main (main) where
 
 import Control.Exception (SomeException, displayException, try)
+import Data.Bits (shiftR, testBit, xor, (.&.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
-import Data.Bits (xor)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (sortOn)
+import Data.Maybe (maybeToList)
 import qualified Data.Map.Strict as M
 import qualified Data.Vector.Unboxed.Mutable as MV
-import Data.Word (Word16, Word32, Word8)
+import Data.Word (Word16, Word32, Word64, Word8)
 import qualified Ocelot.Bus as Bus
 import qualified Ocelot.Cartridge as Cartridge
-import qualified Ocelot.Snapshot as Snapshot
 import Ocelot.Cpu.Execute (runUntilFrame, step)
-import Ocelot.Joypad (Button (..))
-import Ocelot.Cpu.Registers (regPC)
+import Ocelot.Cpu.Registers (regPC, regSP)
 import Ocelot.Cpu.State (CpuState (..))
+import Ocelot.Joypad (Button (..))
 import Ocelot.Machine (Machine (..), debugSummary, machineFromCartridge)
+import qualified Ocelot.Snapshot as Snapshot
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.IO (BufferMode (..), hSetBuffering, stdout)
@@ -79,21 +80,81 @@ buttonAt seed frame
         6 -> ButtonDown
         _ -> ButtonRight
 
+{- | Randomized multi-button input for the fuzz mode.
+
+'buttonAt' presses one button at a time on a fixed rota, which walks through menus but
+plays nothing like a person: real play holds Right while tapping A and B, and that is
+the input space where a mid-game crash lives. This draws a button set per 8-frame slot
+from a splitmix64 hash of (seed, slot), biased toward the hold-Right-and-jump shape of
+a side-scroller, with occasional Start presses because pause and unpause exercise
+interrupt timing that steady play never touches.
+-}
+fuzzButtonsAt :: Int -> Int -> [Button]
+fuzzButtonsAt seed frame
+    | frame < 0 = []
+    | otherwise = dpad <> aBtn <> bBtn <> start <> select
+  where
+    slot = frame `div` 8
+    h = splitmix64 (fromIntegral seed * 0x9E3779B97F4A7C15 + fromIntegral slot)
+    -- Cases 6 and 7 are combinations a physical D-pad cannot produce. A browser
+    -- keyboard delivers them (ArrowLeft and ArrowRight are independent keys), and
+    -- games written against real pads never see them, so they probe input handling
+    -- no play testing on hardware ever exercised.
+    dpad = case h .&. 0x7 :: Word64 of
+        0 -> [ButtonRight]
+        1 -> [ButtonRight]
+        2 -> [ButtonRight]
+        3 -> [ButtonRight]
+        4 -> [ButtonLeft]
+        5 -> [ButtonUp]
+        6 -> [ButtonLeft, ButtonRight]
+        _ -> [ButtonUp, ButtonDown]
+    aBtn = [ButtonA | testBit h 3]
+    bBtn = [ButtonB | testBit h 4 && testBit h 5]
+    start = [ButtonStart | (h `shiftR` 6) .&. 0x3F == 0]
+    select = [ButtonSelect | (h `shiftR` 12) .&. 0xFF == 0]
+
+splitmix64 :: Word64 -> Word64
+splitmix64 x0 =
+    let x1 = (x0 `xor` (x0 `shiftR` 30)) * 0xBF58476D1CE4E5B9
+        x2 = (x1 `xor` (x1 `shiftR` 27)) * 0x94D049BB133111EB
+     in x2 `xor` (x2 `shiftR` 31)
+
+-- | The frame's input as a set, in either input mode.
+inputAt :: Bool -> Int -> Int -> [Button]
+inputAt fuzz seed frame
+    | fuzz = fuzzButtonsAt seed frame
+    | otherwise = maybeToList (buttonAt seed frame)
+
+{- | Press this frame's buttons, releasing only what is no longer held.
+
+Releasing everything and re-pressing would put a same-frame release-press edge on a
+held button, which no physical pad produces.
+-}
+applyInput :: Machine -> Bool -> Int -> Int -> IO ()
+applyInput m fuzz seed frame = do
+    let prev = inputAt fuzz seed (frame - 1)
+        cur = inputAt fuzz seed frame
+    mapM_ (\btn -> Bus.setButton btn False (machineBus m)) (filter (`notElem` cur) prev)
+    mapM_ (\btn -> Bus.setButton btn True (machineBus m)) cur
+
+data WatchMode = NoWatch | WatchReset | WatchRunaway
+
 main :: IO ()
 main = do
     args <- getArgs
-    (watchReset, args1) <- case args of
-        ("--watch-reset" : more) -> pure (True, more)
-        more -> pure (False, more)
-    (statePath, rest) <- case args1 of
-        ("--state" : sp : more) -> pure (Just sp, more)
-        more -> pure (Nothing, more)
+    let parseFlags mode fuzz sp ("--watch-reset" : more) = parseFlags WatchReset fuzz sp more
+        parseFlags mode fuzz sp ("--watch-runaway" : more) = parseFlags WatchRunaway fuzz sp more
+        parseFlags mode _ sp ("--fuzz" : more) = parseFlags mode True sp more
+        parseFlags mode fuzz _ ("--state" : sp : more) = parseFlags mode fuzz (Just sp) more
+        parseFlags mode fuzz sp more = (mode, fuzz, sp, more)
+        (watchMode, fuzz, statePath, rest) = parseFlags NoWatch False Nothing args
     (path, frames, seed) <- case rest of
         [p] -> pure (p, 3600 :: Int, 0 :: Int)
         [p, n] -> pure (p, read n, 0)
         [p, n, sd] -> pure (p, read n, read sd)
         _ ->
-            putStrLn "usage: hang-probe [--watch-reset] [--state FILE] <rom> [frames] [input-seed]"
+            putStrLn "usage: hang-probe [--watch-reset|--watch-runaway] [--fuzz] [--state FILE] <rom> [frames] [input-seed]"
                 >> exitFailure
     hSetBuffering stdout LineBuffering
     bytes <- BS.readFile path
@@ -113,7 +174,10 @@ main = do
                     case loadedState of
                         Left err -> putStrLn ("snapshot load failed: " <> show err) >> exitFailure
                         Right () -> printf "resumed from state %s (%d bytes)\n" sp (BS.length blob)
-            if watchReset then watchForReset m frames seed else run m frames seed
+            case watchMode of
+                NoWatch -> run m frames seed fuzz
+                WatchReset -> watchFor resetTrap m frames seed fuzz
+                WatchRunaway -> watchFor runawayTrap m frames seed fuzz
 
 {- | Step instruction by instruction watching for the game restarting.
 
@@ -142,8 +206,29 @@ trailLength = 48
 settleFrames :: Int
 settleFrames = 120
 
-watchForReset :: Machine -> Int -> Int -> IO ()
-watchForReset m frames seed = do
+-- | The game restarted: nothing during play jumps to the cart entry point.
+resetTrap :: Word16 -> Word16 -> Maybe String
+resetTrap pc _sp
+    | pc == 0x0100 = Just "cart entry point, i.e. the game restarted"
+    | otherwise = Nothing
+
+{- | Execution state no working game reaches, caught within a few instructions of the
+corruption instead of seconds later when the picture freezes.
+
+The stack in the ROM region is definitive: pushes there hit MBC registers and pops read
+ROM bytes, so no game does it on purpose. PC in VRAM, cartridge RAM this cart does not
+have, or the OAM/IO window is the CPU executing data. WRAM and HRAM are deliberately
+not trapped, because games legitimately run code from both.
+-}
+runawayTrap :: Word16 -> Word16 -> Maybe String
+runawayTrap pc sp
+    | sp >= 0x0100 && sp < 0x8000 = Just "stack pointer inside the ROM region"
+    | pc >= 0x8000 && pc <= 0xBFFF = Just "executing VRAM or cartridge RAM"
+    | pc >= 0xFE00 && pc < 0xFF80 = Just "executing OAM or the IO window"
+    | otherwise = Nothing
+
+watchFor :: (Word16 -> Word16 -> Maybe String) -> Machine -> Int -> Int -> Bool -> IO ()
+watchFor trap m frames seed fuzz = do
     trail <- MV.replicate trailLength 0
     slot <- newIORef (0 :: Int)
     let remember !pc = do
@@ -156,10 +241,9 @@ watchForReset m frames seed = do
                 order = [(i - n + k) `mod` trailLength | k <- [0 .. n - 1]]
             mapM (MV.read trail) order
         frameLoop !frame
-            | frame >= frames = putStrLn "no restart seen" >> pure ()
+            | frame >= frames = putStrLn "no trap fired"
             | otherwise = do
-                mapM_ (\btn -> Bus.setButton btn False (machineBus m)) (buttonAt seed (frame - 1))
-                mapM_ (\btn -> Bus.setButton btn True (machineBus m)) (buttonAt seed frame)
+                applyInput m fuzz seed frame
                 cap <- (+ 32) <$> Bus.cpuMCyclesPerLcdFrame (machineBus m)
                 trapped <- instrLoop frame 0 cap
                 if trapped then pure () else frameLoop (frame + 1)
@@ -171,27 +255,24 @@ watchForReset m frames seed = do
                 step m
                 cpu <- readIORef (machineCpu m)
                 let pc = regPC (cpuRegs cpu)
+                    sp = regSP (cpuRegs cpu)
                     used' = used + fromIntegral (cpuCycles cpu - c0)
                 remember pc
-                if frame > settleFrames && pc == 0x0100
-                    then do
-                        printf "TRAP at frame %d: pc=%04X (%s)\n" frame pc (trapName pc)
+                case if frame > settleFrames then trap pc sp else Nothing of
+                    Just reason -> do
+                        printf "TRAP at frame %d: pc=%04X sp=%04X (%s)\n" frame pc sp reason
                         pcs <- recent
                         putStrLn ("  last " <> show (length pcs) <> " PCs, oldest first:")
                         putStrLn ("    " <> unwords (map (printf "%04X") pcs))
                         reportState m
                         pure True
-                    else do
+                    Nothing -> do
                         ready <- Bus.takeFrameReady (machineBus m)
                         if ready then pure False else instrLoop frame used' cap
     frameLoop 0
 
-trapName :: Word16 -> String
-trapName 0x0100 = "cart entry point, i.e. the game restarted"
-trapName _ = "unexpected"
-
-run :: Machine -> Int -> Int -> IO ()
-run m frames seed = do
+run :: Machine -> Int -> Int -> Bool -> IO ()
+run m frames seed fuzz = do
     lastHash <- newIORef (0 :: Word32)
     sameFor <- newIORef (0 :: Int)
     stallAt <- newIORef (Nothing :: Maybe Int)
@@ -200,10 +281,7 @@ run m frames seed = do
     let go !i
             | i >= frames = pure Nothing
             | otherwise = do
-                -- Release last frame's button before pressing this frame's, so a held
-                -- run of frames reads as one press rather than several overlapping ones.
-                mapM_ (\btn -> Bus.setButton btn False (machineBus m)) (buttonAt seed (i - 1))
-                mapM_ (\btn -> Bus.setButton btn True (machineBus m)) (buttonAt seed i)
+                applyInput m fuzz seed i
                 cap <- (+ 32) <$> Bus.cpuMCyclesPerLcdFrame (machineBus m)
                 r <- try (runUntilFrame cap m) :: IO (Either SomeException Int)
                 case r of

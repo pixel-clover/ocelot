@@ -260,6 +260,34 @@ A stale `dist/web/ocelot.wasm` deserves ruling out first of all, since nothing i
 separate step from `make build`. A wasm artifact predating a batch of core fixes behaves exactly like "the web build is worse
 than the desktop build".
 
+#### Catching a Runaway Instead of a Stall
+
+A game that takes a wild jump does not stop; it executes data until it happens to loop, and the stall watchdog only notices
+about three seconds later, long after the trail has gone cold. `--watch-runaway` steps instruction by instruction and traps on
+execution state no working game reaches: the stack pointer inside the ROM region (pushes there hit MBC registers, which is how
+a crashed Adventure Island session ended up with spurious bank-high bits), or the program counter in VRAM, absent cartridge
+RAM, or the OAM/IO window. WRAM and HRAM are deliberately not trapped, because games legitimately run code from both. The trap
+prints the last 48 program counters, which show the routine that walked off.
+
+`--fuzz` replaces the fixed one-button input rota with a seeded random button set per 8-frame slot, biased toward the
+hold-Right-and-jump shape of a side-scroller. It also presses D-pad combinations a physical pad cannot produce (Left with
+Right, Up with Down), because the web frontend's keyboard input delivers them and games written against real pads have never
+been tested with them. Fan seeds out in parallel:
+
+```
+for s in $(seq 0 15); do echo $s; done | \
+  xargs -P 8 -I{} sh -c 'bin/tools/hang-probe --watch-runaway --fuzz rom.gb 30000 {} > /tmp/probe-{}.log 2>&1'
+grep -l TRAP /tmp/probe-*.log
+```
+
+#### Turning a Browser Freeze into a Reproduction
+
+Scripted input cannot reach everywhere a person playing well can, so the web frontend captures its own reproduction artifacts.
+The Worker keeps a rolling save state, refreshed every ten seconds only while the picture is changing, and attaches both that
+pre-freeze state and the wedged state to the stall report. Running `ocelotStall()` in the browser console after a freeze
+downloads them; `hang-probe --state <pre-freeze file> --watch-runaway --fuzz` then searches for the crash from a starting point
+seconds before it, instead of from the title screen.
+
 ### Resolved: The VBlank IF Latch Was the Wrong Lever Entirely
 
 `misc/ppu/vblank_stat_intr-C.gb` now passes, and the dead end recorded here is worth keeping because
