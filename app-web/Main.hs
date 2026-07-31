@@ -351,10 +351,10 @@ ocelot_load_state sid ptr len = do
 ocelot_extract_save :: CInt -> IO CInt
 ocelot_extract_save sid = do
     result <- withSession sid $ \handle -> do
-        blob <- Web.extractSaveData (shSession handle)
-        replaceBuffer (shSaveBuffer handle) blob
-        clearLastError
-        pure 1
+        extracted <- try (Web.extractSaveData (shSession handle)) :: IO (Either SomeException BS.ByteString)
+        case extracted of
+            Left err -> setLastError (displayException err) >> pure 0
+            Right blob -> replaceBuffer (shSaveBuffer handle) blob >> clearLastError >> pure 1
     pure (fromMaybe 0 result)
 
 ocelot_save_buffer_ptr :: CInt -> IO (Ptr Word8)
@@ -374,10 +374,16 @@ ocelot_save_buffer_len sid = do
 ocelot_load_save :: CInt -> Ptr Word8 -> CSize -> IO CInt
 ocelot_load_save sid ptr len = do
     result <- withSession sid $ \handle -> do
-        blob <- BS.packCStringLen (castPtr ptr, fromIntegral len)
-        Web.loadSaveData blob (shSession handle)
-        clearLastError
-        pure 1
+        loaded <-
+            try
+                ( do
+                    blob <- BS.packCStringLen (castPtr ptr, fromIntegral len)
+                    Web.loadSaveData blob (shSession handle)
+                ) ::
+                IO (Either SomeException ())
+        case loaded of
+            Left err -> setLastError (displayException err) >> pure 0
+            Right () -> clearLastError >> pure 1
     pure (fromMaybe 0 result)
 
 ocelot_rom_title_ptr :: CInt -> IO (Ptr Word8)

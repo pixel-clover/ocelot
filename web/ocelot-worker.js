@@ -453,8 +453,12 @@ self.onmessage = function (ev) {
                     return;
                 }
                 const e = wasm.instance.exports;
-                emu = e.ocelot_create(ptr, romBytes.length);
-                wasmFree(ptr, romBytes.length);
+                try {
+                    emu = e.ocelot_create(ptr, romBytes.length);
+                } finally {
+                    // Free the ROM staging buffer even when ocelot_create traps.
+                    wasmFree(ptr, romBytes.length);
+                }
                 if (!emu) {
                     postMessage({type: "romError", id, message: getLastError()});
                     return;

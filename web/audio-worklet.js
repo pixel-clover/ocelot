@@ -42,6 +42,15 @@ class OcelotAudioProcessor extends AudioWorkletProcessor {
                 this.port.postMessage({type: "level", count: this.count, capacity: this.bufferSize});
                 return;
             }
+            if (event.data === "clear") {
+                // Drop the backlog (e.g. after an unmute) and fade back in so the
+                // jump in the sample stream does not click.
+                this.readPos = 0;
+                this.writePos = 0;
+                this.count = 0;
+                this.fadeGain = 0.0;
+                return;
+            }
             const samples = event.data;
             for (let i = 0; i < samples.length; i++) {
                 if (this.count >= this.bufferSize) break;

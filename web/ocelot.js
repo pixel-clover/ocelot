@@ -327,7 +327,10 @@ function onWorkerMessage(ev) {
         }
 
         case "audio": {
-            if (audioNode) {
+            // While audio is muted the context is suspended but the worklet's message
+            // port stays live, so forwarding samples would pin its ring buffer at
+            // capacity and unmuting would then play ~0.6 s behind the picture.
+            if (audioNode && audioEnabled) {
                 audioNode.port.postMessage(new Int16Array(msg.buffer, 0, msg.samples), [msg.buffer]);
                 if (msg.queryLevel) audioNode.port.postMessage("query-level");
             } else {
@@ -518,6 +521,10 @@ function initRemapUI() {
 
 let activeRemapCleanup = null;
 
+// Keys 'onKeyDown' consumes before joypad dispatch: a binding to one of these
+// would silently never fire, so refuse it at remap time instead.
+const RESERVED_HOTKEYS = new Set(["F1", "F5", "F6", "F7", "F11", "Space", "Escape"]);
+
 function startListening(rbtn, btn) {
     if (activeRemapCleanup) activeRemapCleanup();
     rbtn.classList.add("listening");
@@ -529,6 +536,11 @@ function startListening(rbtn, btn) {
         cleanup();
         if (ev.code === "Escape") {
             rbtn.textContent = keyDisplayName(keyForButton(btn));
+            return;
+        }
+        if (RESERVED_HOTKEYS.has(ev.code)) {
+            rbtn.textContent = keyDisplayName(keyForButton(btn));
+            showToast(`${ev.code} is reserved for a hotkey`);
             return;
         }
         const newCode = ev.code;
@@ -693,7 +705,9 @@ function closeAllOverlays() {
 function resumeAfterOverlay() {
     if (overlayDepth > 0) overlayDepth--;
     if (overlayDepth > 0) return;
-    if (wasRunningBeforeOverlay && currentRomName) {
+    // 'running' already true means a frame loop is active; starting another
+    // requestAnimationFrame chain here would double rendering and polling.
+    if (wasRunningBeforeOverlay && currentRomName && !running) {
         running = true;
         lastRafTime = performance.now();
         worker.postMessage({type: "resume"});
@@ -945,7 +959,14 @@ function toggleAudio() {
     audioEnabled = !audioEnabled;
     document.getElementById("audio-toggle").textContent = audioEnabled ? "ON" : "OFF";
     if (audioCtx) {
-        if (audioEnabled) audioCtx.resume(); else audioCtx.suspend();
+        if (audioEnabled) {
+            // Drop whatever the ring buffer accumulated before the mute, so
+            // playback resumes in sync instead of behind the picture.
+            if (audioNode) audioNode.port.postMessage("clear");
+            audioCtx.resume();
+        } else {
+            audioCtx.suspend();
+        }
     }
     saveSettings();
 }
@@ -1108,6 +1129,10 @@ function togglePause() {
         showToast("Load a ROM first");
         return;
     }
+    // An open overlay owns the pause state: resuming here would run the game
+    // invisibly behind it, and 'resumeAfterOverlay' would later start a second
+    // requestAnimationFrame chain on top of ours.
+    if (overlayDepth > 0) return;
     running = !running;
     document.getElementById("btn-pause").textContent = running ? "Pause" : "Resume";
     if (running) {
