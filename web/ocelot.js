@@ -100,9 +100,11 @@ window.ocelotStall = function () {
         );
     }
     if (d.postState) downloadBlob(d.postState, `${stem}-at-freeze.state`);
+    downloadBlob(`rom=${d.romName}\nframes=${d.frames}\n${d.detail}\n`, `${stem}-freeze-report.txt`);
     if (!d.preState && !d.postState) {
         console.log("[ocelot] the report carried no save states (older build?); detail:\n" + d.detail);
     }
+    showToast("Freeze diagnostics downloaded");
 };
 
 // ─── Perf HUD ─────────────────────────────────────────────────────────────────
@@ -287,6 +289,7 @@ async function init() {
         saveSettings();
     });
     document.getElementById("error-dismiss").addEventListener("click", hideError);
+    document.getElementById("stall-download").addEventListener("click", () => window.ocelotStall());
 
     document.getElementById("help-overlay").addEventListener("click", (ev) => {
         if (ev.target === ev.currentTarget) toggleHelp();
@@ -391,8 +394,13 @@ function onWorkerMessage(ev) {
                 preStateAgeFrames: msg.preStateAgeFrames || 0,
                 romName: currentRomName,
             };
+            {
+                const group = document.getElementById("stall-group");
+                if (group) group.style.display = "";
+            }
             console.warn(
-                "[ocelot] picture unchanged for " + msg.frames + " frames. " +
+                "[ocelot] " + (currentRomTitle || currentRomName || "ROM") +
+                ": picture unchanged for " + msg.frames + " frames. " +
                 "If the game is actually frozen, please include this state:\n" +
                 (msg.detail || "(state capture unavailable)") + "\n" +
                 (msg.preState || msg.postState

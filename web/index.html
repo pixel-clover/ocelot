@@ -995,6 +995,12 @@
         <button id="help-btn" title="Help [F1]" type="button">Help</button>
         <button id="about-btn" title="About Ocelot" type="button">About</button>
     </div>
+    <!-- Temporary: appears after the stall watchdog reports a freeze; downloads the
+         pre-freeze and at-freeze save states for a bug report. -->
+    <div class="btn-group tone-system" id="stall-group" style="display:none">
+        <div class="btn-group-label">Freeze</div>
+        <button id="stall-download" title="Download freeze diagnostics" type="button">Download report</button>
+    </div>
 </div>
 
 <div class="status-bar">
