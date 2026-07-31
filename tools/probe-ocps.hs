@@ -6,6 +6,7 @@
 
 module Main (main) where
 
+import Control.Monad ((>=>))
 import qualified Data.ByteString as BS
 import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word8)
@@ -37,7 +38,7 @@ main = do
     printf "OCPS register reads: 0x%02X\n" ocps
     -- Direct vector inspection (bypasses OCPS/OCPD register path).
     printf "Direct ppuObjPalRam[0..7]: "
-    mapM_ (\i -> MV.read (Ppu.ppuObjPalRam ppu) i >>= \b -> printf "%02X " b) [0 .. 7 :: Int]
+    mapM_ (MV.read (Ppu.ppuObjPalRam ppu) >=> printf "%02X ") [0 .. 7 :: Int]
     putStrLn ""
     -- Round-trip via OCPS+OCPD.
     printf "Via OCPS+OCPD     [0..7]: "

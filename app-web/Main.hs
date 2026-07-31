@@ -35,6 +35,8 @@ data SessionHandle = SessionHandle
     , shAudioLen :: !(IORef Int)
     , shStateBuffer :: !(IORef (Ptr Word8, Int))
     , shSaveBuffer :: !(IORef (Ptr Word8, Int))
+    , shDebugBuffer :: !(IORef (Ptr Word8, Int))
+    , shSerialBuffer :: !(IORef (Ptr Word8, Int))
     }
 
 data Runtime = Runtime
@@ -129,6 +131,8 @@ destroyHandle handle = do
     when (shAudioPtr handle /= nullPtr) (free (shAudioPtr handle))
     freeBufferRef (shStateBuffer handle)
     freeBufferRef (shSaveBuffer handle)
+    freeBufferRef (shDebugBuffer handle)
+    freeBufferRef (shSerialBuffer handle)
 
 drainAudioIntoHandle :: SessionHandle -> IO ()
 drainAudioIntoHandle handle = do
@@ -166,6 +170,8 @@ makeHandle session = do
     audioLen <- newIORef 0
     stateBuffer <- newIORef (nullPtr, 0)
     saveBuffer <- newIORef (nullPtr, 0)
+    debugBuffer <- newIORef (nullPtr, 0)
+    serialBuffer <- newIORef (nullPtr, 0)
     pure
         SessionHandle
             { shSession = session
@@ -177,6 +183,8 @@ makeHandle session = do
             , shAudioLen = audioLen
             , shStateBuffer = stateBuffer
             , shSaveBuffer = saveBuffer
+            , shDebugBuffer = debugBuffer
+            , shSerialBuffer = serialBuffer
             }
 
 ocelot_alloc :: CSize -> IO (Ptr Word8)
@@ -265,6 +273,52 @@ ocelot_clear_audio_buffer sid = do
     _ <- withSession sid (\handle -> writeIORef (shAudioLen handle) 0)
     pure ()
 
+{- | Consecutive frames whose picture has not changed.
+
+Cheap enough for the host to poll every frame: it is a counter read, no hashing. The
+host watches for it to cross 'ocelot_stall_threshold' and only then asks for
+'ocelot_debug_state', so a stall is reported once rather than once per frame.
+-}
+ocelot_stalled_frames :: CInt -> IO CInt
+ocelot_stalled_frames sid = do
+    found <- lookupSession sid
+    case found of
+        Nothing -> pure 0
+        Just handle -> fromIntegral <$> Web.stalledFrames (shSession handle)
+
+-- | Frame count at which the host should treat an unchanging picture as worth reporting.
+ocelot_stall_threshold :: IO CInt
+ocelot_stall_threshold = pure (fromIntegral Web.stallThreshold)
+
+{- | Capture machine state as text, for the host to show or log. Returns 1 on success.
+
+A frozen picture on its own says nothing about why. This is the difference between an
+unactionable "it hangs" and a report naming the PC, the pending interrupts, the LCD
+state, and the cartridge's bank selects.
+-}
+ocelot_debug_state :: CInt -> IO CInt
+ocelot_debug_state sid = do
+    result <- withSession sid $ \handle -> do
+        captured <- try (Web.debugState (shSession handle)) :: IO (Either SomeException BS.ByteString)
+        case captured of
+            Left err -> setLastError (displayException err) >> pure 0
+            Right text -> replaceBuffer (shDebugBuffer handle) text >> clearLastError >> pure 1
+    pure (fromMaybe 0 result)
+
+ocelot_debug_state_ptr :: CInt -> IO (Ptr Word8)
+ocelot_debug_state_ptr sid = do
+    found <- lookupSession sid
+    case found of
+        Nothing -> pure nullPtr
+        Just handle -> fst <$> readIORef (shDebugBuffer handle)
+
+ocelot_debug_state_len :: CInt -> IO CSize
+ocelot_debug_state_len sid = do
+    found <- lookupSession sid
+    case found of
+        Nothing -> pure 0
+        Just handle -> fromIntegral . snd <$> readIORef (shDebugBuffer handle)
+
 ocelot_save_state :: CInt -> IO CInt
 ocelot_save_state sid = do
     result <- withSession sid $ \handle -> do
@@ -301,10 +355,10 @@ ocelot_load_state sid ptr len = do
 ocelot_extract_save :: CInt -> IO CInt
 ocelot_extract_save sid = do
     result <- withSession sid $ \handle -> do
-        blob <- Web.extractSaveData (shSession handle)
-        replaceBuffer (shSaveBuffer handle) blob
-        clearLastError
-        pure 1
+        extracted <- try (Web.extractSaveData (shSession handle)) :: IO (Either SomeException BS.ByteString)
+        case extracted of
+            Left err -> setLastError (displayException err) >> pure 0
+            Right blob -> replaceBuffer (shSaveBuffer handle) blob >> clearLastError >> pure 1
     pure (fromMaybe 0 result)
 
 ocelot_save_buffer_ptr :: CInt -> IO (Ptr Word8)
@@ -324,11 +378,44 @@ ocelot_save_buffer_len sid = do
 ocelot_load_save :: CInt -> Ptr Word8 -> CSize -> IO CInt
 ocelot_load_save sid ptr len = do
     result <- withSession sid $ \handle -> do
-        blob <- BS.packCStringLen (castPtr ptr, fromIntegral len)
-        Web.loadSaveData blob (shSession handle)
-        clearLastError
-        pure 1
+        loaded <-
+            try
+                ( do
+                    blob <- BS.packCStringLen (castPtr ptr, fromIntegral len)
+                    Web.loadSaveData blob (shSession handle)
+                ) ::
+                IO (Either SomeException ())
+        case loaded of
+            Left err -> setLastError (displayException err) >> pure 0
+            Right () -> clearLastError >> pure 1
     pure (fromMaybe 0 result)
+
+{- | Take the bytes the guest wrote to the serial port since the last drain.
+Test ROMs report their verdict over serial, so this is what lets a host (or
+tools/wasm-cpu-check.mjs) read a blargg ROM's own pass or fail text.
+-}
+ocelot_drain_serial :: CInt -> IO CInt
+ocelot_drain_serial sid = do
+    result <- withSession sid $ \handle -> do
+        drained <- try (Web.drainSerialBytes (shSession handle)) :: IO (Either SomeException BS.ByteString)
+        case drained of
+            Left err -> setLastError (displayException err) >> pure 0
+            Right bytes -> replaceBuffer (shSerialBuffer handle) bytes >> clearLastError >> pure 1
+    pure (fromMaybe 0 result)
+
+ocelot_serial_ptr :: CInt -> IO (Ptr Word8)
+ocelot_serial_ptr sid = do
+    found <- lookupSession sid
+    case found of
+        Nothing -> pure nullPtr
+        Just handle -> fst <$> readIORef (shSerialBuffer handle)
+
+ocelot_serial_len :: CInt -> IO CSize
+ocelot_serial_len sid = do
+    found <- lookupSession sid
+    case found of
+        Nothing -> pure 0
+        Just handle -> fromIntegral . snd <$> readIORef (shSerialBuffer handle)
 
 ocelot_rom_title_ptr :: CInt -> IO (Ptr Word8)
 ocelot_rom_title_ptr sid = maybe nullPtr shTitlePtr <$> lookupSession sid
@@ -391,6 +478,11 @@ foreign export ccall ocelot_framebuffer_len :: CInt -> IO CSize
 foreign export ccall ocelot_audio_buffer_ptr :: CInt -> IO (Ptr Int16)
 foreign export ccall ocelot_audio_buffer_len :: CInt -> IO CSize
 foreign export ccall ocelot_clear_audio_buffer :: CInt -> IO ()
+foreign export ccall ocelot_stalled_frames :: CInt -> IO CInt
+foreign export ccall ocelot_stall_threshold :: IO CInt
+foreign export ccall ocelot_debug_state :: CInt -> IO CInt
+foreign export ccall ocelot_debug_state_ptr :: CInt -> IO (Ptr Word8)
+foreign export ccall ocelot_debug_state_len :: CInt -> IO CSize
 foreign export ccall ocelot_save_state :: CInt -> IO CInt
 foreign export ccall ocelot_save_state_ptr :: CInt -> IO (Ptr Word8)
 foreign export ccall ocelot_save_state_len :: CInt -> IO CSize
@@ -399,6 +491,9 @@ foreign export ccall ocelot_extract_save :: CInt -> IO CInt
 foreign export ccall ocelot_save_buffer_ptr :: CInt -> IO (Ptr Word8)
 foreign export ccall ocelot_save_buffer_len :: CInt -> IO CSize
 foreign export ccall ocelot_load_save :: CInt -> Ptr Word8 -> CSize -> IO CInt
+foreign export ccall ocelot_drain_serial :: CInt -> IO CInt
+foreign export ccall ocelot_serial_ptr :: CInt -> IO (Ptr Word8)
+foreign export ccall ocelot_serial_len :: CInt -> IO CSize
 foreign export ccall ocelot_rom_title_ptr :: CInt -> IO (Ptr Word8)
 foreign export ccall ocelot_rom_title_len :: CInt -> IO CSize
 foreign export ccall ocelot_cartridge_has_battery :: CInt -> IO CInt

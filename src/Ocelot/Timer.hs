@@ -168,22 +168,50 @@ stepT ts0 =
 -- Public surface
 ----------------------------------------------------------------------
 
-writeDiv :: TimerState -> TimerState
+{- | Apply a write-driven falling edge, reporting whether TIMA overflowed.
+
+A register write lands part-way through its M-cycle on hardware, so the rest of
+that cycle still advances the TIMA reload state machine and @IF@ is up by the
+instruction boundary. Ocelot's 'Ocelot.Machine.cycleWrite' ticks the bus and
+*then* writes, so there is no remaining cycle to run the state machine in: a
+write-driven overflow has to report immediately or the interrupt is a full
+M-cycle late. That is what mooneye @acceptance\/timer\/rapid_toggle@ measures,
+where the ROM disables the timer with @TAC = 0@ on the cycle TIMA wraps.
+
+The divider-driven edge in 'stepT' keeps the 4 T-cycle delay, because there the
+remaining cycles do exist.
+-}
+writeFallingEdge :: TimerState -> (TimerState, Bool)
+{-# INLINE writeFallingEdge #-}
+writeFallingEdge ts
+    | timTima ts == 0xFF =
+        (ts{timTima = timTma ts, timReloadedCounter = 4, timReloadCounter = 0}, True)
+    | otherwise = (ts{timTima = timTima ts + 1}, False)
+
+-- | Reset the divider. Reports a TIMA overflow caused by the resulting edge.
+writeDiv :: TimerState -> (TimerState, Bool)
 writeDiv ts =
     -- Reset the divider; if the AND signal was high it drops to low,
     -- producing a falling edge that increments TIMA once.
     let !ts1 = ts{timDivider = 0}
         !newAnd = andSignal 0 (timTac ts1)
-        !ts2 = if timPrevAnd ts1 && not newAnd then applyFallingEdge ts1 else ts1
-     in ts2{timPrevAnd = newAnd}
+        (!ts2, !fired) =
+            if timPrevAnd ts1 && not newAnd
+                then writeFallingEdge ts1
+                else (ts1, False)
+     in (ts2{timPrevAnd = newAnd}, fired)
 
-writeTac :: Word8 -> TimerState -> TimerState
+-- | Write TAC. Reports a TIMA overflow caused by the resulting edge.
+writeTac :: Word8 -> TimerState -> (TimerState, Bool)
 writeTac v ts =
     -- Same edge detector: changing TAC can drive AND high -> low.
     let !ts1 = ts{timTac = v .&. 0x07}
         !newAnd = andSignal (timDivider ts1) (timTac ts1)
-        !ts2 = if timPrevAnd ts1 && not newAnd then applyFallingEdge ts1 else ts1
-     in ts2{timPrevAnd = newAnd}
+        (!ts2, !fired) =
+            if timPrevAnd ts1 && not newAnd
+                then writeFallingEdge ts1
+                else (ts1, False)
+     in (ts2{timPrevAnd = newAnd}, fired)
 
 writeTima :: Word8 -> TimerState -> TimerState
 writeTima v ts

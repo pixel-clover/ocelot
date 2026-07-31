@@ -6,6 +6,32 @@ let running = false;
 const FRAME_INTERVAL = 1000 / 59.7275;
 const FRAME_BYTES = 160 * 144 * 4;
 let lastFrameTime = 0;
+// Set once the watchdog has reported the current stall, cleared when the picture moves
+// again, so one frozen stretch produces one report rather than one per frame.
+let stallReported = false;
+let stallThresholdFrames = 0;
+// Rolling pre-freeze save states. 'snapCur' is refreshed every SNAPSHOT_INTERVAL_FRAMES
+// while the picture is still changing, so when a stall fires it holds machine state
+// from before the freeze; 'snapPrev' reaches further back for crashes whose cause
+// predates the picture going still. Both ride along on the stall report, which turns
+// "it froze" into a state file a headless tool can resume from.
+const SNAPSHOT_INTERVAL_FRAMES = 600;
+let snapCur = null;
+let snapPrev = null;
+let framesSinceSnapshot = 0;
+// Frames fully run since ROM load, and every button event as [frame, code, down].
+// Together with the rolling snapshot this makes a freeze replayable: resume from the
+// snapshot's frame and apply the same events at the same frame boundaries. Entries
+// older than the older snapshot are pruned at each rotation.
+//
+// INPUT_LOG_MAX is a backstop for the case rotation cannot cover: snapshots are
+// skipped while the picture is still, so pruning stops for as long as a stall lasts.
+// Someone pressing buttons at a static title screen would otherwise grow this without
+// bound. The cap is far above the ~1200 frames of history a report can carry, so it
+// only ever discards entries no report could have used.
+const INPUT_LOG_MAX = 4096;
+let frameIndex = 0;
+let inputLog = [];
 let tickTimer = null;
 const bufferPool = [];
 const audioBufferPool = [];
@@ -320,6 +346,10 @@ function runFrame() {
         postMessage({type: "audio", buffer: audioBuf, samples: sampleCount, queryLevel}, [audioBuf]);
     }
 
+    frameIndex++;
+    updateRollingSnapshot(e);
+    checkStallWatchdog(e);
+
     const frameEnd = performance.now();
     lastTiming = {
         runMs: afterRun - frameStart,
@@ -336,6 +366,83 @@ The loop stops itself whenever it is not running rather than idling on a 16 ms
 poll: a paused or ROM-less tab woke the Worker ~60 times a second to do
 nothing. Every path that sets 'running' back to true restarts it, so the
 invariant to preserve is "running implies tickTimer is armed". */
+/*
+ * A frozen picture is the one failure the emulator cannot report by itself: no
+ * exception is thrown and no trap fires, so `ocelot_run_frame` keeps returning
+ * success while the guest sits in a loop that never progresses. This polls a counter
+ * the core maintains (a plain integer read, no hashing on this side) and, when it
+ * crosses the core's threshold, asks for a one-line state capture and forwards it.
+ *
+ * A still picture is NOT an error. Title screens, pause menus, and anything waiting
+ * on input hold a frame indefinitely, which is why this reports diagnostics instead of
+ * stopping the emulator, and why `running` is left alone.
+ */
+function captureState(e) {
+    if (!e.ocelot_save_state || !e.ocelot_save_state(emu)) return null;
+    const ptr = e.ocelot_save_state_ptr(emu);
+    const len = e.ocelot_save_state_len(emu);
+    if (!ptr || !len) return null;
+    const buf = new ArrayBuffer(len);
+    new Uint8Array(buf).set(readMemory(ptr, len));
+    return buf;
+}
+
+/* Refresh the rolling pre-freeze snapshot.
+
+Skipped while the stall counter is non-zero: a capture taken with the picture already
+frozen would be post-crash state, and the point of the pair is to have state from
+before the corruption. */
+function updateRollingSnapshot(e) {
+    if (!e.ocelot_save_state || !e.ocelot_stalled_frames) return;
+    if (++framesSinceSnapshot < SNAPSHOT_INTERVAL_FRAMES) return;
+    if (e.ocelot_stalled_frames(emu) !== 0) return;
+    framesSinceSnapshot = 0;
+    const buf = captureState(e);
+    if (buf) {
+        snapPrev = snapCur;
+        snapCur = {buf, frame: frameIndex};
+        if (snapPrev) inputLog = inputLog.filter((entry) => entry[0] >= snapPrev.frame);
+    }
+}
+
+function checkStallWatchdog(e) {
+    if (!e.ocelot_stalled_frames) return; // older wasm build without the watchdog
+    if (!stallThresholdFrames) {
+        stallThresholdFrames = e.ocelot_stall_threshold() || 600;
+    }
+    const stalled = e.ocelot_stalled_frames(emu);
+    if (stalled < stallThresholdFrames) {
+        stallReported = false;
+        return;
+    }
+    if (stallReported) return;
+    stallReported = true;
+    let detail = "";
+    if (e.ocelot_debug_state(emu)) {
+        detail = readString(e.ocelot_debug_state_ptr(emu), e.ocelot_debug_state_len(emu));
+    }
+    // Ship the rolling pre-freeze states and the wedged state with the report. The
+    // buffers are transferred, so the rolling pair is cleared; it rebuilds within two
+    // snapshot intervals if the game recovers.
+    const postState = captureState(e);
+    const snap = snapPrev || snapCur;
+    const preState = snap ? snap.buf : null;
+    const preStateAgeFrames = snap ? frameIndex - snap.frame : 0;
+    // Button events since the shipped snapshot, as frame offsets relative to it.
+    // Replaying them over the snapshot reproduces the freeze deterministically.
+    const inputs = snap
+        ? inputLog.filter((entry) => entry[0] >= snap.frame)
+              .map((entry) => [entry[0] - snap.frame, entry[1], entry[2]])
+        : [];
+    snapCur = null;
+    snapPrev = null;
+    framesSinceSnapshot = 0;
+    const transfers = [];
+    if (preState) transfers.push(preState);
+    if (postState) transfers.push(postState);
+    postMessage({type: "stallReport", frames: stalled, detail, preState, postState, preStateAgeFrames, inputs}, transfers);
+}
+
 function workerTick() {
     tickTimer = null;
     if (!running || !emu) return;
@@ -405,6 +512,12 @@ self.onmessage = function (ev) {
         switch (type) {
             case "loadRom": {
                 running = false;
+                snapCur = null;
+                snapPrev = null;
+                framesSinceSnapshot = 0;
+                stallReported = false;
+                frameIndex = 0;
+                inputLog = [];
                 if (emu) {
                     wasm.instance.exports.ocelot_destroy(emu);
                     emu = 0;
@@ -417,8 +530,12 @@ self.onmessage = function (ev) {
                     return;
                 }
                 const e = wasm.instance.exports;
-                emu = e.ocelot_create(ptr, romBytes.length);
-                wasmFree(ptr, romBytes.length);
+                try {
+                    emu = e.ocelot_create(ptr, romBytes.length);
+                } finally {
+                    // Free the ROM staging buffer even when ocelot_create traps.
+                    wasmFree(ptr, romBytes.length);
+                }
                 if (!emu) {
                     postMessage({type: "romError", id, message: getLastError()});
                     return;
@@ -450,6 +567,12 @@ self.onmessage = function (ev) {
             case "destroyRom": {
                 running = false;
                 stopTicking();
+                snapCur = null;
+                snapPrev = null;
+                framesSinceSnapshot = 0;
+                stallReported = false;
+                frameIndex = 0;
+                inputLog = [];
                 if (emu) {
                     wasm.instance.exports.ocelot_destroy(emu);
                     emu = 0;
@@ -459,7 +582,16 @@ self.onmessage = function (ev) {
             }
 
             case "setButton":
-                if (emu) wasm.instance.exports.ocelot_set_button(emu, msg.button, msg.down ? 1 : 0);
+                if (emu) {
+                    // 'frameIndex' frames have fully run, so this event takes effect
+                    // before frame 'frameIndex' does; replay applies it at the same spot.
+                    inputLog.push([frameIndex, msg.button, msg.down ? 1 : 0]);
+                    // Oldest first: those are the ones already outside any replay window.
+                    if (inputLog.length > INPUT_LOG_MAX) {
+                        inputLog.splice(0, inputLog.length - INPUT_LOG_MAX);
+                    }
+                    wasm.instance.exports.ocelot_set_button(emu, msg.button, msg.down ? 1 : 0);
+                }
                 break;
 
             case "pause":
@@ -498,6 +630,12 @@ self.onmessage = function (ev) {
                     postMessage({type: "loadStateError", id, message: "No ROM loaded"});
                     return;
                 }
+                // A state load teleports the machine, so snapshots and input recorded
+                // before it can no longer replay into what follows.
+                snapCur = null;
+                snapPrev = null;
+                framesSinceSnapshot = 0;
+                inputLog = [];
                 const stateBytes = new Uint8Array(msg.buffer);
                 const ptr = wasmAlloc(stateBytes);
                 if (!ptr) {

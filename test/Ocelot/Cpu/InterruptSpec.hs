@@ -95,6 +95,35 @@ spec = do
             cpuHalted cpu' `shouldBe` False
             regPC regs `shouldBe` 0x0001
 
+        it "wakes on the cycle the interrupt arrives, not the cycle after" $ do
+            {- A peripheral raising IF during the halt tick has to wake the CPU on that tick.
+            'haltStep' used to test for a pending interrupt BEFORE ticking, so the tick that raised
+            IF was followed by a second, wasted one. That is the 4 T-cycles mooneye
+            @acceptance/halt_ime0_nointr_timing@ measures.
+
+            Asserted as an invariant rather than a cycle count, so it does not encode the timer's
+            period: a halted CPU must never be stepped while an interrupt is already pending, because
+            the tick that raised it should have woken us.
+            -}
+            m <- mkProg [0x76, 0x00]
+            writeMem 0xFFFF 0x04 m -- IE: timer
+            writeMem 0xFF07 0x05 m -- TAC: enabled
+            writeMem 0xFF05 0xFF m -- TIMA one increment from overflow
+            _ <- runFor 1 m -- execute the HALT
+            let go n
+                    | n > (500 :: Int) = pure (Just "never woke")
+                    | otherwise = do
+                        cpu <- getCpu m
+                        if not (cpuHalted cpu)
+                            then pure Nothing
+                            else do
+                                pend <- pendingInterrupt m
+                                case pend of
+                                    Just _ -> pure (Just "stepped a halted CPU with IF already set")
+                                    Nothing -> step m >> go (n + 1)
+            outcome <- go 0
+            maybe (pure ()) expectationFailure outcome
+
         it "HALT bug: with IME=0 and IF&IE != 0, HALT does not halt" $ do
             -- Without the bug fix the CPU halts and never resumes (because service requires IME).
             -- After the fix, HALT in this state is a no-op and execution continues with the next

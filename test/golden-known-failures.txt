@@ -1,0 +1,72 @@
+# Test ROMs that Ocelot is currently known to fail.
+#
+# The golden suite reports accuracy gaps as pending rather than failing, so the run stays green and
+# the gap list stays visible. On its own that means a ROM sliding from passing to failing shows up
+# only as a changed pending entry somebody has to spot in a diff. This file makes it a ratchet:
+#
+#   * A ROM not listed here MUST pass. If it fails, the suite fails and names it a regression.
+#   * A ROM listed here that starts passing ALSO fails the suite, asking you to delete its line.
+#
+# Both directions are deliberate. Silent movement either way is what let two regressions through
+# before this file existed.
+#
+# Paths are repo-relative and must match the ROM path the spec loads. Blank lines and lines starting
+# with '#' are ignored. Keep entries sorted so the diff reads cleanly.
+#
+# Run the golden suite with: OCELOT_GOLDEN=1 stack test
+
+# The nine instruction-timing ROMs (add_sp_e, ld_hl_sp_e, call, call_cc, ret, ret_cc, reti, jp,
+# jp_cc) used to live here. They were never timing failures: OAM DMA locked the CPU off every
+# address below 0xFF00, so an instruction fetch from WRAM or echo RAM read 0xFF, decoded as RST 38h,
+# and wedged at PC=0x38. Modelling the DMA conflict per-bus fixed all nine at once.
+
+# The five PPU mode and STAT timing ROMs that used to live here are all fixed. Recorded because
+# each was blamed on the wrong thing first, and reading the ROM's own source is what corrected it:
+#
+#   * intr_2_mode0_timing_sprites: the per-object fetcher stall was not modelled, so lines with
+#     objects reported their object-free mode 3 length. See 'objectPenaltyDots'. The cost is 6 dots
+#     per object plus one fetch abort per background tile, not the per-object abort Pandocs' formula
+#     reads like in isolation.
+#   * stat_lyc_onoff: blamed on the LY-to-LYC comparison delay. The ROM never measures that delay;
+#     it checks that STAT bit 2 is a latch the comparison clock drives, frozen while the LCD is off.
+#     See 'updateLycLatch'.
+#   * intr_2_oam_ok_timing, lcdon_timing-GS, lcdon_write_timing-GS: the OAM and VRAM blocking
+#     windows were gated on the internal mode, which lines up with neither edge of any of the four
+#     windows. See 'Ppu.cpuCanReadOam' and its neighbours.
+
+# ---------------------------------------------------------------------------
+# mooneye acceptance and misc: other
+#
+# vblank_stat_intr-C used to live here, recorded as a measured dead end because moving the VBlank
+# raise dot broke five passing ROMs. The raise dot was the wrong lever: entering VBlank asserts the
+# mode-2 STAT source too, and on CGB that source comes one M-cycle *first*. Adding an earlier STAT
+# edge leaves the VBlank dot those five ROMs pin exactly where it was. See 'vblankOamStatLeadDots'.
+# ---------------------------------------------------------------------------
+# boot_sclk_align-dmgABCmgb used to live here. Two faults, not one: the internal serial clock ran
+# eight times too fast (8192 Hz is the bit rate, so a byte is 4096 T-cycles, not 512), and it was
+# counted from the SC write rather than divided off the DIV divider, which is what fixes its edges
+# to the phase held since reset. See 'Bus.stepSerial'.
+# oam_dma_start used to live here, and was written off as needing sub-T-cycle DMA alignment. It did
+# not: a fresh transfer leaves OAM readable for one M-cycle before its first byte lands, but a
+# transfer retriggered on top of a running one must not, because the transfer it interrupts still
+# holds the bus. See 'busOamDmaRestarting'.
+
+# ---------------------------------------------------------------------------
+# blargg: APU
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# blargg: OAM bug
+#
+# 8-instr_effect used to live here. Two separate faults: a CPU read applied the write-side
+# corruption pattern instead of the read-side one ('triggerOamBugRead'), and an access that goes
+# through the bus samples the OAM scan a row later than the CPU's own address bus does, because
+# 'cycleRead'/'cycleWrite' tick and then access ('accessedOamRowForBusAccess'). The second fault hid
+# the first: with the row off by one the POP subtest went down the row-0x40 quaternary branch instead
+# of the secondary one, so fixing the patterns alone changed nothing.
+#
+# 7-timing_effect reaches no verdict at all rather than reporting a wrong one, and SameBoy does not
+# pass it either (a standalone DMG driver over SameBoy's own core returns 0xd1), so it is not a
+# question of transcribing SameBoy more faithfully.
+# ---------------------------------------------------------------------------
+external/gb-test-roms/oam_bug/rom_singles/7-timing_effect.gb

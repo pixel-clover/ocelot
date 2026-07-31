@@ -142,3 +142,7 @@ docs/haskell/
 test/testroms/mooneye/
 test/testroms/dmg-acid2.gb
 test/testroms/cgb-acid2.gbc
+
+# ROMs in games/ to be ignored
+games/tobudx.gb
+games/Deadeus.gb

@@ -7,6 +7,7 @@ SRC_DIR       := src
 APP_DIR       := app
 APP_WEB_DIR   := app-web
 TEST_DIR      := test
+TOOLS_DIR     := tools
 BUILD_DIR     := .stack-work
 DOC_OUT       := docs/haskell
 
@@ -50,15 +51,15 @@ clean: ## Remove build artifacts, cache directories, etc.
 
 lint: ## Run linter checks on Haskell source files
 	@echo "Running HLint..."
-	$(STACK) exec -- hlint $(SRC_DIR) $(APP_DIR) $(APP_WEB_DIR) $(TEST_DIR)
+	$(STACK) exec -- hlint $(SRC_DIR) $(APP_DIR) $(APP_WEB_DIR) $(TEST_DIR) $(TOOLS_DIR)
 
 format: ## Format Haskell source files in-place
 	@echo "Formatting Haskell files..."
-	$(STACK) exec -- fourmolu -i $(SRC_DIR) $(APP_DIR) $(APP_WEB_DIR) $(TEST_DIR)
+	$(STACK) exec -- fourmolu -i $(SRC_DIR) $(APP_DIR) $(APP_WEB_DIR) $(TEST_DIR) $(TOOLS_DIR)
 
 format-check: ## Check formatting without modifying files
 	@echo "Checking Haskell formatting..."
-	$(STACK) exec -- fourmolu --mode check $(SRC_DIR) $(APP_DIR) $(APP_WEB_DIR) $(TEST_DIR)
+	$(STACK) exec -- fourmolu --mode check $(SRC_DIR) $(APP_DIR) $(APP_WEB_DIR) $(TEST_DIR) $(TOOLS_DIR)
 
 # `stack haddock` writes under .stack-work; copy the result to $(DOC_OUT) so
 # there is a stable, documented path to open. The target used to only mkdir an

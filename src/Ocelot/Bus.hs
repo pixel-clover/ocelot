@@ -20,8 +20,8 @@ Special handling on writes:
   point @SB@ reads @0xFF@ (the line idles high with no peer) and @IF@ bit 3 is
   raised. See 'stepSerial'.
 * Writes to @0xFF46@ start an OAM DMA, which then copies one byte per CPU
-  M-cycle for 160 M-cycles. While it runs the CPU is locked off everything
-  below @0xFF00@. See 'stepOamDma'.
+  M-cycle for 160 M-cycles. While it runs the CPU is locked off OAM and off the
+  one internal bus the transfer is using; see 'addrInDmaUse' and 'stepOamDma'.
 * The unusable region @0xFEA0-0xFEFF@ ignores writes; reads return @0xFF@.
 * @0xFF00@ (joypad) is routed to 'Ocelot.Joypad', which drives the active-low
   button matrix and latches the joypad interrupt edge.
@@ -58,6 +58,7 @@ module Ocelot.Bus (
     resetTimerDiv,
     takeStallCycles,
     flushApu,
+    triggerOamBug,
     discardApuDebt,
     installBootRom,
 ) where
@@ -99,12 +100,11 @@ data Bus = Bus
     , busApu :: !ApuState
     , busJoypad :: !JoypadState
     , busSerialOut :: !(IORef [Word8])
-    , busSerialCountdown :: !(IORef Int)
-    -- ^ CPU M-cycles left in an in-flight internal-clock serial transfer,
-    -- or 0 when idle. A transfer shifts 8 bits at 8192 Hz, i.e. 512
-    -- T-cycles = 128 M-cycles. The serial shift clock is derived from the
-    -- CPU clock, so like OAM DMA this counts CPU M-cycles rather than the
-    -- speed-divided peripheral cycles.
+    , busSerialBitsLeft :: !(IORef Int)
+    -- ^ Bits still to shift in an in-flight internal-clock serial transfer,
+    -- or 0 when idle. Bits rather than a cycle countdown because the shift
+    -- clock is a division of the DIV divider rather than something counted
+    -- from the @SC@ write; 'stepSerial' has the reasoning.
     , busFrameReady :: !(IORef Bool)
     , busCgb :: !Bool
     -- ^ True when the host hardware is CGB. Gates CGB-only registers
@@ -165,6 +165,12 @@ data Bus = Bus
     -- ^ Latched source base address (the FF46 byte shifted left by 8).
     , busOamDmaIndex :: !(IORef Int)
     -- ^ Next OAM offset to copy, 0..160. Reaching 160 deactivates DMA.
+    , busOamDmaRestarting :: !(IORef Bool)
+    -- ^ Whether the in-flight transfer was triggered on top of one already
+    -- running. SameBoy's @dma_restarting@: it keeps OAM closed through the new
+    -- transfer's warm-up, where a fresh transfer leaves one readable M-cycle.
+    -- Stays set for the rest of the transfer, which costs nothing because a
+    -- non-zero index closes OAM anyway.
     , busOamDmaStarting :: !(IORef Bool)
     -- ^ True for one M-cycle between the FF46 write and the first byte
     -- copy. Models the documented "DMA starts after the cycle in which
@@ -268,7 +274,7 @@ fromCartridgeOnHost host bootMode c = do
     apu <- Apu.initial
     joypad <- Joypad.initial
     serial <- newIORef []
-    serialCountdown <- newIORef 0
+    serialBitsLeft <- newIORef 0
     frameReady <- newIORef False
     wramBank <- newIORef 0x01
     key1 <- newIORef 0x00
@@ -284,6 +290,7 @@ fromCartridgeOnHost host bootMode c = do
     oamDmaSrc <- newIORef 0
     oamDmaIndex <- newIORef 0
     oamDmaStarting <- newIORef False
+    oamDmaRestarting <- newIORef False
     apuDebt <- newIORef 0
     stallCycles <- newIORef 0
     let cgbCart = case Header.hdrCgbFlag (Cartridge.cartridgeHeader c) of
@@ -323,8 +330,10 @@ fromCartridgeOnHost host bootMode c = do
             Apu.write8 0xFF24 0x77 apu
             Apu.write8 0xFF25 0xF3 apu
             -- PPU: LCDC=0x91 (LCD on, BG on, tile data 0x8000, tile map 0x9800),
-            -- BGP=0xFC, OBP0/1=0xFF.
-            Ppu.write8 0xFF40 0x91 ppu
+            -- BGP=0xFC, OBP0/1=0xFF. LCDC goes through 'seedLcdc' rather than
+            -- 'write8' so the handoff is not mistaken for a fresh LCD enable,
+            -- which would start the machine on the short first scanline.
+            Ppu.seedLcdc 0x91 ppu
             Ppu.write8 0xFF47 0xFC ppu
             Ppu.write8 0xFF48 0xFF ppu
             Ppu.write8 0xFF49 0xFF ppu
@@ -362,7 +371,7 @@ fromCartridgeOnHost host bootMode c = do
             , busApu = apu
             , busJoypad = joypad
             , busSerialOut = serial
-            , busSerialCountdown = serialCountdown
+            , busSerialBitsLeft = serialBitsLeft
             , busFrameReady = frameReady
             , busCgb = cgb
             , busCgbDmgCompat = cgb && not cgbCart
@@ -381,64 +390,165 @@ fromCartridgeOnHost host bootMode c = do
             , busOamDmaSrc = oamDmaSrc
             , busOamDmaIndex = oamDmaIndex
             , busOamDmaStarting = oamDmaStarting
+            , busOamDmaRestarting = oamDmaRestarting
             , busApuDebt = apuDebt
             , busStallCycles = stallCycles
             }
 
-{- | CPU-side bus read. While an OAM DMA is in progress, only HRAM
-(@0xFF80-0xFFFE@) and the IE register are accessible to the CPU; all
-other addresses return @0xFF@. The DMA itself reads through
-'readDmaSource' to bypass this gate.
+{- | CPU-side bus read. An in-flight OAM DMA holds the CPU off OAM and off the one
+internal bus it is using, per 'addrInDmaUse'; blocked reads return @0xFF@. The DMA
+itself reads through 'readDmaSource' to bypass this gate.
 -}
 read8 :: Word16 -> Bus -> IO Word8
 read8 addr b = do
-    blocked <- readIORef (busOamDmaActive b)
-    if blocked && not (addrAccessibleDuringDma addr)
+    inDmaUse <- addrInDmaUse addr b
+    if inDmaUse
         then pure 0xFF
         else read8Raw addr b
 
-{- | True if the CPU can still read this address while OAM DMA is active.
-The CPU is locked off the main memory bus (ROM, VRAM, WRAM, echo, OAM,
-unusable region) but can still poke at the I/O register file
-(@0xFF00-0xFF7F@), HRAM (@0xFF80-0xFFFE@), and the IE register
-(@0xFFFF@) since those sit on a different bus internally.
+{- | Which internal bus an address sits on.
+
+OAM DMA occupies exactly one of these at a time. That is why it does not lock the
+CPU out of the whole address space: a DMA reading VRAM leaves the main bus usable,
+and a DMA reading anywhere else leaves VRAM usable. Mirrors SameBoy's
+@bus_for_addr@.
+
+Note that CGB splitting WRAM onto 'BusRam' does not by itself make WRAM readable
+during a main-bus DMA: 'conflictsWithDma' still blocks @0xC000@ and up unless the
+DMA is sourcing VRAM.
 -}
-addrAccessibleDuringDma :: Word16 -> Bool
-{-# INLINE addrAccessibleDuringDma #-}
-addrAccessibleDuringDma addr = addr >= 0xFF00
+data MemBus
+    = -- | ROM, cart RAM, and (on DMG) WRAM plus its echo.
+      BusMain
+    | -- | VRAM at @0x8000-0x9FFF@.
+      BusVram
+    | -- | WRAM and echo, on CGB only.
+      BusRam
+    deriving (Eq)
 
-ppuCpuCanAccessVram :: Bus -> IO Bool
-ppuCpuCanAccessVram b = do
-    lcdc <- readIORef (Ppu.ppuLcdc (busPpu b))
-    if not (testBit lcdc 7)
-        then pure True
-        else do
-            mode <- readIORef (Ppu.ppuMode (busPpu b))
-            pure (mode /= Ppu.ModeDrawing)
+busForAddr :: Bool -> Word16 -> MemBus
+{-# INLINE busForAddr #-}
+busForAddr cgb addr
+    | addr < 0x8000 = BusMain
+    | addr < 0xA000 = BusVram
+    | addr < 0xC000 = BusMain
+    | otherwise = if cgb then BusRam else BusMain
 
-ppuCpuCanAccessOam :: Bus -> IO Bool
-ppuCpuCanAccessOam b = do
-    lcdc <- readIORef (Ppu.ppuLcdc (busPpu b))
-    if not (testBit lcdc 7)
-        then pure True
-        else do
-            mode <- readIORef (Ppu.ppuMode (busPpu b))
-            pure (mode /= Ppu.ModeOamScan && mode /= Ppu.ModeDrawing)
+{- | Whether an in-flight OAM DMA is occupying the bus that @addr@ sits on, given
+the address the DMA is currently sourcing from.
+
+Mirrors SameBoy's @is_addr_in_dma_use@ (@Core\/memory.c@). Two exemptions look
+odd but are load-bearing: the DMA's own source address reads back normally, and
+so does its echo alias, because a source at @0xE000@ and up is fetched through
+@src .&. 0xDFFF@.
+
+Getting this wrong in the permissive direction is invisible; getting it wrong in
+the restrictive direction is not. A blanket lock on everything below @0xFF00@
+made an instruction fetch from WRAM or echo RAM return @0xFF@, which the CPU
+decoded as @RST 38h@, and all nine mooneye instruction-timing ROMs wedged at
+@PC=0x38@ instead of reporting a verdict.
+-}
+conflictsWithDma :: Bool -> Word16 -> Word16 -> Bool
+{-# INLINE conflictsWithDma #-}
+conflictsWithDma cgb cur addr
+    | cur == addr = False
+    | cur >= 0xE000 && (cur .&. 0xDFFF) == addr = False
+    | cgb && addr >= 0xC000 = busForAddr cgb cur /= BusVram
+    | cgb && cur >= 0xE000 = busForAddr cgb addr /= BusVram
+    | otherwise = busForAddr cgb addr == busForAddr cgb cur
+
+{- | Whether an active OAM DMA makes @addr@ unreadable by the CPU.
+
+Above @0xFE00@ this keeps the blanket lock: the I\/O page, HRAM, and IE
+(@0xFF00@ and up) are on a separate bus and stay accessible, while OAM itself is
+held off for the whole transfer. SameBoy gates OAM through a separate rule in its
+read path rather than through @is_addr_in_dma_use@; the two agree except on the
+M-cycle before the first byte lands, where SameBoy still allows the access.
+Below @0xFE00@ the per-bus check in 'conflictsWithDma' decides.
+-}
+addrInDmaUse :: Word16 -> Bus -> IO Bool
+{-# INLINE addrInDmaUse #-}
+addrInDmaUse addr b
+    | addr >= 0xFF00 = pure False
+    | otherwise = do
+        active <- readIORef (busOamDmaActive b)
+        if not active
+            then pure False
+            else
+                if addr >= 0xFE00
+                    then do
+                        -- OAM is not held for the whole transfer. SameBoy blocks it while
+                        -- @dma_current_dest /= 0@, and that counter is the 0xFF sentinel on the
+                        -- trigger cycle, wraps to 0 on the cycle before byte 0 lands, then counts up.
+                        -- So there is exactly one readable cycle, just before the first write. Holding
+                        -- OAM for the whole transfer made a ROM executing from OAM fetch 0xFF and
+                        -- derail into RST 38h, which is what mooneye 'oam_dma_start' catches.
+                        --
+                        -- That readable cycle belongs to a *fresh* transfer only. Retriggering
+                        -- 0xFF46 mid-transfer leaves the previous DMA running through the new
+                        -- one's warm-up, so OAM never opens: mooneye 'oam_dma_start' documents
+                        -- the restart case as "M = 0, 1: previous DMA is running (OAM *not*
+                        -- accessible)" against the fresh case's readable M = 1, and it executes
+                        -- from OAM to tell them apart. 'busOamDmaRestarting' is SameBoy's
+                        -- @dma_restarting@.
+                        starting <- readIORef (busOamDmaStarting b)
+                        restarting <- readIORef (busOamDmaRestarting b)
+                        idx <- readIORef (busOamDmaIndex b)
+                        pure (starting || restarting || idx /= 0)
+                    else do
+                        -- 'busOamDmaStarting' is Ocelot's startup delay: the DMA has been requested
+                        -- but has not taken the bus yet, which is SameBoy's warm-up.
+                        --
+                        -- SameBoy also exempts an in-progress HDMA, but that flag of its own
+                        -- ('hdma_in_progress') is set and cleared inside a single 'GB_hdma_run', so it
+                        -- covers one 16-byte chunk. Ocelot's 'busHdmaActive' is a latch held for the
+                        -- whole transfer, so testing it here would switch the OAM DMA lockout off for
+                        -- 128 HBlanks on a 0x800-byte HBlank transfer, and it would still never fire
+                        -- for general-mode HDMA, which clears the latch before copying. There is no
+                        -- equivalent flag to test, so this deliberately has no HDMA exemption.
+                        starting <- readIORef (busOamDmaStarting b)
+                        if starting
+                            then pure False
+                            else do
+                                src <- readIORef (busOamDmaSrc b)
+                                idx <- readIORef (busOamDmaIndex b)
+                                -- 'stepOamDma' copies the byte at @src + idx@ and then bumps idx, so
+                                -- this is the address the DMA is about to occupy the bus for. On the
+                                -- deferred-clear M-cycle idx has already reached 160, an address the
+                                -- DMA never reads, so hold the last real one instead.
+                                let !cur = src + fromIntegral (min idx 159)
+                                pure (conflictsWithDma (busCgb b) cur addr)
+
+-- The blocking windows line up with neither mode boundary, and reads and writes do not
+-- share edges, so the PPU owns all four: see 'Ppu.cpuCanReadOam' and its neighbours.
+ppuCpuCanReadVram :: Bus -> IO Bool
+ppuCpuCanReadVram b = Ppu.cpuCanReadVram (busPpu b)
+
+ppuCpuCanWriteVram :: Bus -> IO Bool
+ppuCpuCanWriteVram b = Ppu.cpuCanWriteVram (busPpu b)
+
+ppuCpuCanReadOam :: Bus -> IO Bool
+ppuCpuCanReadOam b = Ppu.cpuCanReadOam (busPpu b)
+
+ppuCpuCanWriteOam :: Bus -> IO Bool
+ppuCpuCanWriteOam b = Ppu.cpuCanWriteOam (busPpu b)
 
 read8Raw :: Word16 -> Bus -> IO Word8
 read8Raw addr b
     | addr <= 0x7FFF = bootRomOrCart addr b
     | addr <= 0x9FFF = do
-        accessible <- ppuCpuCanAccessVram b
+        accessible <- ppuCpuCanReadVram b
         if accessible then Ppu.read8 addr (busPpu b) else pure 0xFF
     | addr <= 0xBFFF = Cartridge.read8 addr (busCart b)
     | addr <= 0xCFFF = MV.read (busWram b) (fromIntegral addr .&. 0x0FFF)
     | addr <= 0xDFFF = readUpperWram addr b
     | addr <= 0xFDFF = readEcho addr b
     | addr <= 0xFE9F = do
-        accessible <- ppuCpuCanAccessOam b
+        -- A read corrupts differently from a write; see 'Ppu.triggerOamBugRead'.
+        Ppu.triggerOamBugRead addr (busPpu b)
+        accessible <- ppuCpuCanReadOam b
         if accessible then Ppu.read8 addr (busPpu b) else pure 0xFF
-    | addr <= 0xFEFF = pure 0xFF
+    | addr <= 0xFEFF = Ppu.triggerOamBugRead addr (busPpu b) >> pure 0xFF
     | addr == 0xFF00 = Joypad.readP1 (busJoypad b)
     -- IF (0xFF0F): only the low 5 bits are real interrupt flags; the
     -- upper 3 bits always read as 1.
@@ -528,8 +638,8 @@ restart an in-flight DMA per mooneye 'oam_dma_restart'.
 -}
 write8 :: Word16 -> Word8 -> Bus -> IO ()
 write8 addr !v b = do
-    blocked <- readIORef (busOamDmaActive b)
-    if blocked && not (addrAccessibleDuringDma addr)
+    inDmaUse <- addrInDmaUse addr b
+    if inDmaUse
         then pure ()
         else do
             write8Raw addr v b
@@ -545,22 +655,26 @@ write8Raw :: Word16 -> Word8 -> Bus -> IO ()
 write8Raw addr !v b
     | addr <= 0x7FFF = Cartridge.write8 addr v (busCart b)
     | addr <= 0x9FFF = do
-        accessible <- ppuCpuCanAccessVram b
+        accessible <- ppuCpuCanWriteVram b
         when accessible (Ppu.write8 addr v (busPpu b))
     | addr <= 0xBFFF = Cartridge.write8 addr v (busCart b)
     | addr <= 0xCFFF = MV.write (busWram b) (fromIntegral addr .&. 0x0FFF) v
     | addr <= 0xDFFF = writeUpperWram addr v b
     | addr <= 0xFDFF = writeEcho addr v b
     | addr <= 0xFE9F = do
-        accessible <- ppuCpuCanAccessOam b
+        -- A bus write samples the scan a row later than the CPU's address bus does;
+        -- see 'Ppu.accessedOamRowForBusAccess'.
+        Ppu.triggerOamBugBusWrite addr (busPpu b)
+        accessible <- ppuCpuCanWriteOam b
         when accessible (Ppu.write8 addr v (busPpu b))
-    | addr <= 0xFEFF = pure ()
+    | addr <= 0xFEFF = Ppu.triggerOamBugBusWrite addr (busPpu b)
     | addr == 0xFF00 = Joypad.writeP1 v (busJoypad b)
     | addr == 0xFF02 = handleSerialControl v b
-    | addr == 0xFF04 = modifyIORef' (busTimer b) Timer.writeDiv
+    | addr == 0xFF04 = resetDivider b
     | addr == 0xFF05 = modifyIORef' (busTimer b) (Timer.writeTima v)
     | addr == 0xFF06 = modifyIORef' (busTimer b) (Timer.writeTma v)
-    | addr == 0xFF07 = modifyIORef' (busTimer b) (Timer.writeTac v)
+    | addr == 0xFF07 = applyTimerWrite (Timer.writeTac v) b
+    | addr == 0xFF26 = writeNr52 v b
     | addr >= 0xFF10 && addr <= 0xFF3F = flushApu b >> Apu.write8 addr v (busApu b)
     | addr == 0xFF46 = oamDma v b
     | addr >= 0xFF40 && addr <= 0xFF4B = Ppu.write8 addr v (busPpu b)
@@ -584,9 +698,10 @@ selects the internal clock.
 The outgoing byte is captured into the serial output buffer straight away
 (that buffer is the emulator's stand-in for a printer/link peer, and test
 ROMs use it as their verdict channel), but the register-visible side of the
-transfer is timed: @SC@ bit 7 stays set and no interrupt fires until the
-eighth bit has been shifted out, 128 CPU M-cycles later. An external-clock
-transfer has no peer to supply the clock, so it never completes.
+transfer is timed: @SC@ bit 7 stays set and no interrupt fires until all
+eight bits have been shifted out. Arming only loads the bit counter; the
+shifting itself is paced by 'stepSerial'. An external-clock transfer has no
+peer to supply the clock, so it never completes.
 -}
 handleSerialControl :: Word8 -> Bus -> IO ()
 handleSerialControl v b
@@ -595,32 +710,60 @@ handleSerialControl v b
         MV.write (busIo b) 0x02 v
         modifyIORef' (busSerialOut b) (sb :)
         writeIORef
-            (busSerialCountdown b)
-            (if testBit v 0 then serialTransferMCycles else 0)
+            (busSerialBitsLeft b)
+            (if testBit v 0 then serialTransferBits else 0)
     | otherwise = do
         MV.write (busIo b) 0x02 v
-        writeIORef (busSerialCountdown b) 0
+        writeIORef (busSerialBitsLeft b) 0
 
-{- | CPU M-cycles an internal-clock serial transfer takes: 8 bits at
-8192 Hz is 512 T-cycles.
+-- | Bits an internal-clock transfer shifts before it completes.
+serialTransferBits :: Int
+serialTransferBits = 8
+
+{- | T-cycles between shift-clock edges on the internal clock.
+
+The internal serial clock is 8192 Hz, and that is the *bit* rate, so a whole
+byte takes @8 * 512 = 4096@ T-cycles rather than the 512 an earlier reading of
+"8 bits at 8192 Hz" produced here. Getting this eight times too fast is what
+made mooneye @acceptance\/serial\/boot_sclk_align-dmgABCmgb@ fire its interrupt
+inside the first few loop iterations instead of the 145th.
 -}
-serialTransferMCycles :: Int
-serialTransferMCycles = 128
+serialClockPeriod :: Int
+serialClockPeriod = 512
 
 {- | Tick an in-flight serial transfer. On completion the incoming byte
 lands in @SB@ (@0xFF@ with no link peer, since the line idles high), @SC@
 bit 7 clears, and @IF@ bit 3 is raised.
+
+The shift clock is not counted from the @SC@ write. It is a division of the
+same 16-bit divider that drives DIV, so its edges are fixed to the phase the
+divider has held since reset and a transfer's first bit lands on the next
+edge, however soon that is. That is what mooneye
+@acceptance\/serial\/boot_sclk_align-dmgABCmgb@ checks, and its own comment
+spells out: "clock edges align based on the *reset time*, not the time when SC
+is written to".
+
+An edge is a falling edge of divider bit 8, i.e. the divider crossing a
+multiple of 'serialClockPeriod'. 'Bus.advance' has already stepped the timer by
+the time this runs, so the window just covered is @(now - 4n, now]@. The
+counter is 16 bits and 65536 is a whole number of periods, so a wrap adds no
+spurious edge and the subtraction can run in 'Int' without special-casing it.
 -}
 stepSerial :: Int -> Bus -> IO ()
 {-# INLINE stepSerial #-}
 stepSerial n b = do
-    remaining <- readIORef (busSerialCountdown b)
-    when (remaining > 0) $ do
-        let !remaining' = remaining - n
-        if remaining' > 0
-            then writeIORef (busSerialCountdown b) remaining'
+    bitsLeft <- readIORef (busSerialBitsLeft b)
+    when (bitsLeft > 0) $ do
+        ts <- readIORef (busTimer b)
+        let !now = fromIntegral (Timer.timDivider ts) :: Int
+            !before = now - 4 * n
+            !edges =
+                (now `div` serialClockPeriod) - (before `div` serialClockPeriod)
+            !bitsLeft' = bitsLeft - edges
+        if bitsLeft' > 0
+            then writeIORef (busSerialBitsLeft b) bitsLeft'
             else do
-                writeIORef (busSerialCountdown b) 0
+                writeIORef (busSerialBitsLeft b) 0
                 MV.write (busIo b) 0x01 0xFF
                 sc <- MV.read (busIo b) 0x02
                 MV.write (busIo b) 0x02 (sc .&. 0x7F)
@@ -794,6 +937,17 @@ let the debt (and the queued samples it will produce) grow without limit.
 Roughly 1 ms of emulated time: far below one frame, and far above the
 batch size at which the per-call overhead stops mattering.
 -}
+
+{- | Forward a CPU address-bus touch of the OAM range to the PPU's DMG OAM-bug
+model. The PPU decides whether it applies (DMG only, and only while it is scanning
+OAM), so callers pass the address unconditionally.
+
+This exists so 'Ocelot.Cpu.Execute' can report the address-bus instructions that
+corrupt OAM without importing 'Ocelot.Ppu'.
+-}
+triggerOamBug :: Word16 -> Bus -> IO ()
+triggerOamBug addr b = Ppu.triggerOamBug addr (busPpu b)
+
 apuDebtHorizon :: Int
 apuDebtHorizon = 1024
 
@@ -834,7 +988,74 @@ through 'Timer.writeDiv' so the falling-edge quirk (a high AND signal
 dropping to 0 bumps TIMA once) still applies.
 -}
 resetTimerDiv :: Bus -> IO ()
-resetTimerDiv b = modifyIORef' (busTimer b) Timer.writeDiv
+resetTimerDiv = resetDivider
+
+{- | T-cycles until the divider next clocks the APU frame sequencer.
+
+The sequencer runs off a falling edge of DIV bit 4, so the edges land on multiples
+of 8192 divider ticks. In double speed it uses bit 5 instead, doubling the divider
+period, and the APU is handed the halved cycle count, so the two cancel and the
+answer stays in the same range.
+-}
+untilNextFrameEdge :: Bool -> Word16 -> Int
+untilNextFrameEdge double d =
+    let !period = if double then 16384 else 8192
+        !remaining = period - (fromIntegral d `mod` period)
+     in if double then remaining `div` 2 else remaining
+
+{- | Write NR52, realigning the frame sequencer when this powers the APU on.
+
+Hardware resets the sequencer's step on power-on but keeps clocking it from the
+divider, so the next step arrives at the next DIV edge rather than a full period
+later. 'Apu.write8' cannot work that out on its own: the divider lives in the
+timer, so the phase has to come from here.
+-}
+writeNr52 :: Word8 -> Bus -> IO ()
+writeNr52 v b = do
+    flushApu b
+    before <- Apu.read8 0xFF26 (busApu b)
+    Apu.write8 0xFF26 v (busApu b)
+    when (not (testBit before 7) && testBit v 7) $ do
+        ts <- readIORef (busTimer b)
+        double <- readIORef (busDoubleSpeed b)
+        Apu.alignFrameTimer (untilNextFrameEdge double (Timer.timDivider ts)) (busApu b)
+
+{- | Zero the divider, realigning the APU frame sequencer to its new phase.
+
+The sequencer is clocked by a falling edge of DIV bit 4 on hardware (internal
+divider bit 12, or bit 13 in double speed so the wall-clock rate is unchanged), so
+zeroing the divider drops that bit if it was set and clocks the sequencer once.
+'Apu.divReset' also restarts the APU's period counter, since the next edge is a
+full period after the reset either way.
+
+The APU is settled first: its time is deferred in 'busApuDebt', and realigning the
+sequencer before settling would apply the new phase at the wrong point in the APU's
+timeline.
+-}
+resetDivider :: Bus -> IO ()
+resetDivider b = do
+    ts <- readIORef (busTimer b)
+    double <- readIORef (busDoubleSpeed b)
+    let !seqBit = if double then 13 else 12
+        !falling = testBit (Timer.timDivider ts) seqBit
+    flushApu b
+    applyTimerWrite Timer.writeDiv b
+    Apu.divReset falling (busApu b)
+
+{- | Run a timer register write that can itself drive a TIMA overflow, latching
+@IF@ bit 2 straight away when it does.
+
+Not deferred like the divider-driven overflow in 'Timer.advance': a write lands
+part-way through its M-cycle on hardware, so @IF@ is up by the instruction
+boundary, and 'Ocelot.Machine.cycleWrite' leaves no cycle after the write to run
+the reload state machine in. See 'Timer.writeFallingEdge'.
+-}
+applyTimerWrite :: (Timer.TimerState -> (Timer.TimerState, Bool)) -> Bus -> IO ()
+applyTimerWrite f b = do
+    ts <- readIORef (busTimer b)
+    let (!ts', !fired) = f ts
+    writeIORef (busTimer b) ts'
+    when fired (setIfBit 2 b)
 
 {- | Read and clear the CPU-stall debit the bus accrued during the current
 instruction. See 'busStallCycles'.
@@ -935,7 +1156,24 @@ startOrStopHdma v b = do
         else do
             writeIORef (busHdmaLen b) lenBytes
             if hblank
-                then writeIORef (busHdmaActive b) True
+                then do
+                    writeIORef (busHdmaActive b) True
+                    -- Hardware does not wait for the next HBlank *entry* when the PPU is
+                    -- already in mode 0: the first chunk goes immediately. SameBoy
+                    -- @Core/memory.c:1729@ sets @hdma_on@ right here when
+                    -- @(STAT & 3) == 0@. Waiting for the entry edge instead left every
+                    -- transfer armed during an HBlank running one chunk behind, which
+                    -- matters because CGB games drive HDMA once per scanline.
+                    --
+                    -- This reads the STAT *register* view, delayed mode bits included,
+                    -- because that is the value SameBoy tests. With the LCD off the mode
+                    -- bits read 0, so a transfer armed then also starts immediately, and
+                    -- then stalls for want of further HBlanks exactly as hardware does.
+                    --
+                    -- SameBoy also excludes its @display_state == 7@, a sub-mode Ocelot's
+                    -- line model has no equivalent for; that edge stays unmodelled.
+                    stat <- Ppu.read8 0xFF41 (busPpu b)
+                    when (stat .&. 0x03 == 0) (stepHdmaHBlank b)
                 else do
                     writeIORef (busHdmaActive b) False
                     runGeneralHdma b
@@ -1026,6 +1264,11 @@ triggered" behavior.
 -}
 oamDma :: Word8 -> Bus -> IO ()
 oamDma srcHi b = do
+    -- A write landing on an already-running transfer is a restart, and the transfer
+    -- it interrupts keeps the OAM bus through the new one's warm-up. Latched here
+    -- because resetting the index below erases the only other trace of it.
+    wasActive <- readIORef (busOamDmaActive b)
+    writeIORef (busOamDmaRestarting b) wasActive
     -- Latch the source byte so reads of FF46 return the value last
     -- written (mooneye oam_dma/reg_read). The latch happens immediately
     -- and is unaffected by DMA being already in progress (a second write
@@ -1089,7 +1332,7 @@ readDmaSource :: Word16 -> Bus -> IO Word8
 readDmaSource addr b
     | addr <= 0x7FFF = bootRomOrCart addr b
     | addr <= 0x9FFF = do
-        accessible <- ppuCpuCanAccessVram b
+        accessible <- ppuCpuCanReadVram b
         if accessible then Ppu.read8 addr (busPpu b) else pure 0xFF
     | addr <= 0xBFFF = Cartridge.read8 addr (busCart b)
     | addr <= 0xCFFF = MV.read (busWram b) (fromIntegral addr .&. 0x0FFF)

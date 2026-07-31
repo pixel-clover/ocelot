@@ -311,6 +311,19 @@ spec = do
             v <- readIORef (Ppu.ppuOpri ppu)
             v `shouldBe` 0x01
 
+        it "round-trips the short-first-line-after-LCD-on latch (v9)" $ do
+            -- Dropping this on load resumes the 448-dot first line as a full
+            -- 456-dot one, putting the rest of the frame 8 T-cycles late.
+            m <- mkMachine
+            let ppu = Bus.busPpu (Ocelot.Machine.machineBus m)
+            writeIORef (Ppu.ppuLcdOnFirstLine ppu) True
+            blob <- Snap.save m
+            writeIORef (Ppu.ppuLcdOnFirstLine ppu) False
+            r <- Snap.load blob m
+            r `shouldBe` Right ()
+            v <- readIORef (Ppu.ppuLcdOnFirstLine ppu)
+            v `shouldBe` True
+
         it "round-trips PPU STAT edge-detector state (v7)" $ do
             m <- mkMachine
             let ppu = Bus.busPpu (Ocelot.Machine.machineBus m)

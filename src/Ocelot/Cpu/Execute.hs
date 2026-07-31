@@ -38,6 +38,7 @@ import Control.Monad (forM_, when)
 import Data.Bits (clearBit, complement, setBit, shiftL, shiftR, testBit, (.&.), (.|.))
 import Data.IORef (readIORef, writeIORef)
 import Data.Int (Int8)
+import Data.Maybe (isJust)
 import Data.Word (Word16, Word8)
 import qualified Ocelot.Bus as Bus
 import qualified Ocelot.Cpu.Alu as Alu
@@ -113,16 +114,49 @@ step m = do
                         then haltStep m
                         else doInstruction m
 
+{- | One M-cycle of a halted CPU.
+
+Ticks first, then tests for a pending interrupt, so the cycle during which a
+peripheral raises @IF@ is also the cycle the CPU wakes on. Testing before the tick
+instead costs an extra M-cycle: that tick raises @IF@, and only the following
+'haltStep' notices and wakes. Mooneye
+@acceptance\/halt_ime0_nointr_timing@ measures exactly this, and had Ocelot 4
+T-cycles slow leaving a @HALT@ that waited a frame for VBlank.
+
+Waking is separate from servicing. With @IME@ set, 'step' routes a pending
+interrupt to 'serviceInterrupt' and never reaches here; with @IME@ clear the CPU
+just resumes at the instruction after the @HALT@.
+-}
+
+{- | Report a 16-bit register value that the CPU put on the address bus to the DMG
+OAM-bug model.
+
+The address-bus instructions that corrupt OAM are the 16-bit @INC@\/@DEC@ (including
+@INC SP@) and @PUSH@, using the register's value /before/ the operation. blargg
+@oam_bug\/3-non_causes@ pins that down from both sides: @DEC DE@ with @DE = 0xFF00@
+must not corrupt even though the result @0xFEFF@ is in range, while @INC DE@ with
+@DE = 0xFEFF@ must. @ADD HL, rr@, @LD HL, SP+e8@, and the 8-bit @INC r@\/@DEC r@ do
+not put a register pair on the address bus and so are not triggers.
+
+Actual OAM reads and writes are handled by 'Ocelot.Bus' instead, which is what covers
+@POP@ (@SP = 0xFDFF@ reads 0xFE00 and corrupts, @SP = 0xFDFE@ does not) and
+@LD A, (HL+)@.
+
+The range test is here rather than in the callee so that the overwhelmingly common
+in-bounds @INC rr@ does not pay for the PPU's IORef reads.
+-}
+oamBugOnAddrBus :: Word16 -> Machine -> IO ()
+{-# INLINE oamBugOnAddrBus #-}
+oamBugOnAddrBus v m =
+    when (v >= 0xFE00 && v <= 0xFEFF) $ Bus.triggerOamBug v (machineBus m)
+
 haltStep :: Machine -> IO ()
 haltStep m = do
+    mapCpu (\c -> c{cpuCycles = cpuCycles c + 1}) m
+    advanceBus 1 m
     mIrq <- pendingInterrupt m
-    case mIrq of
-        Just _ -> do
-            mapCpu (\c -> c{cpuHalted = False, cpuCycles = cpuCycles c + 1}) m
-            advanceBus 1 m
-        Nothing -> do
-            mapCpu (\c -> c{cpuCycles = cpuCycles c + 1}) m
-            advanceBus 1 m
+    when (isJust mIrq) $
+        mapCpu (\c -> c{cpuHalted = False}) m
 
 doInstruction :: Machine -> IO ()
 doInstruction m = do
@@ -402,11 +436,13 @@ execute instr m = case instr of
     -- INC rr / DEC rr are 2 M-cycles: M1 fetch + 1 internal cycle.
     IncRr rr -> do
         v <- getReg16 rr m
+        oamBugOnAddrBus v m
         setReg16 rr (v + 1) m
         cycleNoAccess m
         pure 2
     DecRr rr -> do
         v <- getReg16 rr m
+        oamBugOnAddrBus v m
         setReg16 rr (v - 1) m
         cycleNoAccess m
         pure 2
@@ -462,6 +498,10 @@ execute instr m = case instr of
         -- M3 write hi, M4 write lo.
         v <- getReg16Stack s m
         sp <- regSP <$> getCpuRegs m
+        -- The corrupting touch is the pre-decrement SP on the address bus, not the
+        -- two addresses written: blargg oam_bug 2-causes requires PUSH with SP=0xFE00
+        -- to corrupt even though the writes land at 0xFDFF and 0xFDFE.
+        oamBugOnAddrBus sp m
         let hi = fromIntegral (v `shiftR` 8) :: Word8
             lo = fromIntegral (v .&. 0xFF) :: Word8
         cycleNoAccess m

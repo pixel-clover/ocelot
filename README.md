@@ -132,7 +132,7 @@ Run `ocelot --help` to see the list of available command-line options.
 Example output:
 
 ```
-Ocelot 0.2.0.0 (develop@85510dc) - Game Boy (DMG) and Game Boy Color (CGB) emulator in Haskell
+Ocelot 0.3.1.0 (develop@65185a7) - Game Boy (DMG) and Game Boy Color (CGB) emulator in Haskell
 
 Usage: ocelot [-V|--version] COMMAND
 
@@ -177,6 +177,7 @@ Ocelot is licensed under the MIT License (see [LICENSE](LICENSE)).
     * [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) and [cgb-acid2](https://github.com/mattcurrie/cgb-acid2)
     * [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono)
     * [SDL](https://github.com/libsdl-org/SDL)
+    * [Tobu Tobu Girl Deluxe](https://github.com/SimonLarsen/tobutobugirl-dx)
 
 #### Reference Implementations
 

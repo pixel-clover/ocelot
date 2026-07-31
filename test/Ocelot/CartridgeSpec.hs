@@ -7,6 +7,7 @@ import Data.Bits (shiftL)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
+import Data.Foldable (for_)
 import qualified Data.Vector.Unboxed as V
 import Data.Word (Word8)
 import Ocelot.Cartridge
@@ -224,6 +225,115 @@ spec = do
             write8 0x4000 0x00 c
             v <- read8 0xA000 c
             v `shouldBe` 0xAB
+
+    {- The MBC bank-select blob is what a save state restores banking through, and a
+    blob that decodes into the wrong bank silently corrupts a running game rather
+    than failing loudly. Every variant is covered here because 'encodeMbc' and
+    'decodeMbc' branch per MBC kind, so exercising one variant says nothing about
+    the other five. -}
+    describe "dumpMbc / loadMbc" $ do
+        let variants =
+                [
+                    ( "MBC1"
+                    , mkSyntheticRom 0x03 0x00 0x02 "MBC1"
+                    , \c -> do
+                        write8 0x0000 0x0A c
+                        write8 0x2000 0x02 c
+                        write8 0x6000 0x01 c
+                    )
+                ,
+                    ( "MBC2"
+                    , mkSyntheticRom 0x05 0x00 0x00 "MBC2"
+                    , \c -> do
+                        write8 0x0000 0x0A c
+                        -- Bit 8 of the address picks the ROM bank register.
+                        write8 0x2100 0x03 c
+                    )
+                ,
+                    ( "MBC3"
+                    , mkSyntheticRom 0x10 0x00 0x02 "MBC3"
+                    , \c -> do
+                        write8 0x0000 0x0A c
+                        write8 0x2000 0x05 c
+                        write8 0x4000 0x02 c
+                    )
+                ,
+                    ( "MBC5"
+                    , mkSyntheticRom 0x1B 0x00 0x02 "MBC5"
+                    , \c -> do
+                        write8 0x0000 0x0A c
+                        write8 0x2000 0x34 c
+                        write8 0x3000 0x01 c
+                        write8 0x4000 0x02 c
+                    )
+                ,
+                    ( "HuC1"
+                    , mkSyntheticRom 0xFF 0x00 0x02 "HUC1"
+                    , \c -> do
+                        write8 0x0000 0x0A c
+                        write8 0x2000 0x03 c
+                        write8 0x4000 0x01 c
+                    )
+                ]
+
+        for_ variants $ \(name, rom, mutate) ->
+            it (name ++ " round-trips its bank state into a fresh cartridge") $ do
+                Right c <- loadRom rom
+                pristine <- dumpMbc c
+                mutate c
+                mutated <- dumpMbc c
+                -- Same cartridge on both sides, so any difference is the banking
+                -- write rather than load-time state such as the MBC3 RTC anchor.
+                mutated `shouldNotBe` pristine
+                Right c2 <- loadRom rom
+                loadMbc mutated c2
+                restored <- dumpMbc c2
+                restored `shouldBe` mutated
+
+        for_ variants $ \(name, rom, mutate) ->
+            it (name ++ " resetMbc returns the bank registers to power-on") $ do
+                Right c <- loadRom rom
+                pristine <- dumpMbc c
+                mutate c
+                resetMbc c
+                afterReset <- dumpMbc c
+                afterReset `shouldBe` pristine
+
+        it "NoMbc dumps just its tag byte, and load and reset leave it alone" $ do
+            Right c <- loadRom (mkSyntheticRom 0x08 0x00 0x02 "NOMBC")
+            blob <- dumpMbc c
+            blob `shouldBe` BS.pack [0x00]
+            loadMbc blob c
+            afterLoad <- dumpMbc c
+            afterLoad `shouldBe` blob
+            resetMbc c
+            afterReset <- dumpMbc c
+            afterReset `shouldBe` blob
+
+        it "ignores a blob whose MBC tag does not match the cartridge" $ do
+            Right mbc1 <- loadRom (mkSyntheticRom 0x03 0x00 0x02 "MBC1")
+            Right mbc5 <- loadRom (mkSyntheticRom 0x1B 0x00 0x02 "MBC5")
+            write8 0x2000 0x05 mbc5
+            alien <- dumpMbc mbc5
+            before <- dumpMbc mbc1
+            loadMbc alien mbc1
+            after <- dumpMbc mbc1
+            after `shouldBe` before
+
+        it "ignores a blob truncated inside its payload" $ do
+            Right c <- loadRom (mkSyntheticRom 0x03 0x00 0x02 "MBC1")
+            write8 0x2000 0x02 c
+            full <- dumpMbc c
+            loadMbc (BS.init full) c
+            after <- dumpMbc c
+            after `shouldBe` full
+
+        it "ignores an empty blob" $ do
+            Right c <- loadRom (mkSyntheticRom 0x03 0x00 0x02 "MBC1")
+            before <- dumpMbc c
+            loadMbc BS.empty c
+            after <- dumpMbc c
+            after `shouldBe` before
 
     describe "external/gb-test-roms" $ do
         it "loads cpu_instrs.gb (MBC1, 64 KiB) cleanly" $ do

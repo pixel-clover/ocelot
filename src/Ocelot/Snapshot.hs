@@ -23,7 +23,7 @@ Format (all little-endian):
 > Bus IE            u8
 > Bus CGB block     u8 wbk + u8 key1
 > Bus HDMA block    u16 src + u16 dst + u32 len + 3x bool
-> Bus OAM DMA       u8 active + u8 starting + u16 src + u8 index
+> Bus OAM DMA       u8 active + u8 starting + u8 restarting + u16 src + u8 index
 > Cart RAM+RTC blob 1x length-prefixed (output of 'extractSave')
 > Cart MBC blob     1x length-prefixed (output of 'dumpMbc')
 
@@ -72,14 +72,28 @@ data SnapshotError
 magic :: ByteString
 magic = BS.pack [0x4F, 0x43, 0x53, 0x31] -- "OCS1"
 
-{- | Blob format version. Bumped to 2 when the loader became strict and the
-APU section gained the CH1 sweep negate-used latch. Version 1 blobs are
-rejected with 'UnsupportedVersion': the format had in fact changed several
-times under that number, so a v1 blob's section layout is not knowable and
-accepting it would half-restore into garbage.
+{- | Blob format version.
+
+Version 1 blobs are rejected with 'UnsupportedVersion': the format had in fact
+changed several times under that number, so a v1 blob's section layout is not
+knowable and accepting it would half-restore into garbage. Version 2 was the
+loader becoming strict plus the APU CH1 sweep negate-used latch.
+
+The constant then sat at 2 while the section layout kept growing, so the @v3:@
+through @v8:@ labels on the sections below never had a bump behind them and no
+blob was ever written with those numbers. Version 9 adds the PPU
+short-first-line-after-LCD-on latch and realigns the constant with those labels
+in one step. Any blob on disk predating this is a 2 and is rejected, which is
+correct: its PPU section is a byte shorter.
+
+Version 10 adds the OAM-DMA restart latch to the bus section, one byte longer
+again, so a version 9 blob is rejected for the same reason.
+
+Keep this history current. A section change without a bump is what produced the
+gap in the first place.
 -}
 currentVersion :: Word32
-currentVersion = 2
+currentVersion = 10
 
 ----------------------------------------------------------------------
 -- Save
@@ -185,6 +199,10 @@ ppuSnapshot ps = do
     -- OPRI=1 would resume with the default 0 if not snapshotted, which
     -- silently flips sprite Z-ordering on reload.
     opri <- readIORef (Ppu.ppuOpri ps)
+    -- v9 addition: the short-first-line latch. A snapshot taken during the
+    -- first (448-dot) scanline after the LCD was enabled would otherwise resume
+    -- on a full 456-dot line and land the rest of the frame 8 T-cycles late.
+    lcdOnFirst <- readIORef (Ppu.ppuLcdOnFirstLine ps)
     pure $
         Snap.putU8 lcdc
             <> Snap.putU8 stat
@@ -215,6 +233,8 @@ ppuSnapshot ps = do
             <> Snap.putBool pendStat
             -- v8: OPRI register.
             <> Snap.putU8 opri
+            -- v9: short-first-line-after-LCD-on latch.
+            <> Snap.putBool lcdOnFirst
 
 busSnapshot :: Bus.Bus -> IO BB.Builder
 busSnapshot b = do
@@ -238,6 +258,7 @@ busSnapshot b = do
     -- captured but never finishing the remaining bytes.
     oamActive <- readIORef (Bus.busOamDmaActive b)
     oamStarting <- readIORef (Bus.busOamDmaStarting b)
+    oamRestarting <- readIORef (Bus.busOamDmaRestarting b)
     oamSrc <- readIORef (Bus.busOamDmaSrc b)
     oamIndex <- readIORef (Bus.busOamDmaIndex b)
     pure $
@@ -256,6 +277,7 @@ busSnapshot b = do
             -- v7: OAM DMA state.
             <> Snap.putBool oamActive
             <> Snap.putBool oamStarting
+            <> Snap.putBool oamRestarting
             <> Snap.putU16 oamSrc
             <> Snap.putU8 (fromIntegral oamIndex)
 
@@ -307,6 +329,7 @@ data PpuData = PpuData
     , pdWindowLine :: !Int
     , pdPrevStat, pdPendingStat :: !Bool
     , pdOpri :: !Word8
+    , pdLcdOnFirstLine :: !Bool
     }
 
 data BusData = BusData
@@ -316,7 +339,7 @@ data BusData = BusData
     , bdHdmaLen :: !Int
     , bdHdmaActive, bdDoubleSpeed :: !Bool
     , bdDoubleSpeedAcc :: !Int
-    , bdOamActive, bdOamStarting :: !Bool
+    , bdOamActive, bdOamStarting, bdOamRestarting :: !Bool
     , bdOamSrc :: !Word16
     , bdOamIndex :: !Int
     }
@@ -432,6 +455,7 @@ decodePpu = do
     prevStat <- Snap.getBool
     pendStat <- Snap.getBool
     opri <- Snap.getU8
+    lcdOnFirst <- Snap.getBool
     pure
         PpuData
             { pdLcdc = lcdc
@@ -461,6 +485,7 @@ decodePpu = do
             , pdPrevStat = prevStat
             , pdPendingStat = pendStat
             , pdOpri = opri .&. 0x01
+            , pdLcdOnFirstLine = lcdOnFirst
             }
 
 decodePpuMode :: Word8 -> Ppu.PpuMode
@@ -485,6 +510,7 @@ decodeBus = do
     dsAcc <- Snap.getU8
     oamActive <- Snap.getBool
     oamStarting <- Snap.getBool
+    oamRestarting <- Snap.getBool
     oamSrc <- Snap.getU16
     oamIndex <- Snap.getU8
     pure
@@ -503,6 +529,7 @@ decodeBus = do
             , bdDoubleSpeedAcc = fromIntegral dsAcc
             , bdOamActive = oamActive
             , bdOamStarting = oamStarting
+            , bdOamRestarting = oamRestarting
             , bdOamSrc = oamSrc
             , bdOamIndex = fromIntegral oamIndex
             }
@@ -541,6 +568,9 @@ applySnapshot sd m = do
     writeIORef (Ppu.ppuPrevStatLine ps) (pdPrevStat pd)
     writeIORef (Ppu.ppuPendingStatIrq ps) (pdPendingStat pd)
     writeIORef (Ppu.ppuOpri ps) (pdOpri pd)
+    -- Restore this before 'resyncMode3End': mode 3 starts at dot 76 rather than
+    -- 80 on the short line, so the latch it rebuilds depends on this flag.
+    writeIORef (Ppu.ppuLcdOnFirstLine ps) (pdLcdOnFirstLine pd)
     -- The mode 3 end latch is derived from the registers just restored, and is
     -- not part of the blob. Rebuild it so the line in progress does not finish
     -- on whatever the previous machine had latched.
@@ -564,6 +594,7 @@ applySnapshot sd m = do
     writeIORef (Bus.busDoubleSpeedAcc bus) (bdDoubleSpeedAcc bd)
     writeIORef (Bus.busOamDmaActive bus) (bdOamActive bd)
     writeIORef (Bus.busOamDmaStarting bus) (bdOamStarting bd)
+    writeIORef (Bus.busOamDmaRestarting bus) (bdOamRestarting bd)
     writeIORef (Bus.busOamDmaSrc bus) (bdOamSrc bd)
     writeIORef (Bus.busOamDmaIndex bus) (bdOamIndex bd)
     Cart.loadSave (sdCartRam sd) (Bus.busCart bus)

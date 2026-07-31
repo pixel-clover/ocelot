@@ -46,6 +46,14 @@ Quick examples:
 - Use noun phrases for checklist items, not imperative verbs. Write "opcode timing table" not "build the opcode timing table".
 - Headings in Markdown files must be in title case: "Build from Source" not "Build from source". Minor words (a, an, the, and, but, or, for, in, on,
   at, to, by, of) stay lowercase unless they are the first word.
+- Write correct and complete sentences.
+- Avoid made-up words.
+- Do not use a colon in place of a verb. Three uses are fine: joining two clauses inside a complete sentence (the replacement the em-dash rule above
+  calls for), introducing the gloss of a list item, and introducing an enumeration, whether as a list or inline ("Methods: `add_node`, `add_nodes`,
+  ..."). What a colon must not do is turn a sentence into a label and a definition: write "Merges vector search seeds with text search seeds, then
+  expands via BFS" rather than "Hybrid retrieval: merges vector search seeds with text search seeds". That shape belongs to a list item, and carrying it
+  into prose (a doc comment summary, a paragraph) leaves a fragment where a sentence was required.
+- Use participial phrases and abbreviations scarcely.
 
 ## Repository Layout
 
@@ -57,7 +65,11 @@ Do not invent modules that do not yet exist when answering questions, but do pla
   GIF recording, ROM switching). Includes a startup screen with a native file picker and drag-and-drop fallback for ROM loading when no ROM is
   provided at launch.
 - `app-web/Main.hs`: WASM executable entry point. Exposes the emulator to JavaScript via exported WASM functions; compiled with the GHC WASM
-  toolchain (`wasm32-wasi-cabal`, `-f -desktop -f wasm-reactor`).
+  toolchain (`wasm32-wasi-cabal`, `-f -desktop -f wasm-reactor`). **A `foreign export ccall` declaration is not enough to make a symbol callable from
+  JavaScript.** The wasm linker exports only the names listed as `-optl-Wl,--export=<name>` under the `wasm-reactor` flag, so a new export needs an
+  entry in **both** `package.yaml` and `ocelot.cabal`; the hpack skew described below means `wasm32-wasi-cabal` reads only the latter, so an entry
+  added to `package.yaml` alone has no effect at all. Forgetting it fails silently: the code compiles, the deploy succeeds, and the symbol is simply
+  absent from `ocelot.wasm`. Check a built artifact with `strings -n 8 dist/web/ocelot.wasm | grep '^ocelot_'`.
 - `src/`: library code. Public API root is `Ocelot` (re-exports the curated public surface).
     - `src/Ocelot.hs`: public facade. Re-exports the deliberate public types (`Cartridge`, header records, save helpers). Do not re-export raw
       subsystem state records.
@@ -71,9 +83,11 @@ Do not invent modules that do not yet exist when answering questions, but do pla
     - `src/Ocelot/Bus.hs`: cross-subsystem read/write coordination, address decoding, WRAM/HRAM, OAM DMA, CGB HDMA, CGB banking, KEY1 + double-speed
       tick scaling. Memory work that does not belong to a peripheral lives here, not in a separate `Memory` module.
     - `src/Ocelot/Snapshot.hs` and `src/Ocelot/Snapshot/Binary.hs`: versioned save-state format with put/get primitives.
+    - `src/Ocelot/Web.hs`: `WebSession`, the session-level API the WASM host is built on. Everything in `app-web/Main.hs` is a thin `CInt`-and-pointer
+      wrapper over this module, so browser-facing behavior belongs here, not there. Also owns the stall watchdog.
     - `src/Ocelot/Testing.hs`: deliberate testing facade for low-level access.
 - `test/`: Hspec suite. `Spec.hs` is the `hspec-discover` entry; per-module specs live alongside as `Ocelot/<Module>Spec.hs`. Cross-cutting specs are
-  `IntegrationSpec`, `GoldenSpec` (ROM-driven, gated on `OCELOT_GOLDEN=1`), `CgbSpec`, and `SnapshotSpec`.
+  `IntegrationSpec`, `GoldenSpec` (ROM-driven, gated on `OCELOT_GOLDEN=1`), `CgbSpec`, `BootRomSpec`, `SnapshotSpec`, and `WebSpec`.
 - `test/testroms/`: third-party test ROMs the regression suite reads at runtime. Nothing here is committed except `README.md`: the
   ROMs are gitignored and fetched with `make test-roms`. Layout:
     - `test/testroms/mooneye/`: prebuilt mooneye-test-suite ROMs from gekkio.fi (`make mooneye-roms`).
@@ -85,11 +99,19 @@ Do not invent modules that do not yet exist when answering questions, but do pla
       files live in the submodule and are read directly.
 - `docs/`: project documentation and image assets. `make docs` runs Haddock and copies the generated HTML into `docs/haskell/`
   (untracked); `stack haddock` itself writes under `.stack-work`.
-- `Makefile`: developer workflow entry points (`build`, `test`, `lint`, `format`, `format-check`, `coverage`, `docs`, `repl`, and `tools`).
+- `Makefile`: developer workflow entry points. Build and check with `build`, `test`, `lint`, `format`, `format-check`, `coverage`, and `docs`;
+  explore with `repl`; fetch ROMs with `test-roms` (`mooneye-roms`, `acid2-roms`); build diagnostics with `tools` (`sameboy-trace`, `sameboy-core`);
+  build the browser bundle with `web-build`; build and serve the container image with `docker-build` and `docker-run`. `lint` and `format` cover
+  `src`, `app`, `app-web`, `test`, and `tools`.
 - `tools/`: standalone developer diagnostics built by `make tools` into `bin/tools/` (built `-O2 -rtsopts`, so they are usable for
   measurement). `bench.hs` is the throughput benchmark; `ocelot-trace.hs` pairs with `sameboy-trace.c` as a differential tracer against
-  SameBoy; the rest are state-dump probes. See `tools/README.md`.
-- `package.yaml`: hpack source of truth. Do not hand-edit `*.cabal`; let `stack build` regenerate it.
+  SameBoy; `blargg-run.hs` prints a blargg ROM's own serial text and `0xA000` subtest code, which is the cheapest first step on a
+  failing blargg ROM; the rest are state-dump probes. See `tools/README.md`.
+- `package.yaml`: hpack source of truth. Normally you do not hand-edit `*.cabal`; `stack build` regenerates it. That does not currently hold here:
+  `ocelot.cabal` was generated by hpack 0.39.1, which is newer than the hpack bundled with the pinned Stack, so `stack build` prints
+  "generated with a newer version of Hpack" and **ignores `package.yaml` entirely**. Until the toolchain catches up, an edit to `package.yaml` has to be
+  mirrored into `ocelot.cabal` by hand, and the two kept in agreement. This matters most for the wasm export list, because
+  `wasm32-wasi-cabal` reads `ocelot.cabal` and never consults `package.yaml`.
 - `stack.yaml`: resolver pin and packages.
 
 ## Testing Layout Rules
@@ -102,6 +124,10 @@ Do not invent modules that do not yet exist when answering questions, but do pla
   lower-level control, add a deliberate testing facade in `src/Ocelot/Testing.hs` rather than re-exporting raw state.
 - ROM-dependent tests belong in `test/Ocelot/GoldenSpec.hs` and must skip cleanly when the ROM file is absent (so a fresh checkout without
   `git submodule update --init` still passes), and must additionally pend with a clear hint when `OCELOT_GOLDEN` is not set.
+- `test/golden-known-failures.txt` is the ratchet for ROM results. A ROM not listed there must pass, and a listed ROM that starts passing also fails
+  the run so its line gets deleted. When a change moves a ROM, update that file in the same patch; do not silence a regression by adding an entry
+  without saying why in the file. `tests.yml` sets `OCELOT_GOLDEN=1`, so the ratchet runs in CI and not only on a developer's machine; the ROM runs are
+  cycle-budgeted rather than wall-clock bounded, which is what makes them deterministic on a shared runner.
 - Blargg ROM-backed checks read from `external/gb-test-roms/`. Mooneye, acid2, and any other downloaded or custom test ROMs
   live under `test/testroms/`.
 - If you move code across modules, move or rewrite the unit tests with it.
@@ -119,7 +145,13 @@ Do not invent modules that do not yet exist when answering questions, but do pla
     - `Bus.advance` (peripheral cycle dispatch; halves the cycle count for peripherals in CGB double-speed mode)
     - `Ppu.advance` (mode 2/3/0/1 transitions, STAT/VBlank interrupts, HBlank-entered signal for HDMA)
     - `Timer.advance` (DIV/TIMA edges, TAC obscure behavior)
-    - `Apu.advance` (frame sequencer steps tied to DIV)
+    - `Apu.advance` (frame sequencer steps on its own 8192-T-cycle `apuFrameTimer`). The period lives in the APU, but the **phase** is owned by the
+      bus, because hardware clocks the sequencer off a falling edge of DIV bit 4 and the divider lives in the timer. Two bus entry points supply it:
+      `Bus.resetDivider` computes whether zeroing DIV drops the sequencer bit (bit 12 of the internal divider, or bit 13 in double speed so the
+      wall-clock rate is unchanged) and hands that edge to `Apu.divReset`; `Bus.writeNr52` calls `Apu.alignFrameTimer` on a power-on transition so the
+      next step lands on the next DIV edge rather than a full period later. Both flush the deferred APU time first, since realigning ahead of the
+      settle would apply the new phase at the wrong point in the APU's timeline. This is what blargg `dmg_sound`/`cgb_sound`
+      `07-len sweep period sync` measures, and it passes; do not "fix" the phase again by giving the APU its own view of DIV
 - Cartridge MBC behavior is owned by `Ocelot.Cartridge`. The bus calls into the cartridge for `0x0000-0x7FFF` and `0xA000-0xBFFF`; do not bypass it
   from elsewhere.
 - Keep frontend concerns (like windowing, audio output device, key mapping concrete codes, etc.) separate from emulation concerns.
@@ -139,6 +171,18 @@ slower than direct mutation. New subsystem code should follow the same pattern.
 
 Cross-subsystem read/write coordination, plus M-cycle dispatch.
 
+Construction and host selection:
+
+- `fromCartridge :: Cartridge -> IO Bus` (picks the host from the cart's CGB flag, `BootPostBoot`)
+- `fromCartridgeOnHost :: HostHardware -> BootMode -> Cartridge -> IO Bus` (explicit override)
+- `HostHardware = HostDmg | HostCgb` (gates the CGB-only register windows and the PPU render path)
+- `BootMode = BootPowerOn | BootPostBoot` (`BootPowerOn` leaves peripherals at hardware reset, which a real boot ROM needs to observe;
+  `BootPostBoot` layers in the handoff register values for running a cart directly)
+- `installBootRom :: ByteString -> Bus -> IO ()` (maps a boot ROM over `0x0000-0x00FF`, plus `0x0200-0x08FF` on CGB, until the cart writes
+  `0xFF50`)
+
+Memory and registers:
+
 - `read8 :: Word16 -> Bus -> IO Word8`
 - `write8 :: Word16 -> Word8 -> Bus -> IO ()`
 - `advance :: Int -> Bus -> IO ()` (M-cycles; ticks Timer, PPU, OAM DMA, serial transfer, HDMA HBlank step, and the joypad IRQ edge in
@@ -146,12 +190,31 @@ Cross-subsystem read/write coordination, plus M-cycle dispatch.
   serial port, and OAM DMA are clocked from the CPU clock, so they keep their CPU-relative rate and get the unhalved count. The LCD controller,
   all sound timings, and HDMA keep their wall-clock rate and get the halved count (odd M-cycles carry over in `busDoubleSpeedAcc`). Halving the
   timer along with the PPU ran every TAC rate at half speed in double-speed mode and failed blargg `interrupt_time`.
-- `drainAudioSamples :: Bus -> IO [Int16]` and `drainAudioSamplesVector :: Bus -> IO (Vector Int16)` (frontend-facing audio drains; prefer the
-  vector form in hot paths)
-- `triggerSpeedSwitch :: Bus -> IO Bool` (called from the CPU's `STOP` handler)
-- `resetTimerDiv :: Bus -> IO ()` (also called from the CPU's `STOP` handler; hardware zeroes the divider on `STOP`)
+- `takeFrameReady :: Bus -> IO Bool` (one-shot: consumes the "the PPU finished a frame" edge, which is how `runUntilFrame` knows to stop)
+- `cpuMCyclesPerLcdFrame :: Bus -> IO Int` (M-cycle budget for one LCD frame at the current speed; frontends and `hang-probe` size a frame with it)
+- `isCgb :: Bus -> Bool` and `isDoubleSpeed :: Bus -> IO Bool`
+
+Frontend-facing output. All of these forward straight to the matching `Ocelot.Ppu` or `Ocelot.Apu` function, and exist so a frontend never has to
+reach through `busPpu`/`busApu`:
+
+- `framebuffer`, `framebufferRgb`, `framebufferRgbBytes`, `framebufferRgbaBytes`, `framebufferRgbaPtr`, `copyFramebufferRgbWithPitch`,
+  `copyFramebufferRgba`
+- `drainAudioSamples :: Bus -> IO [Int16]`, `drainAudioSamplesVector :: Bus -> IO (Vector Int16)`, and
+  `drainAudioSamplesInto :: Ptr Int16 -> Int -> Bus -> IO Int` (prefer the vector or the into-pointer form in hot paths)
+- `drainSerial :: Bus -> IO [Word8]` (takes the bytes the guest has shifted out of the link port, oldest first, and empties the queue; this is the
+  verdict channel for the blargg ROMs that declare no cartridge RAM, both in `GoldenSpec` and in `tools/wasm-cpu-check.mjs`)
+- `setButton :: Button -> Bool -> Bus -> IO ()` (input entry point; forwards to `Joypad.setButton`)
+
+Called from the CPU, and nowhere else:
+
+- `triggerSpeedSwitch :: Bus -> IO Bool` (the `STOP` handler)
+- `resetTimerDiv :: Bus -> IO ()` (also `STOP`; hardware zeroes the divider, which realigns the APU frame sequencer, see Architecture Constraints)
 - `takeStallCycles :: Bus -> IO Int` (drains the CPU-stall debit the bus accrued during the current instruction, currently general-mode HDMA;
   the peripherals are already ticked, so the CPU only folds it into `cpuCycles`)
+- `triggerOamBug :: Word16 -> Bus -> IO ()` (forwards the DMG OAM-corruption trigger for a 16-bit increment through `0xFE00-0xFEFF`)
+
+APU deferral:
+
 - `flushApu :: Bus -> IO ()` and `discardApuDebt :: Bus -> IO ()` (settle or drop deferred APU time; see below)
 
 The APU is the one subsystem `advance` does not tick in lockstep. It accumulates peripheral M-cycles in `busApuDebt` and settles them in a single
@@ -161,7 +224,8 @@ the bus, so its only observation channels are its own register window (`0xFF10-0
 event; `Ocelot.ApuSpec`'s "advance batching equivalence" tests pin that invariant down. `apuDebtHorizon` caps the backlog so a game that never
 touches an APU register cannot grow the debt or the sample queue without bound.
 
-**If you add a new way to observe APU state, flush first.** Reaching `busApu` directly without a `flushApu` reads a stale APU.
+**If you add a new way to observe APU state, flush first.**
+Reaching `busApu` directly without a `flushApu` reads a stale APU.
 
 Bus is the only place that knows the full address map: it dispatches `0x0000-0x7FFF` and `0xA000-0xBFFF` to the cartridge, the VRAM/OAM windows
 to the PPU, the audio register windows to the APU, IO/HRAM/IE to its own buffers, and the CGB extension registers (VBK, BCPS/BCPD, OCPS/OCPD,
@@ -171,11 +235,15 @@ WBK, KEY1, HDMA1-5) to the right peer.
 
 - `Ocelot.Cpu.Execute.step :: Machine -> IO ()` (one instruction; reads/writes go through `Bus`; cycle accounting is stored on the CPU state)
 - `Ocelot.Cpu.Execute.runFor :: Int -> Machine -> IO Int` and `runUntilHalt :: Int -> Machine -> IO Int` (test/headless helpers)
+- `Ocelot.Cpu.Execute.runUntilFrame :: Int -> Machine -> IO Int` (runs to the frame-ready edge, with the cycle count as a fallback cap for LCD-off
+  periods; this is the per-frame entry point both frontends drive)
 - Interrupt servicing is folded into `step`; there is no separately exposed entry point.
 
-CPU never imports `Ocelot.Ppu`, `Ocelot.Apu`, `Ocelot.Timer`, or `Ocelot.Cartridge`. Memory access goes through `Bus`. The `Ocelot.Bus` import
-inside `Cpu.Execute` covers `triggerSpeedSwitch` and `resetTimerDiv` (the `STOP` instruction) plus `takeStallCycles` (cycle accounting), and is
-the only cross-subsystem coupling outside the bus.
+CPU never imports `Ocelot.Ppu`, `Ocelot.Apu`, `Ocelot.Timer`, or `Ocelot.Cartridge`. Memory access goes through `Bus`. Beyond `Bus.read8`/`write8`,
+the `Ocelot.Bus` import inside `Cpu.Execute` covers exactly five things, and that is the only cross-subsystem coupling outside the bus:
+`triggerSpeedSwitch` and `resetTimerDiv` (the `STOP` instruction), `takeStallCycles` (cycle accounting), `takeFrameReady` (`runUntilFrame`), and
+`triggerOamBug` (the DMG OAM corruption a 16-bit increment through `0xFE00-0xFEFF` causes, raised from `oamBugOnAddrBus` because the address bus is
+the CPU's, not the bus's).
 Reading or writing CPU registers from outside `Ocelot.Cpu` is allowed only for tests; production code does not poke `regA`, `regPC`, etc.
 
 ### `Ocelot.Ppu`
@@ -202,6 +270,18 @@ Reading or writing CPU registers from outside `Ocelot.Cpu` is allowed only for t
   movable GHC-heap unboxed `IOVector` used by all other
   framebuffers. This is what makes `framebufferRgbaPtr` safe to call without a copy: the memory never moves. Do not change this to an unboxed vector.
 - STAT write-edge hookup: `takePendingStatIrq :: PpuState -> IO Bool` (called by the bus after PPU register writes that can raise STAT)
+- Post-boot LCDC seed: `seedLcdc :: Word8 -> PpuState -> IO ()` (called by the bus for the no-boot-ROM handoff instead of `write8`, because that
+  handoff is not a guest-visible LCD enable and must not start the short first scanline)
+- Construction and geometry: `initialPpu :: IO PpuState`, `framebufferWidth`/`framebufferHeight :: Int`, and the `PpuMode` constructors
+- Bus access gating: `cpuCanReadOam`, `cpuCanWriteOam`, `cpuCanReadVram`, and `cpuCanWriteVram`, each `PpuState -> IO Bool`. The bus consults these
+  rather than deriving the window from the mode, because the four blocking windows line up with neither edge of the internal mode; see the
+  `lcdon_timing-GS` note in `test/golden-known-failures.txt`.
+- DMG OAM bug: `accessedOamRow :: PpuState -> IO Int` (which OAM row the mode-2 scan is on, `-1` outside the window), plus
+  `triggerOamBug`, `triggerOamBugBusWrite`, and `triggerOamBugRead`, all `Word16 -> PpuState -> IO ()`. The read and write corruption patterns differ,
+  and an access arriving through the bus samples the scan a row later than the CPU's own address bus does; conflating either one is what
+  `oam_bug/8-instr_effect` catches.
+- Post-load fixup: `resyncMode3End :: PpuState -> IO ()` (`ppuMode3End` is derived state refreshed once per line, so a snapshot load has to
+  recompute it or the restored line runs on the previous machine's latch)
 
 `PpuState` exports its field record so `Bus` can route memory accesses and so `Snapshot` can serialize the IORefs and IOVectors directly. Treat
 the surface listed above as the contract; do not call other PpuState fields from outside `Ocelot.Ppu` outside Snapshot.
@@ -213,8 +293,13 @@ the surface listed above as the contract; do not call other PpuState fields from
 - Time advance: `advance :: Int -> ApuState -> IO ()` (queues stereo samples; the bus drains them). Batching must stay bit-exact: `advance n` has
   to produce exactly what `advance 1` repeated @n@ times would, because `Ocelot.Bus` defers APU time and settles it in large chunks. `stepCycles`
   guarantees this by chunking to the next event horizon. Any change to the chunking must keep `Ocelot.ApuSpec`'s batching-equivalence tests green.
-- Sample drain: `drainSamples :: ApuState -> IO [Int16]` and `drainSamplesVector :: ApuState -> IO (Vector Int16)` (same chronological samples; the
-  vector form exists for frontend hot paths)
+- Sample drain: `drainSamples :: ApuState -> IO [Int16]`, `drainSamplesVector :: ApuState -> IO (Vector Int16)`, and
+  `drainSamplesInto :: Ptr Int16 -> Int -> ApuState -> IO Int` (same chronological samples; the vector and into-pointer forms exist for frontend hot
+  paths)
+- Frame-sequencer phase, supplied by the bus because the divider lives in the timer: `divReset :: Bool -> ApuState -> IO ()` (the `Bool` is whether
+  zeroing DIV dropped the sequencer bit, so the sequencer clocks once) and `alignFrameTimer :: Int -> ApuState -> IO ()` (set the counter to the
+  cycles remaining until the next DIV edge, used on APU power-on). See Architecture Constraints; neither is the APU's own business to work out.
+- Construction: `initial :: IO ApuState`
 - CGB hookup: `setCgbMode :: Bool -> ApuState -> IO ()`
 - Host sample rate: `sampleRate :: Int`
 - Snapshot hooks: `dumpState :: ApuState -> IO ByteString`, `loadState :: ByteString -> ApuState -> IO ()`
@@ -226,6 +311,7 @@ the surface listed above as the contract; do not call other PpuState fields from
 - `TimerState` is exported as a record (DIV, TIMA accumulator, TIMA, TMA, TAC fields are part of the API).
 - Pure register I/O: `readDiv`, `readTima`, `readTma`, `readTac`, `writeDiv`, `writeTima`, `writeTma`, `writeTac`.
 - Pure time advance: `advance :: Int -> TimerState -> (TimerState, Bool)` (returns `True` when TIMA overflowed at least once).
+- Construction: `initialTimer :: TimerState` (a pure value, unlike every other subsystem's `initial`).
 
 The timer is the one peripheral that is still pure. The bus owns the `IORef TimerState` and threads the new state back after each advance.
 
@@ -234,6 +320,7 @@ The timer is the one peripheral that is still pure. The bus owns the `IORef Time
 - `setButton :: Button -> Bool -> JoypadState -> IO ()` (frontend pushes input; latches an IRQ edge on a falling-bit transition)
 - `readP1 :: JoypadState -> IO Word8`, `writeP1 :: Word8 -> JoypadState -> IO ()`
 - `takeIrqPending :: JoypadState -> IO Bool` (consumed by `Bus.advance`)
+- `isPressed :: Button -> JoypadState -> IO Bool` and `initial :: IO JoypadState`
 - Snapshot hooks: `dumpState :: JoypadState -> IO (Word8, Word8, Bool)`, `loadState :: (Word8, Word8, Bool) -> JoypadState -> IO ()`
 
 `JoypadState` is exported as an opaque type; the frontend never touches its fields.
@@ -243,6 +330,9 @@ The timer is the one peripheral that is still pure. The bus owns the `IORef Time
 - `read8 :: Word16 -> Cartridge -> IO Word8` (covers `0x0000-0x7FFF` and `0xA000-0xBFFF`)
 - `write8 :: Word16 -> Word8 -> Cartridge -> IO ()`
 - `loadRom :: ByteString -> IO (Either CartridgeError Cartridge)`
+- `cartridgeHeader :: Cartridge -> Header` (pure; the parsed header is decoded once at load)
+- `resetMbc :: Cartridge -> IO ()` (returns the volatile controller registers to power-on while preserving battery-backed RAM and MBC3 RTC
+  timekeeping; the SDL frontend's reset hotkey calls this before rebuilding the `Machine`, because a reset is not a cartridge swap)
 - Save handling: `loadSave :: ByteString -> Cartridge -> IO ()`, `extractSave :: Cartridge -> IO ByteString`, `cartridgeHasBattery`,
   `extractRam`/`loadRam`
 - Snapshot hooks: `dumpMbc :: Cartridge -> IO ByteString`, `loadMbc :: ByteString -> Cartridge -> IO ()` (MBC bank-select state)
@@ -265,6 +355,30 @@ VBA-M-compatible 48-byte suffix appended to the RAM bytes in `extractSave`/`load
   bytes; `runCursor` is the lenient zero-filling variant, valid only where an outer decoder already framed the payload length.
 - Reaches across subsystems via the per-module `dumpState`/`loadState` hooks listed above and via direct PpuState/Bus field access where the
   state is in IORefs and IOVectors that the per-module hooks would just wrap.
+
+### `Ocelot.Web`
+
+Session-level API for the browser host. `WebSession` is opaque and wraps a `Machine` plus the cartridge, the cached header facts, and the stall
+watchdog's state. This is the boundary that keeps browser behavior testable: `app-web/Main.hs` is a `CInt`-and-pointer shim with no logic of its own,
+and `test/Ocelot/WebSpec.hs` drives this module directly. New browser-facing behavior goes here, not into the shim.
+
+- Lifecycle: `loadSession :: ByteString -> IO (Either CartridgeError WebSession)` and `runFrame :: WebSession -> IO ()` (one LCD frame)
+- Header facts, cached at load so the host does not re-parse: `sessionTitle :: WebSession -> Text`, `sessionHasBattery`, and `sessionIsCgb`
+- Input: `setButton :: Button -> Bool -> WebSession -> IO ()`
+- Output: `framebufferRgb`, `framebufferRgbBytes`, `framebufferRgbaBytes`, `framebufferRgbaPtr`, `copyFramebufferRgba`, the three
+  `drainAudioSamples*` forms, `drainSerialBytes :: WebSession -> IO ByteString`, plus `framebufferWidth`/`framebufferHeight`/`audioSampleRate`
+- Persistence: `saveState`, `loadState`, `extractSaveData`, and `loadSaveData`
+- One-time hookup: `setFbTargetRgba :: WebSession -> IO ()` (the browser only ever reads RGBA, so skip the RGB writes)
+
+Stall watchdog. `runFrame` fingerprints the finished picture and counts consecutive identical frames.
+
+- `stalledFrames :: WebSession -> IO Int` (a plain counter read, cheap enough to poll every frame; resets to 0 the moment the picture changes, so a
+  host that reports on the threshold crossing reports once per stall episode rather than once per frame)
+- `stallThreshold :: Int` (180 frames, about three seconds)
+- `debugState :: WebSession -> IO ByteString` (`Machine.debugSummary` plus the counter, as text meant to be pasted verbatim into a bug report)
+
+**A still picture is not an error.** Title screens, pause menus, and anything waiting on input hold a frame indefinitely, so crossing the threshold is
+a cue to gather diagnostics and never a reason to stop the emulator or show the user an error.
 
 ### Interrupt Latching
 

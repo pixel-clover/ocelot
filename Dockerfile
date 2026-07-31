@@ -12,37 +12,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zstd \
     && rm -rf /var/lib/apt/lists/*
 
-# Install GHC wasm toolchain (auto-detects host architecture).
-# Pin WASM_META_REV to a specific commit SHA for reproducible builds.
-ARG WASM_META_REV=master
+ARG WASM_META_REV=ce99eb6bc65d935ee5cb0e7563deb893793dc947
+ARG WASM_FLAVOUR=9.12
 RUN curl -sSf "https://gitlab.haskell.org/haskell-wasm/ghc-wasm-meta/-/raw/${WASM_META_REV}/bootstrap.sh" \
-    | FLAVOUR=9.6 sh
+    | FLAVOUR="${WASM_FLAVOUR}" sh
 
-# Copy the cabal file and sources so cabal can configure the package during
-# the dependency-only build. The dep layer is invalidated if either changes,
-# but in practice dependencies change far less often than source.
 COPY ocelot.cabal ./
 COPY src/ src/
 RUN . /root/.ghc-wasm/env && \
     wasm32-wasi-cabal update && \
     wasm32-wasi-cabal build --only-dependencies exe:ocelot-web -f -desktop -f wasm-reactor
 
-# Build the emulator.
 COPY app-web/ app-web/
 RUN . /root/.ghc-wasm/env && \
     wasm32-wasi-cabal build exe:ocelot-web -f -desktop -f wasm-reactor && \
-    cp "$(wasm32-wasi-cabal list-bin exe:ocelot-web -f -desktop -f wasm-reactor)" ocelot.wasm
+    cp "$(wasm32-wasi-cabal list-bin exe:ocelot-web -f -desktop -f wasm-reactor)" ocelot.wasm && \
+    wasm-opt -O3 ocelot.wasm -o ocelot.wasm
 
-# Pinned to a specific minor for reproducibility; bump deliberately when needed.
 FROM nginx:1.27-alpine
 
 COPY web/ /usr/share/nginx/html/
 COPY --from=build /src/ocelot.wasm /usr/share/nginx/html/
 
-# Pre-compress static assets so nginx can serve them via gzip_static. Keeps the
-# original alongside (-k) so clients without gzip support still work.
 RUN find /usr/share/nginx/html -type f \( \
         -name "*.wasm" -o -name "*.js" -o -name "*.html" -o -name "*.ttf" \
+        -o -name "*.gb" -o -name "*.gbc" \
     \) -exec gzip -9 -k -f {} \;
 
 RUN printf '%s\n' \

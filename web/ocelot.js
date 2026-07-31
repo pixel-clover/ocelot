@@ -65,6 +65,54 @@ let overlayDepth = 0;
 let wasRunningBeforeOverlay = false;
 let pausedByVisibility = false;
 
+// ─── Stall diagnostics ────────────────────────────────────────────────────────
+
+// The last stall report from the Worker, including pre-freeze and at-freeze save
+// states when the build provides them. Downloaded on demand via 'ocelotStall()'.
+let lastStallDiagnostics = null;
+
+function downloadBlob(bytes, name) {
+    const url = URL.createObjectURL(new Blob([bytes], {type: "application/octet-stream"}));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+/* Download the save states attached to the last stall report.
+
+Console-invoked on purpose: the watchdog trips on every title screen and pause menu,
+so anything visible would cry wolf. Someone chasing a real freeze is already in the
+console reading the report, and this puts the reproduction files one call away. */
+window.ocelotStall = function () {
+    if (!lastStallDiagnostics) {
+        console.log("[ocelot] no stall has been reported this session");
+        return;
+    }
+    const d = lastStallDiagnostics;
+    const stem = (d.romName || "rom").replace(/\.[^.]*$/, "");
+    if (d.preState) {
+        downloadBlob(d.preState, `${stem}-pre-freeze.state`);
+        console.log(
+            `[ocelot] pre-freeze state (~${Math.round(d.preStateAgeFrames / 60)}s before the report): ` +
+            `load it with bin/tools/hang-probe --state <file> to search for the crash from just before it.`
+        );
+    }
+    if (d.postState) downloadBlob(d.postState, `${stem}-at-freeze.state`);
+    if (d.inputs.length) {
+        // One event per line: frame offset from the pre-freeze state, the wasm button
+        // code, and 1 for press or 0 for release. hang-probe --replay consumes this.
+        const lines = d.inputs.map(([frame, code, down]) => `${frame} ${code} ${down}`);
+        downloadBlob("# frame button down\n" + lines.join("\n") + "\n", `${stem}-input-log.txt`);
+    }
+    downloadBlob(`rom=${d.romName}\nframes=${d.frames}\n${d.detail}\n`, `${stem}-freeze-report.txt`);
+    if (!d.preState && !d.postState) {
+        console.log("[ocelot] the report carried no save states (older build?); detail:\n" + d.detail);
+    }
+    showToast("Freeze diagnostics downloaded");
+};
+
 // ─── Perf HUD ─────────────────────────────────────────────────────────────────
 
 let perfVisible = false;
@@ -209,8 +257,16 @@ async function init() {
     canvas.addEventListener("click", togglePause);
     document.getElementById("rom-input").addEventListener("change", onFileSelected);
     document.getElementById("recent-roms").addEventListener("change", (ev) => {
-        if (ev.target.value) loadRecentRom(ev.target.value);
+        const value = ev.target.value;
+        // Reset before dispatching: loading is async, and leaving the picked entry
+        // selected would misreport what is running once it finishes.
         ev.target.selectedIndex = 0;
+        if (!value) return;
+        if (value.startsWith(BUNDLED_VALUE_PREFIX)) {
+            loadBundledRom(value.slice(BUNDLED_VALUE_PREFIX.length));
+        } else {
+            loadRecentRom(value);
+        }
     });
     document.getElementById("audio-toggle").addEventListener("click", toggleAudio);
     document.getElementById("master-volume").addEventListener("input", onMasterVolumeChange);
@@ -297,6 +353,12 @@ async function init() {
         if (ev.dataTransfer.files.length > 0) loadRom(ev.dataTransfer.files[0]);
     });
 
+    // Probe and render before the database opens. The bundled entries do not depend on
+    // storage, so showing them here means no path can leave them out, whether the
+    // database is empty, slow, or unavailable.
+    await probeBundledRoms();
+    renderRomList([]);
+
     try {
         db = await openDB();
         await populateRecentRoms();
@@ -327,7 +389,10 @@ function onWorkerMessage(ev) {
         }
 
         case "audio": {
-            if (audioNode) {
+            // While audio is muted the context is suspended but the worklet's message
+            // port stays live, so forwarding samples would pin its ring buffer at
+            // capacity and unmuting would then play ~0.6 s behind the picture.
+            if (audioNode && audioEnabled) {
                 audioNode.port.postMessage(new Int16Array(msg.buffer, 0, msg.samples), [msg.buffer]);
                 if (msg.queryLevel) audioNode.port.postMessage("query-level");
             } else {
@@ -335,6 +400,31 @@ function onWorkerMessage(ev) {
             }
             break;
         }
+
+        case "stallReport":
+            // Not an error: a title screen or pause menu legitimately holds a still
+            // frame. Logged rather than shown, so it is there to copy into a bug report
+            // without interrupting someone who is just sitting on a menu.
+            lastStallDiagnostics = {
+                detail: msg.detail || "",
+                frames: msg.frames,
+                preState: msg.preState || null,
+                postState: msg.postState || null,
+                preStateAgeFrames: msg.preStateAgeFrames || 0,
+                inputs: msg.inputs || [],
+                romName: currentRomName,
+            };
+            console.warn(
+                "[ocelot] " + (currentRomTitle || currentRomName || "ROM") +
+                ": picture unchanged for " + msg.frames + " frames. " +
+                "If the game is actually frozen, please include this state:\n" +
+                (msg.detail || "(state capture unavailable)") + "\n" +
+                (msg.preState || msg.postState
+                    ? "Run ocelotStall() in this console to download save states from " +
+                      "before and at the freeze; they make the report reproducible."
+                    : "")
+            );
+            break;
 
         case "frameError":
             showError(msg.message || "Emulation error");
@@ -507,6 +597,10 @@ function initRemapUI() {
 
 let activeRemapCleanup = null;
 
+// Keys 'onKeyDown' consumes before joypad dispatch: a binding to one of these
+// would silently never fire, so refuse it at remap time instead.
+const RESERVED_HOTKEYS = new Set(["F1", "F5", "F6", "F7", "F11", "Space", "Escape"]);
+
 function startListening(rbtn, btn) {
     if (activeRemapCleanup) activeRemapCleanup();
     rbtn.classList.add("listening");
@@ -518,6 +612,11 @@ function startListening(rbtn, btn) {
         cleanup();
         if (ev.code === "Escape") {
             rbtn.textContent = keyDisplayName(keyForButton(btn));
+            return;
+        }
+        if (RESERVED_HOTKEYS.has(ev.code)) {
+            rbtn.textContent = keyDisplayName(keyForButton(btn));
+            showToast(`${ev.code} is reserved for a hotkey`);
             return;
         }
         const newCode = ev.code;
@@ -682,7 +781,9 @@ function closeAllOverlays() {
 function resumeAfterOverlay() {
     if (overlayDepth > 0) overlayDepth--;
     if (overlayDepth > 0) return;
-    if (wasRunningBeforeOverlay && currentRomName) {
+    // 'running' already true means a frame loop is active; starting another
+    // requestAnimationFrame chain here would double rendering and polling.
+    if (wasRunningBeforeOverlay && currentRomName && !running) {
         running = true;
         lastRafTime = performance.now();
         worker.postMessage({type: "resume"});
@@ -693,11 +794,10 @@ function resumeAfterOverlay() {
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
 
+/* Drop the stored entries when persistent storage goes away, keeping the bundled games,
+which do not come from storage and stay playable without it. */
 function hideRecentRoms() {
-    const select = document.getElementById("recent-roms");
-    if (!select) return;
-    while (select.options.length > 1) select.remove(1);
-    select.style.display = "none";
+    renderRomList([]);
 }
 
 function disableStorage(message, err) {
@@ -847,11 +947,40 @@ async function getRecentRoms() {
     }
 }
 
-async function populateRecentRoms() {
+/* Render the ROM list: the bundled games first, then whatever the browser stored.
+
+Bundled entries are unconditional, which is why this is separate from the database read.
+They have to survive an empty database and storage being switched off entirely, and both
+of those paths used to hide the whole control. */
+function renderRomList(storedEntries) {
     const select = document.getElementById("recent-roms");
+    if (!select) return;
     while (select.options.length > 1) select.remove(1);
+
+    for (const rom of availableBundledRoms) {
+        const opt = document.createElement("option");
+        opt.value = BUNDLED_VALUE_PREFIX + rom.path;
+        opt.textContent = rom.label;
+        select.appendChild(opt);
+    }
+
+    // A bundled game the visitor has already played is also in the database under the
+    // same name, so drop that copy rather than listing it twice.
+    const bundledNames = new Set(availableBundledRoms.map((r) => r.name));
+    const stored = storedEntries.filter((e) => !bundledNames.has(e.name));
+    for (const entry of stored.slice(0, 10)) {
+        const opt = document.createElement("option");
+        opt.value = entry.key || entry.name;
+        opt.textContent = entry.name;
+        select.appendChild(opt);
+    }
+
+    select.style.display = select.options.length > 1 ? "" : "none";
+}
+
+async function populateRecentRoms() {
     if (!db) {
-        select.style.display = "none";
+        renderRomList([]);
         return;
     }
     const allEntries = await getRecentRoms();
@@ -862,17 +991,7 @@ async function populateRecentRoms() {
         seen.add(e.name);
         return true;
     });
-    if (entries.length === 0) {
-        select.style.display = "none";
-        return;
-    }
-    for (const entry of entries.slice(0, 10)) {
-        const opt = document.createElement("option");
-        opt.value = entry.key || entry.name;
-        opt.textContent = entry.name;
-        select.appendChild(opt);
-    }
-    select.style.display = "";
+    renderRomList(entries);
 }
 
 async function loadRecentRom(key) {
@@ -934,7 +1053,14 @@ function toggleAudio() {
     audioEnabled = !audioEnabled;
     document.getElementById("audio-toggle").textContent = audioEnabled ? "ON" : "OFF";
     if (audioCtx) {
-        if (audioEnabled) audioCtx.resume(); else audioCtx.suspend();
+        if (audioEnabled) {
+            // Drop whatever the ring buffer accumulated before the mute, so
+            // playback resumes in sync instead of behind the picture.
+            if (audioNode) audioNode.port.postMessage("clear");
+            audioCtx.resume();
+        } else {
+            audioCtx.suspend();
+        }
     }
     saveSettings();
 }
@@ -1013,6 +1139,61 @@ async function decompressIfNeeded(file) {
     if (!(file.name || "").toLowerCase().endsWith(".zip")) return file;
     const {unzipFirstRom} = await import("./zip.js");
     return unzipFirstRom(file);
+}
+
+/* Freely licensed games shipped alongside the emulator, so a first-time visitor has
+something to run without owning a ROM. They appear as permanent entries at the top of
+the ROM list, before whatever the browser has stored.
+
+Only games whose licence permits redistribution belong here. Attribution lives in
+web/games/README.md, which ships next to the ROM, and in the repository README.
+See web/games/README.md before adding another one. */
+const BUNDLED_ROMS = [
+    {path: "games/tobudx.gb", name: "Tobu Tobu Girl Deluxe.gb", label: "Tobu Tobu Girl Deluxe"}
+];
+
+/* Marks a select value as a bundled path rather than an IndexedDB key, so the one
+change handler can tell a fetch from a database read. */
+const BUNDLED_VALUE_PREFIX = "bundled:";
+
+// Populated at startup with the subset of BUNDLED_ROMS the server actually has.
+let availableBundledRoms = [];
+
+/* Confirm which bundled ROMs are fetchable before offering them.
+
+A HEAD request settles it without pulling the ROM on every page load, so a build that
+shipped without one lists nothing rather than an entry that fails when picked. */
+async function probeBundledRoms() {
+    const found = [];
+    for (const rom of BUNDLED_ROMS) {
+        try {
+            const probe = await fetch(rom.path, {method: "HEAD"});
+            if (probe.ok) found.push(rom);
+        } catch {
+            // Offline, or a host that refuses HEAD. Leave it out.
+        }
+    }
+    availableBundledRoms = found;
+}
+
+async function loadBundledRom(path) {
+    const rom = availableBundledRoms.find((r) => r.path === path);
+    if (!rom) return;
+    try {
+        const response = await fetch(rom.path);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        // loadRom only needs a name and arrayBuffer(), which is how the stored-ROM
+        // path feeds it an IndexedDB entry too.
+        await loadRom({
+            name: rom.name,
+            arrayBuffer: () => Promise.resolve(
+                bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+            )
+        });
+    } catch (err) {
+        showError(`Could not load ${rom.label}: ${err.message || err}`);
+    }
 }
 
 async function loadRom(file) {
@@ -1097,6 +1278,10 @@ function togglePause() {
         showToast("Load a ROM first");
         return;
     }
+    // An open overlay owns the pause state: resuming here would run the game
+    // invisibly behind it, and 'resumeAfterOverlay' would later start a second
+    // requestAnimationFrame chain on top of ours.
+    if (overlayDepth > 0) return;
     running = !running;
     document.getElementById("btn-pause").textContent = running ? "Pause" : "Resume";
     if (running) {

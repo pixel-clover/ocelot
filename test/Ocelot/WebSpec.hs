@@ -5,10 +5,108 @@ module Ocelot.WebSpec (spec) where
 import qualified Data.ByteString as BS
 import qualified Data.Vector.Unboxed as V
 import Data.Word (Word8)
+import Ocelot.Cartridge.Header (expectedHeaderChecksum)
 import qualified Ocelot.Joypad as Joypad
 import Ocelot.Testing (synthNoMbcRom)
 import qualified Ocelot.Web as Web
 import Test.Hspec
+
+{- | 32 KiB NoMbc image whose entry point runs @prog@ at @0x0150@.
+
+'Ocelot.Testing.synthNoMbcRom' puts its bytes at offset 0, but a cart loaded through
+'Web.loadSession' starts at @0x0100@, so those bytes never execute. This lays down the
+usual @NOP; JP 0x0150@ entry stub and puts the program where the stub jumps.
+-}
+mkRomWithProgram :: [Word8] -> BS.ByteString
+mkRomWithProgram prog =
+    let romSize = 32 * 1024
+        v0 = V.replicate romSize 0 :: V.Vector Word8
+        header =
+            [ (0x0100, 0x00) -- NOP
+            , (0x0101, 0xC3) -- JP 0x0150
+            , (0x0102, 0x50)
+            , (0x0103, 0x01)
+            , (0x0143, 0x00) -- DMG-only
+            , (0x0147, 0x00) -- NoMbc
+            , (0x0148, 0x00)
+            , (0x0149, 0x00)
+            , (0x014B, 0x33)
+            ]
+        body0 = BS.pack (V.toList (v0 V.// header V.// zip [0x0150 ..] prog))
+        cs = expectedHeaderChecksum body0
+     in BS.take 0x14D body0 <> BS.singleton cs <> BS.drop 0x14E body0
+
+{- | Increments BGP once per frame, so background colour 0 changes and the screen
+repaints every frame.
+
+Synchronising on LY is the point. An earlier version of this just incremented BGP in a
+tight loop, which does not work: the loop runs about 1596 times per frame, so BGP
+advances ~60 per frame, and colour 0 is selected by BGP bits 0-1 alone. 60 is a
+multiple of 4, so those two bits landed on the same value every frame and the picture
+never changed. Waiting for LY 144, incrementing once, then waiting for LY to leave 144
+gives exactly one increment per frame.
+-}
+romCyclingPalette :: BS.ByteString
+romCyclingPalette =
+    mkRomWithProgram
+        [ 0xF0
+        , 0x44 -- LDH A,(FF44)   ; LY
+        , 0xFE
+        , 0x90 -- CP 144
+        , 0x20
+        , 0xFA -- JR NZ,-6       ; wait for VBlank
+        , 0xF0
+        , 0x47 -- LDH A,(FF47)   ; BGP
+        , 0x3C -- INC A
+        , 0xE0
+        , 0x47 -- LDH (FF47),A
+        , 0xF0
+        , 0x44 -- LDH A,(FF44)
+        , 0xFE
+        , 0x90 -- CP 144
+        , 0x28
+        , 0xFA -- JR Z,-6        ; wait for VBlank to end
+        , 0xC3
+        , 0x50
+        , 0x01 -- JP 0x0150
+        ]
+
+{- | Sends @H@ then @I@ over the link port, waiting for the first transfer to
+finish before starting the second.
+
+The wait matters. The outgoing byte is queued the moment @SC@ bit 7 is set, so a
+program that fired both transfers back to back would pass even if the shift timing
+were broken. Polling @SC@ bit 7 until hardware clears it means the second write
+cannot happen unless the first transfer actually completed.
+-}
+romSerialHi :: BS.ByteString
+romSerialHi =
+    mkRomWithProgram
+        [ 0x3E
+        , 0x48 -- LD A,'H'
+        , 0xE0
+        , 0x01 -- LDH (FF01),A   ; SB
+        , 0x3E
+        , 0x81 -- LD A,0x81      ; start + internal clock
+        , 0xE0
+        , 0x02 -- LDH (FF02),A   ; SC
+        , 0xF0
+        , 0x02 -- LDH A,(FF02)   ; wait:
+        , 0xE6
+        , 0x80 -- AND 0x80
+        , 0x20
+        , 0xFA -- JR NZ,-6       ; until SC bit 7 clears
+        , 0x3E
+        , 0x49 -- LD A,'I'
+        , 0xE0
+        , 0x01 -- LDH (FF01),A
+        , 0x3E
+        , 0x81 -- LD A,0x81
+        , 0xE0
+        , 0x02 -- LDH (FF02),A
+        , 0x18
+        , 0xFE -- JR -2          ; park here
+        ]
 
 spec :: Spec
 spec = do
@@ -22,6 +120,49 @@ spec = do
             Right session <- Web.loadSession rom
             Web.sessionIsCgb session `shouldBe` False
             Web.sessionHasBattery session `shouldBe` False
+
+    describe "stall watchdog" $ do
+        {- The watchdog exists so a frozen picture in the browser produces a report
+        instead of a shrug. It counts consecutive frames whose picture is unchanged;
+        crossing 'stallThreshold' is a cue to gather diagnostics, deliberately not an
+        error, because a title screen or pause menu holds a still frame forever and is
+        perfectly healthy. -}
+        it "counts consecutive unchanged frames on a ROM that draws nothing" $ do
+            let rom = synthNoMbcRom BS.empty
+            Right session <- Web.loadSession rom
+            -- First frame establishes the fingerprint, so the count only rises after it.
+            Web.runFrame session
+            Web.runFrame session
+            Web.runFrame session
+            n <- Web.stalledFrames session
+            n `shouldBe` 2
+
+        it "stays at zero for a ROM whose picture keeps changing" $ do
+            {- Drives BGP so colour 0 changes continuously, which repaints the whole
+            screen every frame. A game that is drawing must never trip the watchdog. -}
+            Right session <- Web.loadSession romCyclingPalette
+            mapM_ (const (Web.runFrame session)) [1 .. 8 :: Int]
+            n <- Web.stalledFrames session
+            n `shouldBe` 0
+
+        it "brackets the threshold between a brief pause and a freeze that ends in a restart" $ do
+            -- Above ~2s so a momentary pause during play stays quiet, and well under 10s
+            -- because a game that freezes and then restarts is only still for a moment;
+            -- too long a threshold never fires for that symptom at all.
+            Web.stallThreshold `shouldSatisfy` (>= 120)
+            Web.stallThreshold `shouldSatisfy` (<= 300)
+
+        it "reports machine state as text a user can paste into a bug report" $ do
+            let rom = synthNoMbcRom BS.empty
+            Right session <- Web.loadSession rom
+            Web.runFrame session
+            report <- Web.debugState session
+            let text = BS.unpack report
+            -- The fields that distinguish a wedged guest from an idle one.
+            mapM_
+                (\field -> (field `BS.isInfixOf` report) `shouldBe` True)
+                ["pc=", "halted=", "pending=", "lcdc=", "hdma5=", "mbc=", "stalledFrames="]
+            length text `shouldSatisfy` (< 400)
 
     describe "frame stepping" $ do
         it "runs one frame and exposes a full RGB framebuffer" $ do
@@ -70,6 +211,32 @@ spec = do
             samples <- Web.drainAudioSamplesVector session
             V.length samples `shouldSatisfy` (>= 0)
             Web.drainAudioSamples session `shouldReturn` []
+
+    describe "serial output" $ do
+        {- This is the verdict channel for the blargg ROMs that declare no cartridge
+        RAM, and 'tools/wasm-cpu-check.mjs' reads the whole wasm CPU gate through it.
+        A silent regression here would make that gate report "no verdict" for every
+        ROM, which looks like a broken harness rather than a broken emulator. -}
+        it "collects the bytes a guest shifts out of the link port" $ do
+            Right session <- Web.loadSession romSerialHi
+            mapM_ (const (Web.runFrame session)) [1 .. 2 :: Int]
+            out <- Web.drainSerialBytes session
+            out `shouldBe` "HI"
+
+        it "empties the queue, so a second drain returns nothing" $ do
+            Right session <- Web.loadSession romSerialHi
+            mapM_ (const (Web.runFrame session)) [1 .. 2 :: Int]
+            first <- Web.drainSerialBytes session
+            BS.null first `shouldBe` False
+            second <- Web.drainSerialBytes session
+            second `shouldBe` BS.empty
+
+        it "returns nothing for a guest that never touches the link port" $ do
+            let rom = synthNoMbcRom BS.empty
+            Right session <- Web.loadSession rom
+            Web.runFrame session
+            out <- Web.drainSerialBytes session
+            out `shouldBe` BS.empty
 
 isLeft :: Either a b -> Bool
 isLeft (Left _) = True

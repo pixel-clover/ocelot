@@ -97,35 +97,103 @@ spec = do
             v `shouldBe` 0x00
 
     describe "PPU access gating" $ do
-        it "blocks CPU VRAM reads and writes during mode 3" $ do
-            b <- emptyBus
-            let ppu = Bus.busPpu b
-            writeIORef (Ppu.ppuLcdc ppu) 0x80
-            write8 0x8000 0x12 b
-            writeIORef (Ppu.ppuMode ppu) Ppu.ModeDrawing
-            blocked <- read8 0x8000 b
-            write8 0x8000 0x34 b
-            writeIORef (Ppu.ppuMode ppu) Ppu.ModeHBlank
-            visible <- read8 0x8000 b
-            blocked `shouldBe` 0xFF
-            visible `shouldBe` 0x12
+        {- The windows are driven by the dot, not by the mode, because they line up with
+        neither mode boundary. OAM shuts one dot before STAT reports mode 2, VRAM four dots
+        before STAT reports mode 3, and both reopen with the mode-0 report, four dots after
+        mode 3 has internally ended. mooneye @ppu/lcdon_timing-GS@ pins all three edges.
 
-        it "blocks CPU OAM reads and writes during mode 2 and mode 3" $ do
+        'resyncMode3End' puts mode 3 at dots 80..251 here (no fine scroll, window, or
+        objects), so the windows reopen at dot 256.
+        -}
+        let openLine ppu = do
+                writeIORef (Ppu.ppuLcdc ppu) 0x80
+                writeIORef (Ppu.ppuLy ppu) 0
+                writeIORef (Ppu.ppuLcdOnFirstLine ppu) False
+                Ppu.resyncMode3End ppu
+
+        {- Reads and writes do not share edges either, so each window is probed on its own.
+        Blocking is observed by reading back @0xFF@; write blocking by writing a fresh
+        value and finding the old one still there once the window reopens.
+        -}
+        let readableAt ppu dot addr b = do
+                writeIORef (Ppu.ppuDot ppu) dot
+                (/= 0xFF) <$> read8 addr b
+            writableAt ppu dot addr b = do
+                orig <- writeIORef (Ppu.ppuDot ppu) 300 >> read8 addr b
+                writeIORef (Ppu.ppuDot ppu) dot
+                write8 addr (orig + 1) b
+                writeIORef (Ppu.ppuDot ppu) 300
+                now <- read8 addr b
+                pure (now == orig + 1)
+
+        it "blocks CPU VRAM reads from the internal mode 3 through the report tail" $ do
             b <- emptyBus
             let ppu = Bus.busPpu b
-            writeIORef (Ppu.ppuLcdc ppu) 0x80
-            writeIORef (Ppu.ppuMode ppu) Ppu.ModeHBlank
-            write8 0xFE00 0x55 b
-            writeIORef (Ppu.ppuMode ppu) Ppu.ModeOamScan
-            blockedMode2 <- read8 0xFE00 b
-            write8 0xFE00 0x66 b
-            writeIORef (Ppu.ppuMode ppu) Ppu.ModeDrawing
-            blockedMode3 <- read8 0xFE00 b
-            writeIORef (Ppu.ppuMode ppu) Ppu.ModeHBlank
-            visible <- read8 0xFE00 b
-            blockedMode2 `shouldBe` 0xFF
-            blockedMode3 `shouldBe` 0xFF
-            visible `shouldBe` 0x55
+            openLine ppu
+            -- Mode 2, internal mode 3, the report tail past mode 3, and reopened.
+            mapM_
+                ( \(dot, want) -> do
+                    got <- readableAt ppu dot 0x8000 b
+                    (dot, got) `shouldBe` (dot, want)
+                )
+                [(0, True), (79, True), (80, False), (252, False), (256, True)]
+
+        it "blocks CPU VRAM writes only from the reported mode 3, four dots later" $ do
+            b <- emptyBus
+            let ppu = Bus.busPpu b
+            openLine ppu
+            mapM_
+                ( \(dot, want) -> do
+                    got <- writableAt ppu dot 0x8000 b
+                    (dot, got) `shouldBe` (dot, want)
+                )
+                -- Dots 80..83 read back 0xFF yet still accept writes.
+                [(0, True), (80, True), (83, True), (84, False), (252, False), (256, True)]
+
+        it "blocks CPU OAM reads from dot 3 through the mode 3 report tail" $ do
+            b <- emptyBus
+            let ppu = Bus.busPpu b
+            openLine ppu
+            mapM_
+                ( \(dot, want) -> do
+                    got <- readableAt ppu dot 0xFE00 b
+                    (dot, got) `shouldBe` (dot, want)
+                )
+                [(0, True), (2, True), (3, False), (100, False), (252, False), (256, True)]
+
+        it "blocks CPU OAM writes from dot 4, reopening for the gap before mode 3" $ do
+            b <- emptyBus
+            let ppu = Bus.busPpu b
+            openLine ppu
+            mapM_
+                ( \(dot, want) -> do
+                    got <- writableAt ppu dot 0xFE00 b
+                    (dot, got) `shouldBe` (dot, want)
+                )
+                -- Dot 3 still writes though it no longer reads, and dots 80..83 write
+                -- again in the gap between the end of mode 2 and the mode 3 report.
+                [ (0, True)
+                , (3, True)
+                , (4, False)
+                , (79, False)
+                , (80, True)
+                , (83, True)
+                , (84, False)
+                , (252, False)
+                , (256, True)
+                ]
+
+        it "leaves OAM and VRAM open throughout VBlank" $ do
+            b <- emptyBus
+            let ppu = Bus.busPpu b
+            openLine ppu
+            writeIORef (Ppu.ppuLy ppu) 144
+            writeIORef (Ppu.ppuDot ppu) 100 -- would be mode 3 on a visible line
+            write8 0xFE00 0x77 b
+            write8 0x8000 0x88 b
+            oam <- read8 0xFE00 b
+            vram <- read8 0x8000 b
+            (oam, vram) `shouldBe` (0x77, 0x88)
 
     describe "serial-port capture" $ do
         it "writing 0x81 to SC after staging SB latches a byte to drainSerial" $ do
@@ -148,10 +216,11 @@ spec = do
             write8 0xFF01 0x41 b
             write8 0xFF02 0x81 b
             during <- read8 0xFF02 b
-            -- An internal-clock transfer shifts 8 bits at 8192 Hz, i.e. 512
-            -- T-cycles = 128 M-cycles. Until then SC bit 7 stays set.
+            -- 8192 Hz is the bit rate, so a byte is 8 * 512 = 4096 T-cycles =
+            -- 1024 M-cycles. A fresh bus starts with the divider at 0, which
+            -- puts the first shift edge a full period in.
             (during .&. 0x80) `shouldBe` 0x80
-            advance 127 b
+            advance 1023 b
             justBefore <- read8 0xFF02 b
             (justBefore .&. 0x80) `shouldBe` 0x80
             advance 1 b
@@ -167,31 +236,50 @@ spec = do
             write8 0xFF02 0x81 b
             during <- read8 0xFF0F b
             (during .&. 0x08) `shouldBe` 0x00
-            advance 128 b
+            advance 1024 b
             after <- read8 0xFF0F b
             (after .&. 0x08) `shouldBe` 0x08
+
+        {- The shift clock is a division of the DIV divider, so its edges sit at
+        fixed divider phases and a transfer armed part-way through a period gets a
+        short first bit. This is the whole point of mooneye
+        @acceptance/serial/boot_sclk_align-dmgABCmgb@.
+        -}
+        it "aligns the first shift edge to the divider, not to the SC write" $ do
+            b <- emptyBus
+            -- Arm at divider 2032, four M-cycles shy of the boundary at 2048, so the
+            -- first bit lands almost at once and the byte finishes nearly a period
+            -- early: 16 + 7 * 512 = 3600 T-cycles, i.e. 900 M rather than 1024.
+            advance 508 b
+            write8 0xFF01 0x41 b
+            write8 0xFF02 0x81 b
+            advance 899 b
+            justBefore <- read8 0xFF0F b
+            advance 1 b
+            after <- read8 0xFF0F b
+            (justBefore .&. 0x08, after .&. 0x08) `shouldBe` (0x00, 0x08)
 
         it "reads back 0xFF from SB after a transfer with no link peer" $ do
             b <- emptyBus
             write8 0xFF01 0x41 b
             write8 0xFF02 0x81 b
-            advance 128 b
+            advance 1024 b
             sb <- read8 0xFF01 b
             sb `shouldBe` 0xFF
 
         it "takes the same CPU M-cycle count in double-speed mode" $ do
-            -- The serial shift clock hangs off the CPU clock, so like OAM DMA
-            -- it sits on the CPU side of the speed divider: a transfer still
-            -- costs 128 CPU M-cycles (half the wall-clock time) in double
-            -- speed. Ticking it at the halved peripheral rate would stall a
-            -- CGB game that busy-waits ~128 cycles for its transfer.
+            -- The shift clock divides the divider, and the divider is clocked from
+            -- the CPU side of the speed switch, so a transfer still costs 1024 CPU
+            -- M-cycles (half the wall-clock time) in double speed. Ticking it at the
+            -- halved peripheral rate would stall a CGB game that busy-waits for its
+            -- transfer.
             b <- cgbBus
             write8 0xFF4D 0x01 b -- Arm the KEY1 speed switch
             switched <- Bus.triggerSpeedSwitch b
             switched `shouldBe` True
             write8 0xFF01 0x41 b
             write8 0xFF02 0x81 b
-            advance 127 b
+            advance 1023 b
             mid <- read8 0xFF0F b
             (mid .&. 0x08) `shouldBe` 0x00
             advance 1 b
@@ -293,13 +381,147 @@ spec = do
             v42 <- Ppu.read8 0xFE42 (Bus.busPpu b)
             v42 `shouldBe` 0xCD
 
+        {- OAM DMA occupies one internal bus, not the whole address space. A DMA sourced from VRAM
+        leaves the main bus (ROM, SRAM, WRAM, echo) readable, and vice versa. Ocelot used to lock the
+        CPU out of everything below 0xFF00 for the duration, which made an instruction fetch from
+        WRAM or echo RAM return 0xFF; the CPU then decoded that as RST 38h and wedged at PC=0x38.
+        That is the single cause behind all nine mooneye instruction-timing ROMs timing out.
+        Mirrors SameBoy's @is_addr_in_dma_use@.
+        -}
+        -- 'advance 1' consumes the startup delay; copying only begins on the next call, so every
+        -- case below advances twice when it wants the transfer genuinely under way. A single
+        -- 'advance n' straight after the FF46 write copies nothing and leaves the index at 0.
+        it "a VRAM-sourced DMA leaves the main bus readable" $ do
+            b <- emptyBus
+            write8 0xFF40 0x00 b -- LCD off: VRAM freely writable and the PPU frozen
+            write8 0x8000 0x11 b -- byte the DMA will be reading
+            write8 0xC000 0xAA b -- byte the CPU wants while the DMA runs
+            write8 0xFF46 0x80 b -- DMA source = 0x8000, the VRAM bus
+            advance 1 b
+            advance 4 b -- 4 bytes copied: genuinely partway through
+            wram <- read8 0xC000 b
+            wram `shouldBe` 0xAA
+
+        it "a VRAM-sourced DMA leaves echo RAM readable" $ do
+            -- The echo window is where the crash actually bit: mooneye runs test code at 0xFDFE.
+            b <- emptyBus
+            write8 0xFF40 0x00 b
+            write8 0xDDFE 0xCD b -- echo 0xFDFE mirrors 0xDDFE
+            write8 0xFF46 0x80 b
+            advance 1 b
+            advance 4 b
+            echo <- read8 0xFDFE b
+            echo `shouldBe` 0xCD
+
+        it "lets the CPU read back the address the DMA is currently sourcing" $ do
+            -- SameBoy exempts this explicitly ("Shortcut for DMA access flow"): the byte is on the
+            -- bus, so the CPU sees it rather than 0xFF.
+            b <- emptyBus
+            write8 0xC000 0x3C b
+            write8 0xFF46 0xC0 b
+            advance 1 b -- startup delay consumed; the DMA is about to source 0xC000
+            v <- read8 0xC000 b
+            v `shouldBe` 0x3C
+
+        it "moves the exempt address along with the transfer" $ do
+            -- Pins the index term in @cur = src + idx@. A page-aligned 160-byte transfer can never
+            -- cross a bus boundary, so the index cannot change the bus classification; what it does
+            -- change is which address the source exemption applies to. Drop the term and the
+            -- exemption would stay stuck on 0xC000 for the whole transfer.
+            b <- emptyBus
+            write8 0xC000 0x11 b
+            write8 0xC005 0x22 b
+            write8 0xFF46 0xC0 b
+            advance 1 b -- startup delay consumed
+            advance 5 b -- 5 bytes copied, so the DMA is now sourcing 0xC005
+            atCursor <- read8 0xC005 b
+            behindCursor <- read8 0xC000 b
+            atCursor `shouldBe` 0x22 -- exempt: the byte is on the bus
+            behindCursor `shouldBe` 0xFF -- same bus, not the current source
+        it "a RAM-bus-sourced DMA leaves VRAM readable on CGB" $ do
+            b <- cgbBus
+            write8 0xFF40 0x00 b
+            write8 0x8000 0x77 b
+            write8 0xFF46 0xC0 b -- DMA source = 0xC000, which is its own bus on CGB
+            advance 1 b
+            advance 4 b
+            vram <- read8 0x8000 b
+            vram `shouldBe` 0x77 -- RAM bus and VRAM bus are distinct on CGB
+        it "a ROM-sourced DMA still blocks WRAM on CGB" $ do
+            -- The converse, and the only cover for the @cgb && addr >= 0xC000@ guard: CGB giving WRAM
+            -- its own bus does not make it readable while the DMA is on the main bus.
+            b <- cgbBus
+            write8 0xFF40 0x00 b
+            write8 0xC800 0x99 b
+            write8 0xFF46 0x00 b -- DMA source = 0x0000, the main bus
+            advance 1 b
+            advance 4 b
+            wram <- read8 0xC800 b
+            wram `shouldBe` 0xFF
+
+        {- OAM is not locked for the whole transfer. SameBoy blocks an OAM read while
+        @dma_current_dest != 0@, and @dest@ is the sentinel 0xFF on the trigger cycle, wraps to 0 on the
+        cycle before byte 0 lands, then counts up. So there is exactly one readable cycle, right before
+        the first byte is written. mooneye @acceptance/oam_dma_start@ measures it: without the window,
+        a ROM executing from OAM fetches 0xFF and derails into @RST 38h@.
+        -}
+        it "leaves OAM readable for the one cycle before the first byte lands" $ do
+            b <- emptyBus
+            write8 0xFF40 0x00 b -- LCD off, so the PPU does not gate OAM either
+            Ppu.write8 0xFE00 0x5A (Bus.busPpu b)
+            write8 0xFF46 0xC0 b
+            advance 1 b -- startup delay consumed; about to write byte 0
+            v <- read8 0xFE00 b
+            v `shouldBe` 0x5A
+
+        {- That readable cycle belongs to a fresh transfer only. Retriggering 0xFF46 while a
+        transfer is running leaves the old one holding the bus through the new one's warm-up, so
+        OAM never opens. mooneye @acceptance/oam_dma_start@ runs both cases back to back and
+        separates them by executing out of OAM: the fresh one gets one @INC B@ in, the restarted
+        one gets none.
+        -}
+        it "keeps OAM blocked through the warm-up of a restarted transfer" $ do
+            b <- emptyBus
+            write8 0xFF40 0x00 b
+            Ppu.write8 0xFE00 0x5A (Bus.busPpu b)
+            write8 0xFF46 0xC0 b
+            advance 1 b -- first transfer: startup consumed
+            advance 1 b -- byte 0 landed, so it owns OAM
+            write8 0xFF46 0xC0 b -- restart on top of it
+            advance 1 b -- would be the readable cycle for a fresh transfer
+            v <- read8 0xFE00 b
+            v `shouldBe` 0xFF
+
+        it "blocks OAM again once the first byte has landed" $ do
+            b <- emptyBus
+            write8 0xFF40 0x00 b
+            Ppu.write8 0xFE00 0x5A (Bus.busPpu b)
+            write8 0xFF46 0xC0 b
+            advance 1 b -- startup
+            advance 1 b -- byte 0 copied, so the DMA now owns OAM
+            v <- read8 0xFE00 b
+            v `shouldBe` 0xFF
+
+        it "blocks OAM on the trigger cycle, before the startup delay elapses" $ do
+            b <- emptyBus
+            write8 0xFF40 0x00 b
+            Ppu.write8 0xFE00 0x5A (Bus.busPpu b)
+            write8 0xFF46 0xC0 b
+            v <- read8 0xFE00 b -- dest is still the 0xFF sentinel here
+            v `shouldBe` 0xFF
+
         it "blocks main-bus reads but lets I/O regs and HRAM through" $ do
             b <- emptyBus
             mapM_ (\i -> write8 (0xC000 + fromIntegral i) 0xAA b) [0 .. 0x9F :: Int]
+            write8 0xD000 0xAA b
             write8 0xFF80 0x55 b -- HRAM stays accessible
             write8 0xFF46 0xC0 b
             advance 4 b -- Partway through
-            wramR <- read8 0xC000 b
+            -- Probe 0xD000 rather than 0xC000: on DMG both are the main bus, but 0xC000 is the
+            -- address this DMA is currently sourcing, and hardware lets the CPU read that one back
+            -- off the bus (see the source-address exemption test below). Probing it conflated
+            -- "the main bus is busy" with "the DMA's own source is unreadable".
+            wramR <- read8 0xD000 b
             hramR <- read8 0xFF80 b
             -- FF46 lives in the I/O register page, so it stays readable during DMA and reflects the
             -- last-written source byte.

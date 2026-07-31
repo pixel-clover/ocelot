@@ -1,3 +1,8 @@
+-- BangPatterns is stated rather than inherited. `make tools` builds these files with a
+-- bare `stack ghc`, whose default language is GHC2021 and so already enables it, but the
+-- cabal components all use Haskell2010, and fourmolu reads no cabal file for this
+-- directory. Without the pragma `make format` cannot parse the `drive` worker below.
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 {- | Per-instruction CPU trace, format-matched with @sameboy-trace@, for finding the first
@@ -10,32 +15,37 @@ instruction at which Ocelot and SameBoy diverge on a given ROM:
 
 Output line format (matches sameboy-trace.c):
 
-> pc=XXXX af=XXXX bc=XXXX de=XXXX hl=XXXX sp=XXXX if=XX ie=XX ly=XXX lcdc=XX
+> pc=XXXX af=XXXX bc=XXXX de=XXXX hl=XXXX sp=XXXX if=XX ie=XX ly=XXX lcdc=XX stat=XX cyc=XXXXXXXXXX
 
 One line per CPU instruction. Trace starts at the cart entry point (PC=0x100, post-boot CGB register state)
 and emits the requested number of lines.
+
+@cyc@ is CPU-relative T-cycles elapsed since the cart entry point, sampled at the start of the
+instruction on the same line. 'cpuCycles' counts CPU M-cycles and is not halved in CGB
+double-speed mode, which matches SameBoy's @debugger_ticks@, so the column is comparable in both
+speed modes.
 -}
 module Main (main) where
 
 import Data.Bits (shiftL, (.|.))
 import qualified Data.ByteString as BS
 import Data.IORef (readIORef)
-import Data.Word (Word16, Word8)
+import Data.Word (Word16, Word64, Word8)
 import qualified Ocelot.Bus as Bus
 import qualified Ocelot.Cartridge as Cartridge
 import Ocelot.Cpu.Execute (step)
-import Ocelot.Cpu.Registers
-    ( regA
-    , regB
-    , regC
-    , regD
-    , regE
-    , regF
-    , regH
-    , regL
-    , regPC
-    , regSP
-    )
+import Ocelot.Cpu.Registers (
+    regA,
+    regB,
+    regC,
+    regD,
+    regE,
+    regF,
+    regH,
+    regL,
+    regPC,
+    regSP,
+ )
 import Ocelot.Cpu.State (CpuState (..))
 import Ocelot.Machine (Machine (..), machineFromCartridgeWithBoot)
 import System.Environment (getArgs)
@@ -64,34 +74,46 @@ main = do
     -- This makes line numbers in the two traces align 1:1 even though Ocelot's `step` returns one
     -- halt-tick at a time. Skip the boot stub instructions entirely; only start emitting once PC
     -- reaches the cart entry at 0x100 (mirrors sameboy-trace's 'reached_cart' gate).
-    let drive !reached !left
+    --
+    -- 'origin' doubles as the reached-the-cart flag: @Just base@ carries the 'cpuCycles' value
+    -- latched at the cart entry point, so the emitted @cyc@ column is relative to hand-off and
+    -- boot-stub cycle accounting cannot offset it.
+    let drive !origin !left
             | left <= 0 = pure ()
             | otherwise = do
                 cpu <- readIORef (machineCpu m)
                 let pc = regPC (cpuRegs cpu)
-                let nowReached = reached || pc == 0x0100
+                    origin' = case origin of
+                        Just _ -> origin
+                        Nothing
+                            | pc == 0x0100 -> Just (cpuCycles cpu)
+                            | otherwise -> Nothing
                 if cpuHalted cpu
-                    then step m >> drive nowReached left
-                    else
-                        if nowReached
-                            then emit m >> step m >> drive nowReached (left - 1)
-                            else step m >> drive nowReached left
-    drive False n
+                    then step m >> drive origin' left
+                    else case origin' of
+                        Just base -> emit base m >> step m >> drive origin' (left - 1)
+                        Nothing -> step m >> drive origin' left
+    drive Nothing n
 
-emit :: Machine -> IO ()
-emit m = do
+-- | Emit one trace line. @base@ is the 'cpuCycles' value latched at the cart entry point.
+emit :: Word64 -> Machine -> IO ()
+emit base m = do
     cpu <- readIORef (machineCpu m)
     let r = cpuRegs cpu
         af = w16 (regA r) (regF r)
         bc = w16 (regB r) (regC r)
         de = w16 (regD r) (regE r)
         hl = w16 (regH r) (regL r)
+        -- 'cpuCycles' is in M-cycles; SameBoy's debugger_ticks is in T-cycles.
+        cyc = (cpuCycles cpu - base) * 4
     iflag <- Bus.read8 0xFF0F (machineBus m)
     ie <- Bus.read8 0xFFFF (machineBus m)
     ly <- Bus.read8 0xFF44 (machineBus m)
     lcdc <- Bus.read8 0xFF40 (machineBus m)
+    stat <- Bus.read8 0xFF41 (machineBus m)
+    nr52 <- Bus.read8 0xFF26 (machineBus m)
     printf
-        "pc=%04X af=%04X bc=%04X de=%04X hl=%04X sp=%04X if=%02X ie=%02X ly=%03d lcdc=%02X\n"
+        "pc=%04X af=%04X bc=%04X de=%04X hl=%04X sp=%04X if=%02X ie=%02X ly=%03d lcdc=%02X stat=%02X nr52=%02X cyc=%010d\n"
         (regPC r)
         af
         bc
@@ -102,6 +124,9 @@ emit m = do
         ie
         ly
         lcdc
+        stat
+        nr52
+        cyc
 
 w16 :: Word8 -> Word8 -> Word16
 w16 hi lo = (fromIntegral hi `shiftL` 8) .|. fromIntegral lo
