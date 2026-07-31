@@ -345,6 +345,8 @@ async function init() {
         if (ev.dataTransfer.files.length > 0) loadRom(ev.dataTransfer.files[0]);
     });
 
+    setUpBundledDemo();
+
     try {
         db = await openDB();
         await populateRecentRoms();
@@ -1107,6 +1109,78 @@ async function decompressIfNeeded(file) {
     if (!(file.name || "").toLowerCase().endsWith(".zip")) return file;
     const {unzipFirstRom} = await import("./zip.js");
     return unzipFirstRom(file);
+}
+
+/* A freely licensed game shipped alongside the emulator, so a first-time visitor has
+something to run without owning a ROM.
+
+Only games whose licence permits redistribution belong here; see web/games/README.md.
+The credit line is a licence condition of the CC BY 4.0 assets, not decoration, so it
+renders from this same table and cannot drift away from the ROM it describes. */
+const BUNDLED_DEMO = {
+    path: "games/tobudx.gb",
+    name: "Tobu Tobu Girl Deluxe.gb",
+    title: "Tobu Tobu Girl Deluxe",
+    author: "Tangram Games",
+    source: "https://github.com/SimonLarsen/tobutobugirl-dx",
+    licenceNote: "code MIT, assets CC BY 4.0",
+    licenceUrl: "https://creativecommons.org/licenses/by/4.0/"
+};
+
+/* Reveal the demo button only once the ROM is known to be fetchable.
+
+A HEAD request settles it without pulling 256 KiB on every page load, and a build that
+omitted the ROM then shows no button at all rather than one that fails when clicked. */
+async function setUpBundledDemo() {
+    const group = document.getElementById("demo-group");
+    const button = document.getElementById("btn-demo");
+    const credit = document.getElementById("demo-credit");
+    if (!group || !button || !credit) return;
+
+    try {
+        const probe = await fetch(BUNDLED_DEMO.path, {method: "HEAD"});
+        if (!probe.ok) return;
+    } catch {
+        return; // Offline, or served from a host that refuses HEAD. Stay hidden.
+    }
+
+    button.textContent = `Play ${BUNDLED_DEMO.title}`;
+    const link = (href, text) => {
+        const a = document.createElement("a");
+        a.href = href;
+        a.rel = "noopener noreferrer";
+        a.target = "_blank";
+        a.textContent = text;
+        return a;
+    };
+    credit.replaceChildren(
+        document.createTextNode(`${BUNDLED_DEMO.title} by ${BUNDLED_DEMO.author}, `),
+        link(BUNDLED_DEMO.licenceUrl, BUNDLED_DEMO.licenceNote),
+        document.createTextNode(", redistributed unmodified. "),
+        link(BUNDLED_DEMO.source, "Source")
+    );
+    group.style.display = "";
+
+    button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+            const response = await fetch(BUNDLED_DEMO.path);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const bytes = new Uint8Array(await response.arrayBuffer());
+            // loadRom only needs a name and arrayBuffer(), which is how the
+            // recent-ROMs path feeds it an IndexedDB entry too.
+            await loadRom({
+                name: BUNDLED_DEMO.name,
+                arrayBuffer: () => Promise.resolve(
+                    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+                )
+            });
+        } catch (err) {
+            showError(`Could not load ${BUNDLED_DEMO.title}: ${err.message || err}`);
+        } finally {
+            button.disabled = false;
+        }
+    });
 }
 
 async function loadRom(file) {

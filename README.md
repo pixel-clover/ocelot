@@ -177,6 +177,7 @@ Ocelot is licensed under the MIT License (see [LICENSE](LICENSE)).
     * [dmg-acid2](https://github.com/mattcurrie/dmg-acid2) and [cgb-acid2](https://github.com/mattcurrie/cgb-acid2)
     * [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono)
     * [SDL](https://github.com/libsdl-org/SDL)
+    * [Tobu Tobu Girl Deluxe](https://github.com/SimonLarsen/tobutobugirl-dx)
 
 #### Reference Implementations
 
