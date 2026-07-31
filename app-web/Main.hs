@@ -36,6 +36,7 @@ data SessionHandle = SessionHandle
     , shStateBuffer :: !(IORef (Ptr Word8, Int))
     , shSaveBuffer :: !(IORef (Ptr Word8, Int))
     , shDebugBuffer :: !(IORef (Ptr Word8, Int))
+    , shSerialBuffer :: !(IORef (Ptr Word8, Int))
     }
 
 data Runtime = Runtime
@@ -131,6 +132,7 @@ destroyHandle handle = do
     freeBufferRef (shStateBuffer handle)
     freeBufferRef (shSaveBuffer handle)
     freeBufferRef (shDebugBuffer handle)
+    freeBufferRef (shSerialBuffer handle)
 
 drainAudioIntoHandle :: SessionHandle -> IO ()
 drainAudioIntoHandle handle = do
@@ -169,6 +171,7 @@ makeHandle session = do
     stateBuffer <- newIORef (nullPtr, 0)
     saveBuffer <- newIORef (nullPtr, 0)
     debugBuffer <- newIORef (nullPtr, 0)
+    serialBuffer <- newIORef (nullPtr, 0)
     pure
         SessionHandle
             { shSession = session
@@ -181,6 +184,7 @@ makeHandle session = do
             , shStateBuffer = stateBuffer
             , shSaveBuffer = saveBuffer
             , shDebugBuffer = debugBuffer
+            , shSerialBuffer = serialBuffer
             }
 
 ocelot_alloc :: CSize -> IO (Ptr Word8)
@@ -386,6 +390,33 @@ ocelot_load_save sid ptr len = do
             Right () -> clearLastError >> pure 1
     pure (fromMaybe 0 result)
 
+{- | Take the bytes the guest wrote to the serial port since the last drain.
+Test ROMs report their verdict over serial, so this is what lets a host (or
+tools/wasm-cpu-check.mjs) read a blargg ROM's own pass or fail text.
+-}
+ocelot_drain_serial :: CInt -> IO CInt
+ocelot_drain_serial sid = do
+    result <- withSession sid $ \handle -> do
+        drained <- try (Web.drainSerialBytes (shSession handle)) :: IO (Either SomeException BS.ByteString)
+        case drained of
+            Left err -> setLastError (displayException err) >> pure 0
+            Right bytes -> replaceBuffer (shSerialBuffer handle) bytes >> clearLastError >> pure 1
+    pure (fromMaybe 0 result)
+
+ocelot_serial_ptr :: CInt -> IO (Ptr Word8)
+ocelot_serial_ptr sid = do
+    found <- lookupSession sid
+    case found of
+        Nothing -> pure nullPtr
+        Just handle -> fst <$> readIORef (shSerialBuffer handle)
+
+ocelot_serial_len :: CInt -> IO CSize
+ocelot_serial_len sid = do
+    found <- lookupSession sid
+    case found of
+        Nothing -> pure 0
+        Just handle -> fromIntegral . snd <$> readIORef (shSerialBuffer handle)
+
 ocelot_rom_title_ptr :: CInt -> IO (Ptr Word8)
 ocelot_rom_title_ptr sid = maybe nullPtr shTitlePtr <$> lookupSession sid
 
@@ -460,6 +491,9 @@ foreign export ccall ocelot_extract_save :: CInt -> IO CInt
 foreign export ccall ocelot_save_buffer_ptr :: CInt -> IO (Ptr Word8)
 foreign export ccall ocelot_save_buffer_len :: CInt -> IO CSize
 foreign export ccall ocelot_load_save :: CInt -> Ptr Word8 -> CSize -> IO CInt
+foreign export ccall ocelot_drain_serial :: CInt -> IO CInt
+foreign export ccall ocelot_serial_ptr :: CInt -> IO (Ptr Word8)
+foreign export ccall ocelot_serial_len :: CInt -> IO CSize
 foreign export ccall ocelot_rom_title_ptr :: CInt -> IO (Ptr Word8)
 foreign export ccall ocelot_rom_title_len :: CInt -> IO CSize
 foreign export ccall ocelot_cartridge_has_battery :: CInt -> IO CInt

@@ -23,6 +23,7 @@ module Ocelot.Web (
     drainAudioSamples,
     drainAudioSamplesVector,
     drainAudioSamplesInto,
+    drainSerialBytes,
     saveState,
     loadState,
     extractSaveData,
@@ -38,6 +39,7 @@ module Ocelot.Web (
 
 import Data.Bits (xor)
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Int (Int16)
@@ -204,6 +206,14 @@ drainAudioSamplesVector session =
 drainAudioSamplesInto :: Ptr Int16 -> Int -> WebSession -> IO Int
 drainAudioSamplesInto ptr capacity session =
     Bus.drainAudioSamplesInto ptr capacity (machineBus (wsMachine session))
+
+{- | Take the bytes the guest has written to the serial port since the last
+drain. Test ROMs use serial as their verdict channel, so this is what lets a
+host check a blargg ROM's own pass or fail text against the wasm build.
+-}
+drainSerialBytes :: WebSession -> IO ByteString
+drainSerialBytes session =
+    BS.pack <$> Bus.drainSerial (machineBus (wsMachine session))
 
 saveState :: WebSession -> IO ByteString
 saveState = Snapshot.save . wsMachine

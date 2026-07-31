@@ -31,7 +31,7 @@ dependencies:
   - containers >= 0.6 && < 0.8
   - githash >= 0.1 && < 0.2
   - text >= 1.2 && < 3
-  - time >= 1.11 && < 1.13
+  - time >= 1.11 && < 1.15
   - transformers >= 0.5 && < 0.7
   - vector >= 0.13 && < 0.14
 
@@ -53,6 +53,15 @@ library:
     - condition: flag(wasm-reactor)
       ghc-options:
         - -fexternal-interpreter
+    # The wasm code generator mis-lowers subword arithmetic that the Cmm
+    # sinking pass has folded into a compound expression: a Word8 add is not
+    # narrowed back to 8 bits, so INC (HL) wrapping 0xFF computed r = 256 and
+    # lost the Z flag (native builds are unaffected). Reproduced on the 9.6
+    # and 9.12 GHC wasm flavours; keep this until a fixed GHC ships and
+    # tools/wasm-cpu-check.mjs passes without it.
+    - condition: arch(wasm32)
+      ghc-options:
+        - -fno-cmm-sink
 
 executables:
   ocelot:
@@ -84,6 +93,10 @@ executables:
     dependencies:
       - ocelot
     when:
+      # See the library section: wasm subword-narrowing miscompilation.
+      - condition: arch(wasm32)
+        ghc-options:
+          - -fno-cmm-sink
       - condition: flag(wasm-reactor)
         ghc-options:
           - -no-hs-main
@@ -108,6 +121,9 @@ executables:
           - -optl-Wl,--export=ocelot_save_buffer_ptr
           - -optl-Wl,--export=ocelot_save_buffer_len
           - -optl-Wl,--export=ocelot_load_save
+          - -optl-Wl,--export=ocelot_drain_serial
+          - -optl-Wl,--export=ocelot_serial_ptr
+          - -optl-Wl,--export=ocelot_serial_len
           - -optl-Wl,--export=ocelot_rom_title_ptr
           - -optl-Wl,--export=ocelot_rom_title_len
           - -optl-Wl,--export=ocelot_cartridge_has_battery

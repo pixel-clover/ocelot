@@ -23,6 +23,11 @@ use, so any state divergence they surface is the same divergence production code
 - `blargg-run.hs` — runs a blargg test ROM and prints its serial text and `0xA000` result code verbatim. The golden suite reduces a blargg ROM to
   pass/fail, which discards the subtest number the ROM itself reports. See "Read the ROM's Own Verdict First" below.
 - `ocelot-trace.hs` and `sameboy-trace.c` — the two halves of the SameBoy differential tracer. See "Differential tracing" below.
+- `wasm-cpu-check.mjs` — runs blargg CPU test ROMs against a built `ocelot.wasm` under Node and reads each ROM's own verdict
+  from its serial output (the `cpu_instrs` carts declare no RAM, so serial is their only reporting channel). The stack test suite exercises the native build only, and the wasm build is a different compiler
+  backend: the GHC 9.6 wasm flavour shipped a CPU whose `INC (HL)` lost the Z flag on the `0xFF` wrap while every native test
+  stayed green. The web deploy workflow runs this check on the artifact before publishing. Usage:
+  `node tools/wasm-cpu-check.mjs dist/web/ocelot.wasm external/gb-test-roms/cpu_instrs/individual/*.gb`.
 
 ### Differential tracing against SameBoy
 

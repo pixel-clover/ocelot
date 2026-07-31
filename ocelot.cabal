@@ -71,12 +71,20 @@ library
     , containers >=0.6 && <0.8
     , githash ==0.1.*
     , text >=1.2 && <3
-    , time >=1.11 && <1.13
+    , time >=1.11 && <1.15
     , transformers >=0.5 && <0.7
     , vector ==0.13.*
   default-language: Haskell2010
   if flag(wasm-reactor)
     ghc-options: -fexternal-interpreter
+  if arch(wasm32)
+    -- The wasm code generator mis-lowers subword arithmetic that the Cmm
+    -- sinking pass has folded into a compound expression: a Word8 add is not
+    -- narrowed back to 8 bits, so INC (HL) wrapping 0xFF computed r = 256 and
+    -- lost the Z flag (native builds are unaffected). Reproduced on the 9.6
+    -- and 9.12 GHC wasm flavours; keep this until a fixed GHC ships and
+    -- tools/wasm-cpu-check.mjs passes without it.
+    ghc-options: -fno-cmm-sink
 
 executable ocelot
   main-is: Main.hs
@@ -93,7 +101,7 @@ executable ocelot
     , githash ==0.1.*
     , ocelot
     , text >=1.2 && <3
-    , time >=1.11 && <1.13
+    , time >=1.11 && <1.15
     , transformers >=0.5 && <0.7
     , vector ==0.13.*
   default-language: Haskell2010
@@ -124,12 +132,15 @@ executable ocelot-web
     , githash ==0.1.*
     , ocelot
     , text >=1.2 && <3
-    , time >=1.11 && <1.13
+    , time >=1.11 && <1.15
     , transformers >=0.5 && <0.7
     , vector ==0.13.*
   default-language: Haskell2010
   if flag(wasm-reactor)
-    ghc-options: -no-hs-main -optl-mexec-model=reactor -optl-Wl,--export=hs_init -optl-Wl,--export=ocelot_alloc -optl-Wl,--export=ocelot_free -optl-Wl,--export=ocelot_create -optl-Wl,--export=ocelot_destroy -optl-Wl,--export=ocelot_run_frame -optl-Wl,--export=ocelot_set_button -optl-Wl,--export=ocelot_framebuffer_ptr -optl-Wl,--export=ocelot_framebuffer_len -optl-Wl,--export=ocelot_audio_buffer_ptr -optl-Wl,--export=ocelot_audio_buffer_len -optl-Wl,--export=ocelot_clear_audio_buffer -optl-Wl,--export=ocelot_save_state -optl-Wl,--export=ocelot_save_state_ptr -optl-Wl,--export=ocelot_save_state_len -optl-Wl,--export=ocelot_load_state -optl-Wl,--export=ocelot_extract_save -optl-Wl,--export=ocelot_save_buffer_ptr -optl-Wl,--export=ocelot_save_buffer_len -optl-Wl,--export=ocelot_load_save -optl-Wl,--export=ocelot_rom_title_ptr -optl-Wl,--export=ocelot_rom_title_len -optl-Wl,--export=ocelot_cartridge_has_battery -optl-Wl,--export=ocelot_is_cgb -optl-Wl,--export=ocelot_version_ptr -optl-Wl,--export=ocelot_version_len -optl-Wl,--export=ocelot_snapshot_version -optl-Wl,--export=ocelot_last_error_ptr -optl-Wl,--export=ocelot_last_error_len -optl-Wl,--export=ocelot_stalled_frames -optl-Wl,--export=ocelot_stall_threshold -optl-Wl,--export=ocelot_debug_state -optl-Wl,--export=ocelot_debug_state_ptr -optl-Wl,--export=ocelot_debug_state_len -optl-Wl,--export=ocelot_framebuffer_width -optl-Wl,--export=ocelot_framebuffer_height -optl-Wl,--export=ocelot_audio_sample_rate -optl-Wl,--export=ocelot_button_up -optl-Wl,--export=ocelot_button_down -optl-Wl,--export=ocelot_button_left -optl-Wl,--export=ocelot_button_right -optl-Wl,--export=ocelot_button_a -optl-Wl,--export=ocelot_button_b -optl-Wl,--export=ocelot_button_start -optl-Wl,--export=ocelot_button_select
+    ghc-options: -no-hs-main -optl-mexec-model=reactor -optl-Wl,--export=hs_init -optl-Wl,--export=ocelot_alloc -optl-Wl,--export=ocelot_free -optl-Wl,--export=ocelot_create -optl-Wl,--export=ocelot_destroy -optl-Wl,--export=ocelot_run_frame -optl-Wl,--export=ocelot_set_button -optl-Wl,--export=ocelot_framebuffer_ptr -optl-Wl,--export=ocelot_framebuffer_len -optl-Wl,--export=ocelot_audio_buffer_ptr -optl-Wl,--export=ocelot_audio_buffer_len -optl-Wl,--export=ocelot_clear_audio_buffer -optl-Wl,--export=ocelot_save_state -optl-Wl,--export=ocelot_save_state_ptr -optl-Wl,--export=ocelot_save_state_len -optl-Wl,--export=ocelot_load_state -optl-Wl,--export=ocelot_extract_save -optl-Wl,--export=ocelot_save_buffer_ptr -optl-Wl,--export=ocelot_save_buffer_len -optl-Wl,--export=ocelot_load_save -optl-Wl,--export=ocelot_drain_serial -optl-Wl,--export=ocelot_serial_ptr -optl-Wl,--export=ocelot_serial_len -optl-Wl,--export=ocelot_rom_title_ptr -optl-Wl,--export=ocelot_rom_title_len -optl-Wl,--export=ocelot_cartridge_has_battery -optl-Wl,--export=ocelot_is_cgb -optl-Wl,--export=ocelot_version_ptr -optl-Wl,--export=ocelot_version_len -optl-Wl,--export=ocelot_snapshot_version -optl-Wl,--export=ocelot_last_error_ptr -optl-Wl,--export=ocelot_last_error_len -optl-Wl,--export=ocelot_stalled_frames -optl-Wl,--export=ocelot_stall_threshold -optl-Wl,--export=ocelot_debug_state -optl-Wl,--export=ocelot_debug_state_ptr -optl-Wl,--export=ocelot_debug_state_len -optl-Wl,--export=ocelot_framebuffer_width -optl-Wl,--export=ocelot_framebuffer_height -optl-Wl,--export=ocelot_audio_sample_rate -optl-Wl,--export=ocelot_button_up -optl-Wl,--export=ocelot_button_down -optl-Wl,--export=ocelot_button_left -optl-Wl,--export=ocelot_button_right -optl-Wl,--export=ocelot_button_a -optl-Wl,--export=ocelot_button_b -optl-Wl,--export=ocelot_button_start -optl-Wl,--export=ocelot_button_select
+  if arch(wasm32)
+    -- See the library section: wasm subword-narrowing miscompilation.
+    ghc-options: -fno-cmm-sink
 
 test-suite ocelot-test
   type: exitcode-stdio-1.0
@@ -171,7 +182,7 @@ test-suite ocelot-test
     , hspec >=2.7 && <3
     , ocelot
     , text >=1.2 && <3
-    , time >=1.11 && <1.13
+    , time >=1.11 && <1.15
     , transformers >=0.5 && <0.7
     , vector ==0.13.*
   default-language: Haskell2010
