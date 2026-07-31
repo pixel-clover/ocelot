@@ -19,6 +19,12 @@ const SNAPSHOT_INTERVAL_FRAMES = 600;
 let snapCur = null;
 let snapPrev = null;
 let framesSinceSnapshot = 0;
+// Frames fully run since ROM load, and every button event as [frame, code, down].
+// Together with the rolling snapshot this makes a freeze replayable: resume from the
+// snapshot's frame and apply the same events at the same frame boundaries. Entries
+// older than the older snapshot are pruned at each rotation.
+let frameIndex = 0;
+let inputLog = [];
 let tickTimer = null;
 const bufferPool = [];
 const audioBufferPool = [];
@@ -333,6 +339,7 @@ function runFrame() {
         postMessage({type: "audio", buffer: audioBuf, samples: sampleCount, queryLevel}, [audioBuf]);
     }
 
+    frameIndex++;
     updateRollingSnapshot(e);
     checkStallWatchdog(e);
 
@@ -386,7 +393,8 @@ function updateRollingSnapshot(e) {
     const buf = captureState(e);
     if (buf) {
         snapPrev = snapCur;
-        snapCur = buf;
+        snapCur = {buf, frame: frameIndex};
+        if (snapPrev) inputLog = inputLog.filter((entry) => entry[0] >= snapPrev.frame);
     }
 }
 
@@ -410,17 +418,22 @@ function checkStallWatchdog(e) {
     // buffers are transferred, so the rolling pair is cleared; it rebuilds within two
     // snapshot intervals if the game recovers.
     const postState = captureState(e);
-    const preState = snapPrev || snapCur;
-    const preStateAgeFrames = preState
-        ? (snapPrev ? SNAPSHOT_INTERVAL_FRAMES + framesSinceSnapshot : framesSinceSnapshot) + stalled
-        : 0;
+    const snap = snapPrev || snapCur;
+    const preState = snap ? snap.buf : null;
+    const preStateAgeFrames = snap ? frameIndex - snap.frame : 0;
+    // Button events since the shipped snapshot, as frame offsets relative to it.
+    // Replaying them over the snapshot reproduces the freeze deterministically.
+    const inputs = snap
+        ? inputLog.filter((entry) => entry[0] >= snap.frame)
+              .map((entry) => [entry[0] - snap.frame, entry[1], entry[2]])
+        : [];
     snapCur = null;
     snapPrev = null;
     framesSinceSnapshot = 0;
     const transfers = [];
     if (preState) transfers.push(preState);
     if (postState) transfers.push(postState);
-    postMessage({type: "stallReport", frames: stalled, detail, preState, postState, preStateAgeFrames}, transfers);
+    postMessage({type: "stallReport", frames: stalled, detail, preState, postState, preStateAgeFrames, inputs}, transfers);
 }
 
 function workerTick() {
@@ -496,6 +509,8 @@ self.onmessage = function (ev) {
                 snapPrev = null;
                 framesSinceSnapshot = 0;
                 stallReported = false;
+                frameIndex = 0;
+                inputLog = [];
                 if (emu) {
                     wasm.instance.exports.ocelot_destroy(emu);
                     emu = 0;
@@ -549,6 +564,8 @@ self.onmessage = function (ev) {
                 snapPrev = null;
                 framesSinceSnapshot = 0;
                 stallReported = false;
+                frameIndex = 0;
+                inputLog = [];
                 if (emu) {
                     wasm.instance.exports.ocelot_destroy(emu);
                     emu = 0;
@@ -558,7 +575,12 @@ self.onmessage = function (ev) {
             }
 
             case "setButton":
-                if (emu) wasm.instance.exports.ocelot_set_button(emu, msg.button, msg.down ? 1 : 0);
+                if (emu) {
+                    // 'frameIndex' frames have fully run, so this event takes effect
+                    // before frame 'frameIndex' does; replay applies it at the same spot.
+                    inputLog.push([frameIndex, msg.button, msg.down ? 1 : 0]);
+                    wasm.instance.exports.ocelot_set_button(emu, msg.button, msg.down ? 1 : 0);
+                }
                 break;
 
             case "pause":
@@ -597,6 +619,12 @@ self.onmessage = function (ev) {
                     postMessage({type: "loadStateError", id, message: "No ROM loaded"});
                     return;
                 }
+                // A state load teleports the machine, so snapshots and input recorded
+                // before it can no longer replay into what follows.
+                snapCur = null;
+                snapPrev = null;
+                framesSinceSnapshot = 0;
+                inputLog = [];
                 const stateBytes = new Uint8Array(msg.buffer);
                 const ptr = wasmAlloc(stateBytes);
                 if (!ptr) {

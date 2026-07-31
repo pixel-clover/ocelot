@@ -30,8 +30,8 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (sortOn)
-import Data.Maybe (maybeToList)
 import qualified Data.Map.Strict as M
+import Data.Maybe (maybeToList)
 import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word16, Word32, Word64, Word8)
 import qualified Ocelot.Bus as Bus
@@ -120,7 +120,7 @@ splitmix64 x0 =
         x2 = (x1 `xor` (x1 `shiftR` 27)) * 0x94D049BB133111EB
      in x2 `xor` (x2 `shiftR` 31)
 
--- | The frame's input as a set, in either input mode.
+-- | The frame's input as a set, in either generated-input mode.
 inputAt :: Bool -> Int -> Int -> [Button]
 inputAt fuzz seed frame
     | fuzz = fuzzButtonsAt seed frame
@@ -138,23 +138,64 @@ applyInput m fuzz seed frame = do
     mapM_ (\btn -> Bus.setButton btn False (machineBus m)) (filter (`notElem` cur) prev)
     mapM_ (\btn -> Bus.setButton btn True (machineBus m)) cur
 
+{- | A recorded input log from the web frontend's freeze report.
+
+One event per line, @frame button down@: the frame offset relative to the pre-freeze
+state, the wasm button code, and 1 for press or 0 for release. The web Worker records
+every button event with the count of frames fully run, and this replays each event
+before the same frame runs, which is when the browser's message loop delivered it.
+-}
+parseInputLog :: String -> M.Map Int [(Button, Bool)]
+parseInputLog text =
+    M.fromListWith
+        (flip (++))
+        [ (frame, [(btn, down /= (0 :: Int))])
+        | l <- lines text
+        , not (null l)
+        , head l /= '#'
+        , [frameStr, codeStr, downStr] <- [words l]
+        , (frame, "") <- reads frameStr
+        , (code, "") <- reads codeStr
+        , (down, "") <- reads downStr
+        , Just btn <- [buttonFromCode code]
+        ]
+
+-- | The wasm export button numbering (see 'normalizeButton' in app-web/Main.hs).
+buttonFromCode :: Int -> Maybe Button
+buttonFromCode 0 = Just ButtonUp
+buttonFromCode 1 = Just ButtonDown
+buttonFromCode 2 = Just ButtonLeft
+buttonFromCode 3 = Just ButtonRight
+buttonFromCode 4 = Just ButtonA
+buttonFromCode 5 = Just ButtonB
+buttonFromCode 6 = Just ButtonStart
+buttonFromCode 7 = Just ButtonSelect
+buttonFromCode _ = Nothing
+
+applyReplayInput :: Machine -> M.Map Int [(Button, Bool)] -> Int -> IO ()
+applyReplayInput m log frame =
+    mapM_
+        (\(btn, down) -> Bus.setButton btn down (machineBus m))
+        (M.findWithDefault [] frame log)
+
 data WatchMode = NoWatch | WatchReset | WatchRunaway
 
 main :: IO ()
 main = do
     args <- getArgs
-    let parseFlags mode fuzz sp ("--watch-reset" : more) = parseFlags WatchReset fuzz sp more
-        parseFlags mode fuzz sp ("--watch-runaway" : more) = parseFlags WatchRunaway fuzz sp more
-        parseFlags mode _ sp ("--fuzz" : more) = parseFlags mode True sp more
-        parseFlags mode fuzz _ ("--state" : sp : more) = parseFlags mode fuzz (Just sp) more
-        parseFlags mode fuzz sp more = (mode, fuzz, sp, more)
-        (watchMode, fuzz, statePath, rest) = parseFlags NoWatch False Nothing args
+    let parseFlags mode fuzz sp rp ("--watch-reset" : more) = parseFlags WatchReset fuzz sp rp more
+        parseFlags mode fuzz sp rp ("--watch-runaway" : more) = parseFlags WatchRunaway fuzz sp rp more
+        parseFlags mode _ sp rp ("--fuzz" : more) = parseFlags mode True sp rp more
+        parseFlags mode fuzz _ rp ("--state" : sp : more) = parseFlags mode fuzz (Just sp) rp more
+        parseFlags mode fuzz sp _ ("--replay" : rp : more) = parseFlags mode fuzz sp (Just rp) more
+        parseFlags mode fuzz sp rp more = (mode, fuzz, sp, rp, more)
+        (watchMode, fuzz, statePath, replayPath, rest) = parseFlags NoWatch False Nothing Nothing args
     (path, frames, seed) <- case rest of
         [p] -> pure (p, 3600 :: Int, 0 :: Int)
         [p, n] -> pure (p, read n, 0)
         [p, n, sd] -> pure (p, read n, read sd)
         _ ->
-            putStrLn "usage: hang-probe [--watch-reset|--watch-runaway] [--fuzz] [--state FILE] <rom> [frames] [input-seed]"
+            putStrLn "usage: hang-probe [--watch-reset|--watch-runaway] [--fuzz] [--state FILE] [--replay FILE] <rom> [frames] [input-seed]"
                 >> exitFailure
     hSetBuffering stdout LineBuffering
     bytes <- BS.readFile path
@@ -174,10 +215,21 @@ main = do
                     case loadedState of
                         Left err -> putStrLn ("snapshot load failed: " <> show err) >> exitFailure
                         Right () -> printf "resumed from state %s (%d bytes)\n" sp (BS.length blob)
+            inputFn <- case replayPath of
+                Just rp -> do
+                    recorded <- parseInputLog <$> readFile rp
+                    printf "replaying %d input events from %s\n" (sum (map length (M.elems recorded))) rp
+                    pure (applyReplayInput m recorded)
+                Nothing -> pure (applyInput m fuzz seed)
+            -- Boot legitimately passes through the entry point, so traps skip the first
+            -- frames; resuming from a mid-game state has no boot to skip.
+            let settle = case statePath of
+                    Just _ -> 0
+                    Nothing -> settleFrames
             case watchMode of
-                NoWatch -> run m frames seed fuzz
-                WatchReset -> watchFor resetTrap m frames seed fuzz
-                WatchRunaway -> watchFor runawayTrap m frames seed fuzz
+                NoWatch -> run m frames seed inputFn
+                WatchReset -> watchFor resetTrap settle m frames seed inputFn
+                WatchRunaway -> watchFor runawayTrap settle m frames seed inputFn
 
 {- | Step instruction by instruction watching for the game restarting.
 
@@ -227,8 +279,8 @@ runawayTrap pc sp
     | pc >= 0xFE00 && pc < 0xFF80 = Just "executing OAM or the IO window"
     | otherwise = Nothing
 
-watchFor :: (Word16 -> Word16 -> Maybe String) -> Machine -> Int -> Int -> Bool -> IO ()
-watchFor trap m frames seed fuzz = do
+watchFor :: (Word16 -> Word16 -> Maybe String) -> Int -> Machine -> Int -> Int -> (Int -> IO ()) -> IO ()
+watchFor trap settle m frames seed inputFn = do
     trail <- MV.replicate trailLength 0
     slot <- newIORef (0 :: Int)
     let remember !pc = do
@@ -243,7 +295,7 @@ watchFor trap m frames seed fuzz = do
         frameLoop !frame
             | frame >= frames = putStrLn "no trap fired"
             | otherwise = do
-                applyInput m fuzz seed frame
+                inputFn frame
                 cap <- (+ 32) <$> Bus.cpuMCyclesPerLcdFrame (machineBus m)
                 trapped <- instrLoop frame 0 cap
                 if trapped then pure () else frameLoop (frame + 1)
@@ -258,7 +310,7 @@ watchFor trap m frames seed fuzz = do
                     sp = regSP (cpuRegs cpu)
                     used' = used + fromIntegral (cpuCycles cpu - c0)
                 remember pc
-                case if frame > settleFrames then trap pc sp else Nothing of
+                case if frame > settle then trap pc sp else Nothing of
                     Just reason -> do
                         printf "TRAP at frame %d: pc=%04X sp=%04X (%s)\n" frame pc sp reason
                         pcs <- recent
@@ -271,8 +323,8 @@ watchFor trap m frames seed fuzz = do
                         if ready then pure False else instrLoop frame used' cap
     frameLoop 0
 
-run :: Machine -> Int -> Int -> Bool -> IO ()
-run m frames seed fuzz = do
+run :: Machine -> Int -> Int -> (Int -> IO ()) -> IO ()
+run m frames seed inputFn = do
     lastHash <- newIORef (0 :: Word32)
     sameFor <- newIORef (0 :: Int)
     stallAt <- newIORef (Nothing :: Maybe Int)
@@ -281,7 +333,7 @@ run m frames seed fuzz = do
     let go !i
             | i >= frames = pure Nothing
             | otherwise = do
-                applyInput m fuzz seed i
+                inputFn i
                 cap <- (+ 32) <$> Bus.cpuMCyclesPerLcdFrame (machineBus m)
                 r <- try (runUntilFrame cap m) :: IO (Either SomeException Int)
                 case r of

@@ -283,10 +283,21 @@ grep -l TRAP /tmp/probe-*.log
 #### Turning a Browser Freeze into a Reproduction
 
 Scripted input cannot reach everywhere a person playing well can, so the web frontend captures its own reproduction artifacts.
-The Worker keeps a rolling save state, refreshed every ten seconds only while the picture is changing, and attaches both that
-pre-freeze state and the wedged state to the stall report. Running `ocelotStall()` in the browser console after a freeze
-downloads them; `hang-probe --state <pre-freeze file> --watch-runaway --fuzz` then searches for the crash from a starting point
-seconds before it, instead of from the title screen.
+The Worker keeps a rolling save state, refreshed every ten seconds only while the picture is changing, and records every
+button event with the number of frames run. The stall report carries the pre-freeze state, the wedged state, and the input
+log since the pre-freeze state. Clicking the Download Report button that appears after a freeze (or running `ocelotStall()`
+in the browser console) downloads all of them.
+
+The input log makes the freeze deterministic rather than merely nearby:
+
+```
+bin/tools/hang-probe --watch-runaway --state rom-pre-freeze.state --replay rom-input-log.txt rom.gb 2400
+```
+
+replays the exact session and the trap prints the program-counter trail of the corrupting routine. Replay fidelity holds
+because the browser Worker only applies button changes between frames, which is also when the replay applies them. Without
+the log, `--state` plus `--fuzz` searches from seconds before the crash instead of from the title screen, which is the
+fallback when the report came from an older build.
 
 ### Resolved: The VBlank IF Latch Was the Wrong Lever Entirely
 

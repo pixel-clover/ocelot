@@ -100,6 +100,12 @@ window.ocelotStall = function () {
         );
     }
     if (d.postState) downloadBlob(d.postState, `${stem}-at-freeze.state`);
+    if (d.inputs.length) {
+        // One event per line: frame offset from the pre-freeze state, the wasm button
+        // code, and 1 for press or 0 for release. hang-probe --replay consumes this.
+        const lines = d.inputs.map(([frame, code, down]) => `${frame} ${code} ${down}`);
+        downloadBlob("# frame button down\n" + lines.join("\n") + "\n", `${stem}-input-log.txt`);
+    }
     downloadBlob(`rom=${d.romName}\nframes=${d.frames}\n${d.detail}\n`, `${stem}-freeze-report.txt`);
     if (!d.preState && !d.postState) {
         console.log("[ocelot] the report carried no save states (older build?); detail:\n" + d.detail);
@@ -392,6 +398,7 @@ function onWorkerMessage(ev) {
                 preState: msg.preState || null,
                 postState: msg.postState || null,
                 preStateAgeFrames: msg.preStateAgeFrames || 0,
+                inputs: msg.inputs || [],
                 romName: currentRomName,
             };
             {
