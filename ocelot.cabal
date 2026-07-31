@@ -150,6 +150,7 @@ test-suite ocelot-test
       Ocelot.BootRomSpec
       Ocelot.BusSpec
       Ocelot.Cartridge.HeaderSpec
+      Ocelot.Cartridge.HuC1Spec
       Ocelot.Cartridge.Mbc1Spec
       Ocelot.Cartridge.Mbc3Spec
       Ocelot.Cartridge.Mbc5Spec

@@ -7,7 +7,17 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Vector.Unboxed as V
 import Data.Word (Word8)
-import Ocelot.Cartridge (Cartridge, loadRom, read8, resetMbc, write8)
+import Ocelot.Cartridge (
+    Cartridge,
+    dumpMbc,
+    extractRam,
+    loadMbc,
+    loadRam,
+    loadRom,
+    read8,
+    resetMbc,
+    write8,
+ )
 import Ocelot.Cartridge.Header (expectedHeaderChecksum)
 import Test.Hspec
 
@@ -121,6 +131,30 @@ spec = do
             write8 0x0000 0x0A c
             ram <- read8 0xA000 c
             ram `shouldBe` 0x42
+
+    describe "bank state through a snapshot" $ do
+        {- CartridgeSpec checks that a dumped blob decodes back to an identical blob
+        for every MBC variant. That alone would also pass if the blob were
+        self-consistent nonsense, so this pins the restored state to what the ROM
+        window actually reads. -}
+        it "restores the mapped ROM bank and the RAM enable into a fresh cartridge" $ do
+            c <- buildCart 4 1
+            write8 0x0000 0x0A c
+            write8 0x2000 0x03 c
+            write8 0xA000 0x42 c
+            blob <- dumpMbc c
+            ram <- extractRam c
+
+            c2 <- buildCart 4 1
+            beforeBank <- read8 0x4000 c2
+            beforeBank `shouldBe` 0x01
+            loadMbc blob c2
+            loadRam ram c2
+            bank <- read8 0x4000 c2
+            bank `shouldBe` 0x03
+            -- RAM stays reachable, so the enable latch came across too.
+            ramByte <- read8 0xA000 c2
+            ramByte `shouldBe` 0x42
 
     describe "RAM-banking mode" $ do
         it "in RAM mode, writes to 0x4000 select the RAM bank" $ do
