@@ -36,6 +36,7 @@ COPY --from=build /src/ocelot.wasm /usr/share/nginx/html/
 
 RUN find /usr/share/nginx/html -type f \( \
         -name "*.wasm" -o -name "*.js" -o -name "*.html" -o -name "*.ttf" \
+        -o -name "*.gb" -o -name "*.gbc" \
     \) -exec gzip -9 -k -f {} \;
 
 RUN printf '%s\n' \
