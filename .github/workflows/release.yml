@@ -117,22 +117,29 @@ jobs:
             mingw-w64-x86_64-pkg-config
           # Expose pkg-config.exe to subsequent steps (Cabal configure looks for it in PATH)
           stack exec -- sh -c 'cygpath -w /mingw64/bin' >> "$GITHUB_PATH"
-          # MSYS2's libSDL2main.a is built with GCC -fstack-protector, which
-          # references __stack_chk_fail/__stack_chk_guard from libssp. GHC 9.6
-          # on Windows uses Clang/LLD with --rtlib=compiler-rt, which does not
-          # provide those symbols while Cabal builds the sdl2 package. Patch
-          # SDL2's pkg-config metadata so every Cabal link that uses SDL2main
-          # also links libssp after SDL2main, where LLD can resolve the symbols.
+          # MSYS2's libSDL2main.a is built with GCC -fstack-protector, so it
+          # references __stack_chk_fail and __stack_chk_guard. GHC 9.6 on Windows
+          # links with Clang/LLD, and adding a plain -lssp does not help: the first
+          # libssp.a on the search path is the one bundled inside the GHC tree, and
+          # that archive is an empty compatibility stub, so both symbols stay
+          # undefined. Build a uniquely named archive that defines them, and patch
+          # SDL2's pkg-config metadata so every Cabal link that pulls in SDL2main
+          # pulls the shim in as well.
           stack exec -- sh -c '
-            set -eu
+            set -eux
+            printf "%s\n" \
+              "#include <stdlib.h>" \
+              "void *__stack_chk_guard = (void *)0x00000aff0d0a0000ULL;" \
+              "void __stack_chk_fail(void) { abort(); }" > /tmp/ssp_shim.c
+            /mingw64/bin/gcc -c -fno-stack-protector /tmp/ssp_shim.c -o /tmp/ssp_shim.o
+            /mingw64/bin/ar rcs /mingw64/lib/libssp_shim.a /tmp/ssp_shim.o
+            /mingw64/bin/nm /mingw64/lib/libssp_shim.a | grep -q "T __stack_chk_fail"
             pc="$(/mingw64/bin/pkg-config --variable=pcfiledir sdl2)/sdl2.pc"
             cp "$pc" "$pc.bak"
-            if ! grep -q -- "-lssp" "$pc"; then
-              sed -i "s/-lSDL2main/-lSDL2main -lssp/g" "$pc"
+            if ! grep -q -- "-lssp_shim" "$pc"; then
+              sed -i "s/-lSDL2main/-lSDL2main -lssp_shim/g" "$pc"
             fi
             /mingw64/bin/pkg-config --libs sdl2
-            /mingw64/bin/ld.lld --verbose >/dev/null 2>&1 || true
-            test -f /mingw64/lib/libssp.a
           '
 
       - name: Build release binary

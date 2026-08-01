@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     jq \
     make \
+    python3 \
     unzip \
     xz-utils \
     zstd \
