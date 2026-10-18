@@ -127,11 +127,7 @@ jobs:
           # pulls the shim in as well.
           stack exec -- sh -c '
             set -eux
-            printf "%s\n" \
-              "#include <stdlib.h>" \
-              "void *__stack_chk_guard = (void *)0x00000aff0d0a0000ULL;" \
-              "void __stack_chk_fail(void) { abort(); }" > /tmp/ssp_shim.c
-            /mingw64/bin/gcc -c -fno-stack-protector /tmp/ssp_shim.c -o /tmp/ssp_shim.o
+            /mingw64/bin/gcc -c -fno-stack-protector tools/windows/ssp_shim.c -o /tmp/ssp_shim.o
             /mingw64/bin/ar rcs /mingw64/lib/libssp_shim.a /tmp/ssp_shim.o
             /mingw64/bin/nm /mingw64/lib/libssp_shim.a | grep -q "T __stack_chk_fail"
             pc="$(/mingw64/bin/pkg-config --variable=pcfiledir sdl2)/sdl2.pc"
