@@ -18,12 +18,14 @@ Format (all little-endian):
 > PPU window line   u32
 > PPU STAT edge     u8 prev-line + u8 pending-irq
 > PPU OPRI          u8
+> PPU LCD-on latch  u8
 > APU blob          1x length-prefixed
 > Bus WRAM/HRAM/IO  3x length-prefixed blobs
 > Bus IE            u8
 > Bus CGB block     u8 wbk + u8 key1
 > Bus HDMA block    u16 src + u16 dst + u32 len + 3x bool
 > Bus OAM DMA       u8 active + u8 starting + u8 restarting + u16 src + u8 index
+> Bus serial        u8 bits remaining
 > Cart RAM+RTC blob 1x length-prefixed (output of 'extractSave')
 > Cart MBC blob     1x length-prefixed (output of 'dumpMbc')
 
@@ -89,11 +91,14 @@ correct: its PPU section is a byte shorter.
 Version 10 adds the OAM-DMA restart latch to the bus section, one byte longer
 again, so a version 9 blob is rejected for the same reason.
 
+Version 11 uses the CPU padding byte for the HALT-bug latch and adds the
+serial transfer's remaining bit count to the bus section.
+
 Keep this history current. A section change without a bump is what produced the
 gap in the first place.
 -}
 currentVersion :: Word32
-currentVersion = 10
+currentVersion = 11
 
 ----------------------------------------------------------------------
 -- Save
@@ -145,7 +150,7 @@ encodeCpu c =
             <> Snap.putBool (cpuIme c)
             <> Snap.putBool (cpuEiDelay c)
             <> Snap.putBool (cpuHalted c)
-            <> Snap.putU8 0 -- pad
+            <> Snap.putBool (cpuHaltBug c)
             <> Snap.putI64 (fromIntegral (cpuCycles c))
 
 encodeTimer :: TimerState -> BB.Builder
@@ -261,6 +266,7 @@ busSnapshot b = do
     oamRestarting <- readIORef (Bus.busOamDmaRestarting b)
     oamSrc <- readIORef (Bus.busOamDmaSrc b)
     oamIndex <- readIORef (Bus.busOamDmaIndex b)
+    serialBitsLeft <- readIORef (Bus.busSerialBitsLeft b)
     pure $
         Snap.putBlob wram
             <> Snap.putBlob hram
@@ -280,6 +286,7 @@ busSnapshot b = do
             <> Snap.putBool oamRestarting
             <> Snap.putU16 oamSrc
             <> Snap.putU8 (fromIntegral oamIndex)
+            <> Snap.putU8 (fromIntegral serialBitsLeft)
 
 ioVectorBytes :: MV.IOVector Word8 -> IO ByteString
 ioVectorBytes v = do
@@ -297,9 +304,11 @@ load bs m
     | ver /= currentVersion = pure (Left (UnsupportedVersion ver))
     | otherwise = case Snap.runCursorChecked decodeSnapshot (BS.drop 8 bs) of
         Nothing -> pure (Left TruncatedBlob)
-        Just sd -> do
-            applySnapshot sd m
-            pure (Right ())
+        Just sd
+            | not (Apu.validStateBlob (sdApu sd)) -> pure (Left TruncatedBlob)
+            | otherwise -> do
+                applySnapshot sd m
+                pure (Right ())
   where
     ver = Snap.runCursor Snap.getU32 (BS.drop 4 bs)
 
@@ -342,6 +351,7 @@ data BusData = BusData
     , bdOamActive, bdOamStarting, bdOamRestarting :: !Bool
     , bdOamSrc :: !Word16
     , bdOamIndex :: !Int
+    , bdSerialBitsLeft :: !Int
     }
 
 decodeSnapshot :: Snap.Cursor SnapshotData
@@ -381,7 +391,7 @@ decodeCpu = do
     ime <- Snap.getBool
     ei <- Snap.getBool
     halted <- Snap.getBool
-    _pad <- Snap.getU8
+    haltBug <- Snap.getBool
     cycles <- Snap.getI64
     pure
         CpuState
@@ -401,7 +411,7 @@ decodeCpu = do
             , cpuIme = ime
             , cpuEiDelay = ei
             , cpuHalted = halted
-            , cpuHaltBug = False -- transient one-instruction latch
+            , cpuHaltBug = haltBug
             , cpuCycles = fromIntegral cycles
             }
 
@@ -513,6 +523,7 @@ decodeBus = do
     oamRestarting <- Snap.getBool
     oamSrc <- Snap.getU16
     oamIndex <- Snap.getU8
+    serialBitsLeft <- Snap.getU8
     pure
         BusData
             { bdWram = wram
@@ -532,6 +543,7 @@ decodeBus = do
             , bdOamRestarting = oamRestarting
             , bdOamSrc = oamSrc
             , bdOamIndex = fromIntegral oamIndex
+            , bdSerialBitsLeft = fromIntegral serialBitsLeft
             }
 
 applySnapshot :: SnapshotData -> Machine -> IO ()
@@ -597,6 +609,7 @@ applySnapshot sd m = do
     writeIORef (Bus.busOamDmaRestarting bus) (bdOamRestarting bd)
     writeIORef (Bus.busOamDmaSrc bus) (bdOamSrc bd)
     writeIORef (Bus.busOamDmaIndex bus) (bdOamIndex bd)
+    writeIORef (Bus.busSerialBitsLeft bus) (bdSerialBitsLeft bd)
     Cart.loadSave (sdCartRam sd) (Bus.busCart bus)
     Cart.loadMbc (sdCartMbc sd) (Bus.busCart bus)
 
