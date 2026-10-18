@@ -4,6 +4,8 @@ Diagnostic utilities for inspecting emulator state while debugging real-game com
 Not part of the shipped emulator binary; built only when explicitly requested via `make tools`
 (or invoked directly via `stack ghc --no-haddock-deps -- tools/<name>.hs -package ocelot`).
 
+The Windows release build uses `windows/ssp_shim.c` to supply the stack-protection symbols required by SDL2's startup library.
+
 These are headless, deterministic, and operate against the same `Ocelot.Bus`, `Ocelot.Cpu`, and `Ocelot.Ppu` modules the emulator and the test suite
 use, so any state divergence they surface is the same divergence production code paths would exhibit.
 
