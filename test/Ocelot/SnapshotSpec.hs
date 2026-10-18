@@ -4,6 +4,8 @@ module Ocelot.SnapshotSpec (spec) where
 
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Builder as BB
+import qualified Data.ByteString.Lazy as BL
 import Data.IORef (readIORef, writeIORef)
 import qualified Data.Vector.Unboxed.Mutable as MV
 import Data.Word (Word8)
@@ -17,6 +19,7 @@ import Ocelot.Machine (Machine (..), getCpuRegs, machineFromCartridge, mapCpuReg
 import qualified Ocelot.Machine
 import qualified Ocelot.Ppu as Ppu
 import qualified Ocelot.Snapshot as Snap
+import qualified Ocelot.Snapshot.Binary as Binary
 import Ocelot.Timer (TimerState (..))
 import Test.Hspec
 
@@ -61,6 +64,54 @@ mkMachine = do
 spec :: Spec
 spec = do
     describe "Snapshot.save / load" $ do
+        it "preserves the next instruction after a HALT-bug trigger" $ do
+            m <- mkMachine
+            let bus = machineBus m
+            mapCpuRegs (\r -> r{regPC = 0xC000}) m
+            Bus.write8 0xC000 0x76 bus -- HALT
+            Bus.write8 0xC001 0x3E bus -- LD A, d8
+            Bus.write8 0xC002 0x42 bus
+            Bus.write8 0xFFFF 1 bus
+            Bus.write8 0xFF0F 1 bus
+            step m
+            blob <- Snap.save m
+            step m
+            expected <- getCpuRegs m
+            regA expected `shouldBe` 0x3E
+            Snap.load blob m `shouldReturn` Right ()
+            step m
+            getCpuRegs m `shouldReturn` expected
+
+        it "restores a serial transfer that has since finished" $ do
+            m <- mkMachine
+            let bus = machineBus m
+            Bus.write8 0xFF01 0x55 bus
+            Bus.write8 0xFF02 0x81 bus
+            Bus.advance 256 bus
+            blob <- Snap.save m
+            Bus.advance 768 bus
+            Snap.load blob m `shouldReturn` Right ()
+            Bus.advance 767 bus
+            sc <- Bus.read8 0xFF02 bus
+            (sc .&. 0x80) `shouldBe` 0x80
+            Bus.advance 1 bus
+            Bus.read8 0xFF01 bus `shouldReturn` 0xFF
+            done <- Bus.read8 0xFF02 bus
+            (done .&. 0x80) `shouldBe` 0
+            irq <- Bus.read8 0xFF0F bus
+            (irq .&. 0x08) `shouldBe` 0x08
+
+        it "replaces a newer serial transfer with the saved idle state" $ do
+            m <- mkMachine
+            let bus = machineBus m
+            Bus.write8 0xFF0F 0 bus
+            blob <- Snap.save m
+            Bus.write8 0xFF02 0x81 bus
+            Snap.load blob m `shouldReturn` Right ()
+            Bus.advance 1024 bus
+            irq <- Bus.read8 0xFF0F bus
+            (irq .&. 0x08) `shouldBe` 0
+
         it "round-trips CPU registers and IME flag" $ do
             m <- mkMachine
             writeIORef
@@ -370,7 +421,34 @@ spec = do
             r <- Snap.load bumped m
             r `shouldBe` Left (Snap.UnsupportedVersion 99)
 
+        it "rejects version 10 snapshots without the HALT-bug and serial state" $ do
+            m <- mkMachine
+            blob <- Snap.save m
+            let old = BS.take 4 blob <> BS.pack [10, 0, 0, 0] <> BS.drop 8 blob
+            Snap.load old m `shouldReturn` Left (Snap.UnsupportedVersion 10)
+
     describe "truncated blobs" $ do
+        it "rejects malformed nested APU data without changing the machine" $ do
+            m <- mkMachine
+            blob <- Snap.save m
+            let apuOffset = Binary.runCursor apuBlobOffset blob
+                apu = Binary.runCursor Binary.getBlob (BS.drop apuOffset blob)
+                shortWave = BS.take (BS.length apu - 20) apu <> BS.pack [15, 0, 0, 0] <> BS.replicate 15 0
+                malformed = [BS.empty, BS.init apu, shortWave]
+            mapCpuRegs (\r -> r{regPC = 0xC000, regA = 0x5A}) m
+            Bus.write8 0xFF30 0xAB (machineBus m)
+            unchanged <- Snap.save m
+            mapM_
+                ( \payload -> do
+                    let replacement = BL.toStrict (BB.toLazyByteString (Binary.putBlob payload))
+                        bad = BS.take apuOffset blob <> replacement <> BS.drop (apuOffset + 4 + BS.length apu) blob
+                    Snap.load bad m `shouldReturn` Left Snap.TruncatedBlob
+                    Snap.save m `shouldReturn` unchanged
+                    Bus.read8 0xFF30 (machineBus m) `shouldReturn` 0xAB
+                )
+                malformed
+            step m
+
         -- Regression: 'applySnapshot' used to read every fixed-size section with
         -- unchecked 'BS.index'. Because the register records are lazy in their
         -- fields, the out-of-range reads became bottom thunks inside the live
@@ -422,3 +500,15 @@ cpuLen = 24
 timerLen = 8
 joyLen = 3
 ppuRegLen = 16
+
+apuBlobOffset :: Binary.Cursor Int
+apuBlobOffset = do
+    _ <- Binary.getFixed (8 + cpuLen + timerLen + joyLen + ppuRegLen)
+    _ <- Binary.getBlob
+    _ <- Binary.getBlob
+    _ <- Binary.getBlob
+    _ <- Binary.getFixed 3
+    _ <- Binary.getBlob
+    _ <- Binary.getBlob
+    _ <- Binary.getFixed 8
+    Binary.cursorBytes

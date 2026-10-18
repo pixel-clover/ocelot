@@ -3,6 +3,7 @@
 module Ocelot.ApuSpec (spec) where
 
 import Data.Bits ((.&.), (.|.))
+import qualified Data.ByteString as BS
 import Data.Maybe (catMaybes, fromMaybe)
 import qualified Data.Vector.Unboxed as V
 import Data.Word (Word16, Word8)
@@ -13,6 +14,23 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "snapshot validation" $ do
+        it "accepts a complete payload and leaves the APU unchanged on malformed input" $ do
+            apu <- initial
+            write8 0xFF30 0xAB apu
+            blob <- dumpState apu
+            validStateBlob blob `shouldBe` True
+            let shortWave = BS.take (BS.length blob - 20) blob <> BS.pack [15, 0, 0, 0] <> BS.replicate 15 0
+                wavePositionOffset = 35 + 2 * 23 + 8
+                badPosition = BS.take wavePositionOffset blob <> BS.singleton 32 <> BS.drop (wavePositionOffset + 1) blob
+            mapM_
+                ( \bad -> do
+                    validStateBlob bad `shouldBe` False
+                    loadState bad apu
+                    dumpState apu `shouldReturn` blob
+                )
+                [BS.empty, BS.init blob, shortWave, blob <> BS.singleton 0, badPosition]
+
     describe "default state" $ do
         it "NR52 reports power off, all channels off, with unused bits set (hardware power-on)" $ do
             apu <- initial

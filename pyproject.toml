@@ -3,8 +3,8 @@ name = "ocelot"
 version = "0.1.0"
 description = "The Python environment for the Ocelot emulator"
 
-requires-python = ">=3.10,<4.0"
+requires-python = ">=3.14,<4.0"
 dependencies = [
-    "pre-commit (>=4.2.0,<5.0.0)",
-    "pyyaml (>=6.0.1,<7.0.0)",
+    "pre-commit>=4.2.0",
+    "pyyaml>=6.0.1",
 ]

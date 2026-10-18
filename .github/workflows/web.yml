@@ -46,7 +46,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq unzip zstd
 
-      - name: Cache GHC wasm toolchain
+      - name: Cache GHC Wasm toolchain
         id: cache-wasm
         uses: actions/cache@v4
         with:

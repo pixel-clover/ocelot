@@ -47,9 +47,11 @@ module Ocelot.Apu (
     drainSamplesInto,
     sampleRate,
     dumpState,
+    validStateBlob,
     loadState,
 ) where
 
+import Control.Monad (guard)
 import Data.Bits (complement, shiftL, shiftR, testBit, xor, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -334,12 +336,26 @@ dumpState apu = do
     s <- readIORef (apuRef apu)
     pure (BL.toStrict (BB.toLazyByteString (encodeApu s)))
 
--- | Restore the APU from a 'dumpState' blob. The sample queue is cleared.
+-- | Check a snapshot payload before any subsystem's live state is changed.
+validStateBlob :: ByteString -> Bool
+validStateBlob bs = case decodeState bs of
+    Nothing -> False
+    Just _ -> True
+
+decodeState :: ByteString -> Maybe ApuInternal
+decodeState bs = do
+    (s, consumed) <- Snap.runCursorChecked ((,) <$> decodeApu <*> Snap.cursorBytes) bs
+    guard (consumed == BS.length bs && V.length (apuWaveRam s) == 16)
+    guard (wvPos (apuCh3 s) < 32)
+    pure s
+
+-- | Restore a valid 'dumpState' blob and clear the sample queue. Invalid blobs leave the APU unchanged.
 loadState :: ByteString -> ApuState -> IO ()
-loadState bs apu = do
-    let s = Snap.runCursor decodeApu bs
-    writeIORef (apuRef apu) s
-    clearSampleQueue (apuSamples apu)
+loadState bs apu = case decodeState bs of
+    Nothing -> pure ()
+    Just s -> do
+        writeIORef (apuRef apu) s
+        clearSampleQueue (apuSamples apu)
 
 newSampleQueue :: IO SampleQueue
 newSampleQueue = do
